@@ -32,6 +32,7 @@ LOGGER = logging.getLogger("cry3.prediction.worker")
 from .client import (
     BinancePredictionClient,
     PredictionAPIError,
+    PredictionReadTimestampError,
     PredictionClientError,
     available_balance_display,
     normalize_amount_in,
@@ -592,7 +593,7 @@ class PredictionWorker:
         config = StrategyConfig.for_profile(profile)
         if config.profile in {"regime_target6_v1", "regime_target6_1_v1"}:
             return config
-        if config.profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+        if config.profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
             return replace(config, max_buy_usdt=selected, max_market_buy_usdt=selected,
                            max_scale_in_attempts=0, max_hedge_attempts=0,
                            pnl_scale_in_enabled=False)
@@ -1102,7 +1103,7 @@ class PredictionWorker:
             "regime_target6_v1",
             "regime_target6_1_v1",
             "regime_target6_2_v1",
-            "fav_p3", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+            "fav_p3", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
             try:
                 self.strategy = PredictionStateMachine(
                     self._sized_strategy_config(
@@ -1160,7 +1161,7 @@ class PredictionWorker:
 
     @staticmethod
     def _selectable_strategy_profiles() -> set[str]:
-        return {"s3s5_pair_v1", "fav_only_v1", "fav_only_v2", "fav_only_v3", "fav_only_v4", "fav_p3", "c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+        return {"s3s5_pair_v1", "fav_only_v1", "fav_only_v2", "fav_only_v3", "fav_only_v4", "fav_p3", "c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
 
     async def _load_pending_strategy(self) -> str | None:
         getter = getattr(getattr(self, "repository", None), "get_runtime_config", None)
@@ -1182,7 +1183,7 @@ class PredictionWorker:
         hash before any signed endpoint can be reached.
         """
 
-        if selected in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+        if selected in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
             await self._activate_order_unit(Decimal("1"))
         config = self._sized_strategy_config(selected, self._selected_order_unit_usdt)
         previous = str(getattr(self, "_selected_strategy_profile", "") or "").strip().lower()
@@ -1585,6 +1586,8 @@ class PredictionWorker:
         self._rate_limiter.note_success()
         now = self._now_ms()
         self.heartbeat.last_api_ok_at_ms = now
+        if str(self.heartbeat.last_error or "").startswith("READ_TIMESTAMP_DEFERRED:"):
+            self.heartbeat.last_error = None
         return result
 
     @staticmethod
@@ -1841,7 +1844,7 @@ class PredictionWorker:
         await self.restore_order_unit()
         await self.restore_selected_strategy()
         result = self._status()
-        if self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+        if self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
             from src.gridbot.prediction.regime_lane import STATE_KEY
             result["regime_lane_risk"] = await self.repository.get_runtime_config(STATE_KEY, None)
         # Telegram status must use the durable loop cursor. The process-local
@@ -1873,12 +1876,12 @@ class PredictionWorker:
                 except Exception:
                     pass
             await self._attach_loop_risk_status(result, loop_id)
-            if loop_strategy in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+            if loop_strategy in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
                 from src.gridbot.prediction.regime_lane import STATE_KEY
                 regime_risk = await self.repository.get_runtime_config(STATE_KEY, None)
                 result["regime_lane_risk"] = regime_risk
                 result["order_unit_usdt"] = (str(self._selected_order_unit_usdt)
-                                             if loop_strategy in ("regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1') else "1")
+                                             if loop_strategy in ("regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1') else "1")
             if loop_strategy == "c180_favorite_hold_v1":
                 try:
                     gate_state = await self.repository.get_runtime_config(
@@ -3273,9 +3276,9 @@ class PredictionWorker:
         self._hard_stop_latched = self._hard_stop_latched or snapshot.hard_stop_latched
         snapshot.hard_stop_latched = self._hard_stop_latched
         loop = await self.repository.get_loop(self._loop_id) if self._loop_id else None
-        c180_risk = (self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+        c180_risk = (self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
                      and (not self._loop_id or (loop and
-                          str(loop.get("strategy_profile") or "").lower() in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+                          str(loop.get("strategy_profile") or "").lower() in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
                           and str(loop.get("mode") or "").upper() == "LIVE")))
         assessed = (replace(snapshot, daily_net_pnl=Decimal("0"),
                             loop_net_pnl=Decimal("0"), consecutive_losses=0,
@@ -3301,7 +3304,7 @@ class PredictionWorker:
             "buy_count": snapshot.buy_count,
             "hard_stop_latched": self._hard_stop_latched,
         }
-        if self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+        if self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
             from src.gridbot.prediction.regime_lane import STATE_KEY
             lane_risk = await self.repository.get_runtime_config(STATE_KEY, None)
             result["regime_lane_risk"] = lane_risk
@@ -3444,7 +3447,7 @@ class PredictionWorker:
         loop_id = str(row.get("loop_id") or "")
         loop = await self.repository.get_loop(loop_id) if loop_id else None
         if (not isinstance(loop, Mapping)
-                or loop.get("strategy_profile") not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+                or loop.get("strategy_profile") not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
                 or str(loop.get("mode") or "").upper() != "LIVE"):
             return row
         bridge = self._c180_bridge_for_worker(profile=loop.get("strategy_profile"))
@@ -3480,7 +3483,7 @@ class PredictionWorker:
         if isinstance(prior, Mapping) and str(prior.get("status", "")).upper() == "SETTLED":
             # Rebuild any C180 gate observation left incomplete by a crash
             # after the atomic finalizer committed and before the next line.
-            if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+            if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
                 await self._finalize_settlement_with_c180(campaign, prior)
             campaign.state = CampaignState.DONE
             return dict(prior)
@@ -4261,9 +4264,9 @@ class PredictionWorker:
 
     async def _check_loop_loss_guard(self) -> bool:
         """Stop admitting new markets when this loop reaches its loss cap."""
-        if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'} and self._loop_id:
+        if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'} and self._loop_id:
             loop = await self.repository.get_loop(self._loop_id)
-            if (loop and str(loop.get("strategy_profile") or "").lower() in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+            if (loop and str(loop.get("strategy_profile") or "").lower() in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
                     and str(loop.get("mode") or "").upper() == "LIVE"):
                 # The durable C180 20-run peak-MDD gate owns new BUY admission.
                 return False
@@ -4315,9 +4318,9 @@ class PredictionWorker:
 
     async def _check_adaptive_jump_stop(self) -> bool:
         """Soft-stop new entries after a fresh loss cluster or whipsaw loss."""
-        if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'} and self._loop_id:
+        if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'} and self._loop_id:
             loop = await self.repository.get_loop(self._loop_id)
-            if (loop and str(loop.get("strategy_profile") or "").lower() in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+            if (loop and str(loop.get("strategy_profile") or "").lower() in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
                     and str(loop.get("mode") or "").upper() == "LIVE"):
                 return False
 
@@ -4475,6 +4478,20 @@ class PredictionWorker:
                 if completed >= self._target_markets and not self._active_campaigns:
                     self._accept_new_markets = False
                 await self._persist_heartbeat()
+            except PredictionReadTimestampError as exc:
+                # Only the client's allowlisted signed GET paths can raise
+                # this type. Stop this tick before admission and recheck all
+                # risk/identity/depth gates after a bounded cooldown. Existing
+                # HS/unknown execution is never cleared by this read failure.
+                self.heartbeat.last_error = "READ_TIMESTAMP_DEFERRED: " + str(exc)
+                details = {"read_only": True, "recoverable": True, "path": exc.path,
+                           "attempts": exc.attempts, "timings": list(exc.timings), "at_ms": self._now_ms()}
+                await self.repository.record_risk_event(
+                    "READ_TIMESTAMP_DEFERRED", "WARN", str(exc), payload=details)
+                await self.repository.set_runtime_config("prediction_read_timestamp_deferred", details)
+                await self._persist_heartbeat()
+                await asyncio.sleep(5.0)
+                continue
             except PredictionRateLimitDeferred as exc:
                 # Local budget exhaustion is ordinary backpressure.  Defer
                 # the tick and keep reductions/hard-stop state intact; it is
@@ -5326,7 +5343,7 @@ class PredictionWorker:
         return None
 
     def _c180_bridge_for_worker(self, profile=None):
-        if (profile or self._selected_strategy_profile) in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+        if (profile or self._selected_strategy_profile) in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
             from src.gridbot.prediction.regime_worker_bridge import RegimeWorkerBridge
             bridge = getattr(self, "_regime_worker_bridge", None)
             if bridge is None or bridge.profile != (profile or self._selected_strategy_profile):
@@ -5393,7 +5410,7 @@ class PredictionWorker:
             return hold("outside execution window")
         if not self.live_capability:
             return hold("LIVE not armed")
-        regime_profile = self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+        regime_profile = self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
         ready = None
         if regime_profile:
             # Freeze the original T+124..126 signal before the wallet/network
@@ -5810,7 +5827,7 @@ class PredictionWorker:
                         await self._poll_order_terminal(campaign, intent, str(row["order_id"]), attempts=1)
                 elif intent.unknown:
                     await self.reconcile_intent_without_order_id(campaign, intent)
-                elif self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+                elif self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
                     await self._resolve_expired_c180_pre_submit(campaign, intent, row)
             # A known order is a durable per-campaign execution barrier.  If
             # the read-only history endpoint is temporarily unavailable, keep
@@ -5878,7 +5895,7 @@ class PredictionWorker:
                 self._settlement_attempt_at_ms.pop(campaign.campaign_id, None)
                 return True
             return False
-        if self._selected_strategy_profile not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'} and self._defer_pre_entry_quote_collection(campaign, now_ms=self._now_ms()):
+        if self._selected_strategy_profile not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'} and self._defer_pre_entry_quote_collection(campaign, now_ms=self._now_ms()):
             # The staged policy intentionally starts its first book sample
             # before the entry window, not at market creation.  This keeps
             # the leader-duration gate meaningful while preserving the
@@ -5886,7 +5903,7 @@ class PredictionWorker:
             return False
         try:
             quote = None
-            if self._selected_strategy_profile not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+            if self._selected_strategy_profile not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
                 if self._s3s5_profile_active():
                     quote = await self._s3s5_ws_quote_for_campaign(campaign)
                 if quote is None:
@@ -5903,7 +5920,7 @@ class PredictionWorker:
         # ``quote.observed_at_ms`` is the source timestamp, not the current
         # decision time.  Using it here made a quote look fresh forever and
         # allowed a rate-limit-deferred BUY to execute against an old book.
-        if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+        if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
             decision = await self._c180_decide(campaign, decision_now_ms)
         elif self._s3s5_profile_active():
             decision = await self._s3s5_pair_decide(campaign, quote, decision_now_ms)
@@ -7298,7 +7315,7 @@ class PredictionWorker:
         """
 
         now = self._now_ms()
-        if (self._selected_strategy_profile not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+        if (self._selected_strategy_profile not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
                 or now < campaign.market.end_time_ms
                 or row.get("order_id") or row.get("submission_at_ms") is not None
                 or row.get("ttl_deadline_ms") is not None
@@ -7524,7 +7541,7 @@ class PredictionWorker:
         campaign = Campaign(campaign_id, market)
         self._active_campaigns[campaign_id] = campaign
         await self.repository.save_campaign(campaign, loop_id=self._loop_id)
-        if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+        if self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
             bridge = self._c180_bridge_for_worker()
             if bridge is None or not self._loop_id:
                 self.heartbeat.last_error = "C180 bridge or loop unavailable"
@@ -7540,11 +7557,11 @@ class PredictionWorker:
 
     async def _handle_decision(self, campaign: Campaign, decision: StrategyDecision) -> None:
         from src.gridbot.prediction import r3_reversal_guard as r3guard
-        c180_buy = (self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+        c180_buy = (self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
                     and decision.action is ActionType.BUY_INITIAL)
         if c180_buy:
             bound_loop = await self.repository.get_loop(self._loop_id) if self._loop_id else None
-            if (not bound_loop or str(bound_loop.get("strategy_profile") or "").lower() not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}
+            if (not bound_loop or str(bound_loop.get("strategy_profile") or "").lower() not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}
                     or str(bound_loop.get("mode") or "").upper() != "LIVE"
                     or str(bound_loop.get("state") or "").upper() != "RUNNING"):
                 return
@@ -7557,9 +7574,9 @@ class PredictionWorker:
                     or campaign.pending_intent_id or campaign.pending_unknown
                     or not callable(has_buy) or await has_buy(campaign.campaign_id)):
                 return
-        if c180_buy and self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1'}:
+        if c180_buy and self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'}:
             if (bound_loop.get("strategy_profile") != self._selected_strategy_profile
-                    or (self._selected_strategy_profile not in ("regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1') and decision.amount != Decimal("1"))
+                    or (self._selected_strategy_profile not in ("regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1') and decision.amount != Decimal("1"))
                     or ready.signal.entry is None or ready.signal.entry.stake_usdt != decision.amount
                     or ready.execution is None
                     or decision.outcome.value != ready.signal.entry.side
@@ -7676,11 +7693,12 @@ class PredictionWorker:
         is_fav_baseline = (strategy_leg == "FAV" and decision.action is ActionType.BUY_INITIAL)
         is_sniper = (strategy_leg == "LATE_SNIPER" and decision.action is ActionType.BUY_INITIAL)
         if c180_buy:
-            strategy_leg = ("REGIME_T63B" if self._selected_strategy_profile == "regime_target6_3b_v1" else
+            strategy_leg = ("REGIME_T65" if self._selected_strategy_profile == "regime_target6_5_v1" else
+                            "REGIME_T63B" if self._selected_strategy_profile == "regime_target6_3b_v1" else
                             "REGIME_T63A" if self._selected_strategy_profile == "regime_target6_3a_v1" else
                             "REGIME_T63" if self._selected_strategy_profile == "regime_target6_3_v1" else "REGIME_T6" if self._selected_strategy_profile == "regime_target6_v1" else
                             "REGIME_T61" if self._selected_strategy_profile == "regime_target6_1_v1" else
-                            "REGIME_T62" if self._selected_strategy_profile in ("regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1') else "C180")
+                            "REGIME_T62" if self._selected_strategy_profile in ("regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1') else "C180")
         intent_id = (
             f"fav-base-{campaign.campaign_id}-{self._now_ms()}"
             if is_fav_baseline
@@ -8356,6 +8374,10 @@ class PredictionWorker:
             for _ in range(5):
                 try:
                     payload = await fetch_history(status=status, offset=offset)
+                except PredictionReadTimestampError:
+                    # Timestamp exhaustion is not an unsupported status filter.
+                    # Defer reconciliation without another fallback request.
+                    raise
                 except PredictionAPIError as exc:
                     if exc.status_code not in {400, 404, 500}:
                         raise

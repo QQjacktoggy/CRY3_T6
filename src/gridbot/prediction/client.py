@@ -23,6 +23,7 @@ import os
 from .rate_limit import SharedRequestBudget, SharedBudgetDeferred, REQUEST_PRIORITY, REQUEST_PREPAID
 import hmac
 import json
+import logging
 import random
 import time
 import urllib.error
@@ -40,6 +41,16 @@ USDT_WEI = Decimal("1000000000000000000")
 # are 1, 2 and 3 USDT; each client instance enforces its selected unit.
 ORDER_UNIT_USDT = Decimal("1")
 ALLOWED_ORDER_UNITS_USDT = frozenset({Decimal("1"), Decimal("2"), Decimal("3")})
+LOGGER = logging.getLogger("cry3.prediction.client")
+READ_TIMESTAMP_ATTEMPTS = 2
+READ_TIMESTAMP_RETRY_PATHS = frozenset(
+    PREDICTION_PREFIX + suffix for suffix in (
+        "/market/list", "/market/detail", "/order-book", "/order/list", "/order/history",
+        "/wallet/list", "/quota/limit/status", "/balance/payment-options", "/pnl/portfolio",
+        "/position/token", "/position/list", "/position/filter", "/pnl/query",
+        "/position/settled-history", "/redeem/status",
+    )
+)
 
 
 class PredictionClientError(RuntimeError):
@@ -57,6 +68,18 @@ class PredictionAPIError(PredictionClientError):
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+
+
+class PredictionReadTimestampError(PredictionAPIError):
+    """An explicitly read-only GET exhausted its bounded timestamp retries."""
+
+    def __init__(self, message: str, *, status_code: int, payload: Any,
+                 path: str, attempts: int, timings: list[dict[str, Any]]) -> None:
+        super().__init__(message, status_code=status_code, payload=payload)
+        self.path = path
+        self.attempts = attempts
+        # No URL, parameters, signature, API key or wallet data are retained.
+        self.timings = tuple(dict(item) for item in timings)
 
 
 @dataclass(frozen=True)
@@ -402,61 +425,78 @@ class BinancePredictionClient:
         signed: bool = True,
         raw_brackets: bool = False,
     ) -> Any:
-        pairs = _pairs(params)
-        if signed:
-            pairs.append(("timestamp", int(self.clock_ms())))
-            if self.recv_window is not None and not any(key == "recvWindow" for key, _ in pairs):
-                pairs.append(("recvWindow", self.recv_window))
-            signing_payload = _form_encode(pairs, raw_brackets=raw_brackets)
-            pairs.append(("signature", hmac_sha256_signature(self.api_secret, signing_payload)))
-            canonical = _form_encode(pairs, raw_brackets=raw_brackets)
-        else:
-            canonical = _form_encode(pairs, raw_brackets=raw_brackets)
-
-        url = f"{self.base_url}{path}"
+        base_pairs = _pairs(params)
+        if signed and not self.api_secret:
+            raise ValueError("api_secret is required for a signed Prediction request")
         upper_method = method.upper()
-        body: bytes | None = None
-        if upper_method == "GET":
-            if canonical:
-                url = f"{url}?{canonical}"
-        else:
-            body = canonical.encode("utf-8")
-
+        can_retry = signed and upper_method == "GET" and path in READ_TIMESTAMP_RETRY_PATHS
+        attempts = READ_TIMESTAMP_ATTEMPTS if can_retry else 1
         headers: MutableMapping[str, str] = {
-            "Accept": "application/json",
-            "User-Agent": "cry3-prediction/1.0",
+            "Accept": "application/json", "User-Agent": "cry3-prediction/1.0",
         }
         if self.api_key:
             headers["X-MBX-APIKEY"] = self.api_key
-        if body is not None:
+        if upper_method != "GET":
             headers["Content-Type"] = "application/x-www-form-urlencoded"
+        timings = []
+        for attempt in range(attempts):
+            # A prepaid execution bundle covers this original call only. A
+            # retry must reserve its own HTTP weight, and can be deferred.
+            self._before_http(use_prepaid=attempt == 0)
+            pairs = list(base_pairs)
+            signed_at = None
+            if signed:
+                signed_at = int(self.clock_ms())
+                pairs.append(("timestamp", signed_at))
+                if self.recv_window is not None and not any(key == "recvWindow" for key, _ in pairs):
+                    pairs.append(("recvWindow", self.recv_window))
+                canonical = _form_encode(pairs, raw_brackets=raw_brackets)
+                pairs.append(("signature", hmac_sha256_signature(self.api_secret, canonical)))
+            canonical = _form_encode(pairs, raw_brackets=raw_brackets)
+            url = f"{self.base_url}{path}"
+            body = None
+            if upper_method == "GET":
+                if canonical:
+                    url += "?" + canonical
+            else:
+                body = canonical.encode("utf-8")
+            sent_at = int(time.time() * 1000)
+            monotonic_start = time.monotonic_ns()
+            response = self.transport.request(upper_method, url, headers=headers, body=body, timeout=self.timeout)
+            received_at = int(time.time() * 1000)
+            timing = dict(attempt=attempt+1, signed_at_ms=signed_at, sent_at_ms=sent_at,
+                          received_at_ms=received_at, duration_ms=(time.monotonic_ns()-monotonic_start)//1_000_000)
+            self._after_http(response)
+            try:
+                payload = response.json()
+            except PredictionTransportError:
+                payload = response.body
+            failed = (not 200 <= int(response.status_code) < 300 or
+                      isinstance(payload, Mapping) and payload.get("code") not in (0, "0", None))
+            if not failed:
+                if attempt:
+                    LOGGER.info("prediction_read_timestamp_recovered path=%s attempt=%s signed_at_ms=%s sent_at_ms=%s received_at_ms=%s duration_ms=%s",
+                                path, attempt+1, signed_at, sent_at, received_at, timing["duration_ms"])
+                return payload
+            if (can_retry and int(response.status_code) in (200, 400)
+                    and isinstance(payload, Mapping) and str(payload.get("code")) == "-1021"):
+                timings.append(timing)
+                LOGGER.warning("prediction_read_timestamp_rejected path=%s attempt=%s signed_at_ms=%s sent_at_ms=%s received_at_ms=%s duration_ms=%s",
+                               path, attempt+1, signed_at, sent_at, received_at, timing["duration_ms"])
+                if attempt+1 < attempts:
+                    continue
+                raise PredictionReadTimestampError(self._error_message(payload, response.status_code),
+                    status_code=int(response.status_code), payload=payload, path=path,
+                    attempts=attempt+1, timings=timings)
+            raise PredictionAPIError(self._error_message(payload, response.status_code),
+                                     status_code=int(response.status_code), payload=payload)
+        raise AssertionError("timestamp attempt loop did not terminate")
 
-        self._before_http()
-        response = self.transport.request(upper_method, url, headers=headers, body=body, timeout=self.timeout)
-        self._after_http(response)
-        try:
-            payload = response.json()
-        except PredictionTransportError:
-            payload = response.body
-        if not 200 <= int(response.status_code) < 300:
-            raise PredictionAPIError(
-                self._error_message(payload, response.status_code),
-                status_code=int(response.status_code),
-                payload=payload,
-            )
-        if isinstance(payload, Mapping) and ("code" in payload and payload.get("code") not in (0, "0", None)):
-            raise PredictionAPIError(
-                self._error_message(payload, int(response.status_code)),
-                status_code=int(response.status_code),
-                payload=payload,
-            )
-        return payload
-
-    def _before_http(self):
+    def _before_http(self, *, use_prepaid=True):
         # Prediction catalog endpoints audited 2026-09-15 use IP weight 1.
         # Worker execution paths reserve the complete HTTP bundle beforehand.
         if self.request_budget:
-            allowed = (self.request_budget.can_send_prepaid() if REQUEST_PREPAID.get()
+            allowed = (self.request_budget.can_send_prepaid() if use_prepaid and REQUEST_PREPAID.get()
                        else self.request_budget.acquire(1, priority=REQUEST_PRIORITY.get()))
             if not allowed:
                 raise SharedBudgetDeferred(self.request_budget.health())
@@ -688,6 +728,9 @@ class BinancePredictionClient:
         # `_request` accepts mappings for ordinary calls.  Keeping this small
         # pair-specific path avoids losing the intentional nested-key order.
         ordered: list[tuple[str, Any]] = list(params)
+        if signed and not self.api_secret:
+            raise ValueError("api_secret is required for a signed Prediction request")
+        self._before_http()
         if signed:
             ordered.append(("timestamp", int(self.clock_ms())))
             if self.recv_window is not None and not any(key == "recvWindow" for key, _ in ordered):
@@ -704,7 +747,6 @@ class BinancePredictionClient:
         }
         if self.api_key:
             headers["X-MBX-APIKEY"] = self.api_key
-        self._before_http()
         response = self.transport.request(
             method.upper(),
             f"{self.base_url}{path}",
@@ -939,6 +981,7 @@ __all__ = [
     "USDT_WEI",
     "ORDER_UNIT_USDT",
     "PredictionAPIError",
+    "PredictionReadTimestampError",
     "PredictionClientError",
     "PredictionTransport",
     "PredictionTransportError",

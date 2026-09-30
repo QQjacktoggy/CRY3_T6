@@ -23,7 +23,7 @@ from .regime_lane import STATE_KEY, FINGERPRINT, risk_result
 PROFILE = "regime_target6_v1"
 TIER = "REGIME_T6"
 RISK_PROFILES = (PROFILE, "regime_target6_1_v1", "regime_target6_2_v1",
-                 "regime_target6_3_v1", "regime_target6_3a_v1", "regime_target6_3b_v1")
+                 "regime_target6_3_v1", "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1")
 TERMINAL_INTENTS = ("FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED")
 TERMINAL_ORDERS = ("FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED")
 NO_FILL_TERMINAL = frozenset(("CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED"))
@@ -94,7 +94,8 @@ class RegimeLiveLedger:
         self.repository = repository
         self.state_key = state_key
         self.profile = profile
-        self.tier = ("REGIME_T63B" if profile == "regime_target6_3b_v1" else
+        self.tier = ("REGIME_T65" if profile == "regime_target6_5_v1" else
+                     "REGIME_T63B" if profile == "regime_target6_3b_v1" else
                      "REGIME_T63A" if profile == "regime_target6_3a_v1" else
                      "REGIME_T63" if profile == "regime_target6_3_v1" else TIER if profile == PROFILE else
                      "REGIME_T62" if profile in ("regime_target6_2_v1", 'regime_target6_3_v1') else "REGIME_T61")
@@ -115,11 +116,11 @@ class RegimeLiveLedger:
                      "first_market_start_ms": start, "unit_usdt": "1",
                      "halt_reason": None}
         loops = await self._rows(conn,
-            "SELECT loop_id FROM prediction_loops WHERE strategy_profile IN (?,?,?,?,?,?) AND mode='LIVE'",
+            "SELECT loop_id FROM prediction_loops WHERE strategy_profile IN (?,?,?,?,?,?,?) AND mode='LIVE'",
             RISK_PROFILES)
         unknown = await self._row(conn,
             """SELECT 1 FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id
-               WHERE l.strategy_profile IN (?,?,?,?,?,?) AND l.mode='LIVE' AND
+               WHERE l.strategy_profile IN (?,?,?,?,?,?,?) AND l.mode='LIVE' AND
                (c.pending_unknown=1 OR EXISTS(SELECT 1 FROM prediction_order_intents i
                  WHERE i.campaign_id=c.campaign_id AND i.unknown=1)) LIMIT 1""", RISK_PROFILES)
         if unknown:
@@ -137,34 +138,38 @@ class RegimeLiveLedger:
                                       unresolved=unresolved, unknown=bool(unknown))
         if not complete:
             allowed, reason = False, state.get("halt_reason") or "lane_ledger_incomplete"
-        if self.profile == "regime_target6_3b_v1" and complete:
+        if self.profile in ("regime_target6_3b_v1", "regime_target6_5_v1") and complete:
             from .regime_t63b_risk import loop_drawdown
-            from .regime_t63b_lane import FINGERPRINT as T63B_FINGERPRINT
+            from .regime_t63b_lane import FINGERPRINT as guard_fingerprint
+            prefix = "t63b"
+            if self.profile == "regime_target6_5_v1":
+                from .regime_t65_lane import FINGERPRINT as guard_fingerprint
+                prefix = "t65"
 
             if own_snapshot is None:
-                allowed, reason = False, "t63b_loop_ledger_missing"
+                allowed, reason = False, f"{prefix}_loop_ledger_missing"
             else:
-                key = "regime_target6_3b_loop_risk:" + str(loop_id)
+                key = self.profile.removesuffix("_v1") + "_loop_risk:" + str(loop_id)
                 old = await self._row(conn,
                     "SELECT config_value_json FROM prediction_runtime_config WHERE config_key=?", (key,))
                 prior = json.loads(old["config_value_json"]) if old else {}
                 if prior and (prior.get("loop_id") != str(loop_id) or prior.get("version") != 1
-                              or prior.get("fingerprint") != T63B_FINGERPRINT
-                              or prior.get("halt_reason") not in (None, "t63b_loop_mdd_3.5")):
-                    allowed, reason = False, "t63b_loop_risk_state_invalid"
+                              or prior.get("fingerprint") != guard_fingerprint
+                              or prior.get("halt_reason") not in (None, f"{prefix}_loop_mdd_3.5")):
+                    allowed, reason = False, f"{prefix}_loop_risk_state_invalid"
                 else:
                     try:
                         peak, equity, dd, trigger = loop_drawdown(
                             own_snapshot.settlements, start_ms=start, now_ms=now)
                     except (ValueError, TypeError, ArithmeticError):
-                        allowed, reason = False, "t63b_loop_risk_unavailable"
+                        allowed, reason = False, f"{prefix}_loop_risk_unavailable"
                     else:
-                        latched = prior.get("halt_reason") == "t63b_loop_mdd_3.5" or trigger is not None
-                        guard = {"version": 1, "fingerprint": T63B_FINGERPRINT,
+                        latched = prior.get("halt_reason") == f"{prefix}_loop_mdd_3.5" or trigger is not None
+                        guard = {"version": 1, "fingerprint": guard_fingerprint,
                                  "loop_id": str(loop_id),
                                  "peak_1u": str(peak), "equity_1u": str(equity),
                                  "mdd_1u": str(dd), "limit_1u": "3.5",
-                                 "halt_reason": "t63b_loop_mdd_3.5" if latched else None,
+                                 "halt_reason": f"{prefix}_loop_mdd_3.5" if latched else None,
                                  "trigger_settlement_id": prior.get("trigger_settlement_id") or trigger,
                                  "last_checked_at_ms": now}
                         await conn.execute(
@@ -173,7 +178,7 @@ class RegimeLiveLedger:
                                config_value_json=excluded.config_value_json,updated_at_ms=excluded.updated_at_ms""",
                             (key, json.dumps(guard, sort_keys=True), now))
                         if latched:
-                            allowed, reason = False, "t63b_loop_mdd_3.5"
+                            allowed, reason = False, f"{prefix}_loop_mdd_3.5"
         state.update(loop_id=loop_id, last_checked_at_ms=now)
         await conn.execute(
             """INSERT INTO prediction_runtime_config(config_key,config_value_json,updated_at_ms)
@@ -625,7 +630,7 @@ class RegimeLiveLedger:
                 return C180ClaimResult(False, "wrong_c180_intent")
             unit = _unit(values[5])
             if self.profile not in ("regime_target6_2_v1", "regime_target6_3_v1",
-                                    "regime_target6_3a_v1", "regime_target6_3b_v1") and unit != 1:
+                                    "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1") and unit != 1:
                 return C180ClaimResult(False, "regime_requires_fixed_1_usdt")
             if values[1] != str(campaign_id) or values[0] in ("", "None"):
                 return C180ClaimResult(False, "intent_identity_mismatch")
