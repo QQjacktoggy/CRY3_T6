@@ -32,6 +32,7 @@ LOGGER = logging.getLogger("cry3.prediction.worker")
 from .client import (
     BinancePredictionClient,
     PredictionAPIError,
+    PredictionReadTimestampError,
     PredictionClientError,
     available_balance_display,
     normalize_amount_in,
@@ -1585,6 +1586,8 @@ class PredictionWorker:
         self._rate_limiter.note_success()
         now = self._now_ms()
         self.heartbeat.last_api_ok_at_ms = now
+        if str(self.heartbeat.last_error or "").startswith("READ_TIMESTAMP_DEFERRED:"):
+            self.heartbeat.last_error = None
         return result
 
     @staticmethod
@@ -4475,6 +4478,20 @@ class PredictionWorker:
                 if completed >= self._target_markets and not self._active_campaigns:
                     self._accept_new_markets = False
                 await self._persist_heartbeat()
+            except PredictionReadTimestampError as exc:
+                # Only the client's allowlisted signed GET paths can raise
+                # this type. Stop this tick before admission and recheck all
+                # risk/identity/depth gates after a bounded cooldown. Existing
+                # HS/unknown execution is never cleared by this read failure.
+                self.heartbeat.last_error = "READ_TIMESTAMP_DEFERRED: " + str(exc)
+                details = {"read_only": True, "recoverable": True, "path": exc.path,
+                           "attempts": exc.attempts, "timings": list(exc.timings), "at_ms": self._now_ms()}
+                await self.repository.record_risk_event(
+                    "READ_TIMESTAMP_DEFERRED", "WARN", str(exc), payload=details)
+                await self.repository.set_runtime_config("prediction_read_timestamp_deferred", details)
+                await self._persist_heartbeat()
+                await asyncio.sleep(5.0)
+                continue
             except PredictionRateLimitDeferred as exc:
                 # Local budget exhaustion is ordinary backpressure.  Defer
                 # the tick and keep reductions/hard-stop state intact; it is
@@ -8357,6 +8374,10 @@ class PredictionWorker:
             for _ in range(5):
                 try:
                     payload = await fetch_history(status=status, offset=offset)
+                except PredictionReadTimestampError:
+                    # Timestamp exhaustion is not an unsupported status filter.
+                    # Defer reconciliation without another fallback request.
+                    raise
                 except PredictionAPIError as exc:
                     if exc.status_code not in {400, 404, 500}:
                         raise
