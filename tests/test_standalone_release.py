@@ -20,7 +20,7 @@ def test_release_inventory_and_external_pin_enforced():
 
 
 def test_latest_t63_variants_are_selectable_and_configurable():
-    for profile in ("regime_target6_3a_v1", "regime_target6_3b_v1"):
+    for profile in ("regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1"):
         assert profile in PredictionWorker._selectable_strategy_profiles()
         assert StrategyConfig.for_profile(profile).profile == profile
 

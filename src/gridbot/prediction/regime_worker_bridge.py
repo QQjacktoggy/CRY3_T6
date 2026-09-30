@@ -22,6 +22,8 @@ from .regime_t63_lane import PROFILE as T63_PROFILE, FINGERPRINT as T63_FINGERPR
 from .regime_t63a_lane import PROFILE as T63A_PROFILE, FINGERPRINT as T63A_FINGERPRINT
 from .regime_t63b_lane import PROFILE as T63B_PROFILE, FINGERPRINT as T63B_FINGERPRINT
 
+from .regime_t65_lane import PROFILE as T65_PROFILE, FINGERPRINT as T65_FINGERPRINT
+
 class RegimeWorkerBridge:
     def __init__(self, repository, signal_db, exposure_checker=None, feature_db=DEFAULT_DB,
                  profile="regime_target6_v1"):
@@ -29,7 +31,8 @@ class RegimeWorkerBridge:
         self.signal_db = Path(signal_db)
         self.feature_db = Path(feature_db)
         self.profile = profile
-        self.decision_fingerprint = (T63B_FINGERPRINT if profile == T63B_PROFILE else
+        self.decision_fingerprint = (T65_FINGERPRINT if profile == T65_PROFILE else
+                                     T63B_FINGERPRINT if profile == T63B_PROFILE else
                                      T63A_FINGERPRINT if profile == T63A_PROFILE else
                                      T63_FINGERPRINT if profile == T63_PROFILE else T62_FINGERPRINT if profile == T62_PROFILE else
                                      T61_FINGERPRINT if profile == T61_PROFILE else FINGERPRINT)
@@ -38,7 +41,7 @@ class RegimeWorkerBridge:
 
     async def register_market(self, *, loop_id, market, now_ms, unit_usdt):
         if (unit_usdt not in (Decimal(1), Decimal(2), Decimal(3))
-                or (self.profile not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE) and unit_usdt != Decimal(1))):
+                or (self.profile not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE) and unit_usdt != Decimal(1))):
             return C180Ready(False, "regime_requires_fixed_1_usdt")
         try:
             rows = await self.repository._fetchall(
@@ -109,6 +112,10 @@ class RegimeWorkerBridge:
         return walk(snapshot["quote"][side]["ask_levels"], snapshot["fee_bps"], cap, amount)
 
     def check_signal(self, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
+        if self.profile == T65_PROFILE:
+            from .regime_t65_bridge import check_signal
+            return check_signal(self, market=market, unit_usdt=unit_usdt, at_ms=at_ms,
+                                last_seen_book_at_ms=last_seen_book_at_ms)
         if self.profile == T63B_PROFILE:
             from .regime_t63b_bridge import check_signal
             return check_signal(self, market=market, unit_usdt=unit_usdt, at_ms=at_ms,

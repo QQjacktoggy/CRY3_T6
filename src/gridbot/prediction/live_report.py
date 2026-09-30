@@ -16,7 +16,8 @@ T62_PROFILE = "regime_target6_2_v1"
 T63_PROFILE = "regime_target6_3_v1"
 T63A_PROFILE = "regime_target6_3a_v1"
 T63B_PROFILE = "regime_target6_3b_v1"
-RISK_PROFILES = (PROFILE, T61_PROFILE, T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE)
+T65_PROFILE = "regime_target6_5_v1"
+RISK_PROFILES = (PROFILE, T61_PROFILE, T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE)
 SLOT = 300000
 TZ = timezone(timedelta(hours=8))
 TERMINAL = {"FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED"}
@@ -59,7 +60,9 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
     """
     from .regime_t63a_lane import FINGERPRINT as T63A_FINGERPRINT
     from .regime_t63b_lane import FINGERPRINT as T63B_FINGERPRINT
-    fingerprint = T63B_FINGERPRINT if profile == T63B_PROFILE else T63A_FINGERPRINT
+    from .regime_t65_lane import FINGERPRINT as T65_FINGERPRINT
+    fingerprint = (T65_FINGERPRINT if profile == T65_PROFILE else
+                   T63B_FINGERPRINT if profile == T63B_PROFILE else T63A_FINGERPRINT)
 
     own = {int(c["start_time_ms"]): c["campaign_id"] for c in campaigns
            if c["loop_id"] == loop_id}
@@ -68,8 +71,14 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
         if row["status"] == "SETTLED":
             results[row["campaign_id"]].append(row["winner"])
     uri = (root/"prediction/data/regime-target6/features.sqlite3").resolve().as_uri()+"?mode=ro"
-    count = quoted = wins = losses = 0
+    count = quoted = wins = losses = flats = unobserved = pending = 0
+    quoted_starts = []
     pnl = Decimal(0)
+    official_winners = {}
+    if profile == T65_PROFILE:
+        with closing(sqlite3.connect((root/"prediction/data/prediction.sqlite3").resolve().as_uri()+"?mode=ro", uri=True)) as main:
+            official_winners = {r[0]: (r[1], r[2], r[3]) for r in main.execute(
+                "SELECT market_topic_id,market_id,start_time_ms,winner FROM prediction_shadow_observer_markets WHERE state='SETTLED'")}
     with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
@@ -84,33 +93,63 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
             shadow = decision.get(key)
             if shadow is None:
                 continue
+            if profile == T65_PROFILE and key in ("shadow_m4", "shadow_m6"):
+                observed = db.execute("SELECT payload FROM t65_shadow_quotes WHERE start=? AND branch=?",
+                                      (start, branch)).fetchone()
+                if observed:
+                    shadow = json.loads(observed[0])
+                    if (shadow.get('fingerprint') != fingerprint or shadow.get('market_start_ms') != start
+                            or shadow.get('market_topic') != decision.get('market_topic')
+                            or shadow.get('market_id') != decision.get('market_id')
+                            or shadow.get('unit_usdt') != decision.get('unit_usdt')):
+                        raise ValueError("shadow observation identity mismatch")
             if shadow.get("branch") != branch or shadow.get("fill_status") not in (
-                    "PAPER_QUOTE_ONLY", "NO_EXECUTABLE_INITIAL_QUOTE"):
+                    "PAPER_QUOTE_ONLY", "NO_EXECUTABLE_INITIAL_QUOTE", "AWAITING_SHADOW_WINDOW",
+                    "NO_EXECUTABLE_WINDOW_QUOTE", "UNOBSERVED_WINDOW"):
                 raise ValueError("invalid shadow candidate")
             side = shadow["candidate"]["side"]
             if side not in ("UP", "DOWN") or start not in own:
                 raise ValueError("shadow market identity unavailable")
             count += 1
-            if shadow["fill_status"] == "NO_EXECUTABLE_INITIAL_QUOTE":
+            if shadow["fill_status"] != "PAPER_QUOTE_ONLY":
                 if shadow.get("quote") is not None:
                     raise ValueError("invalid unquoted shadow")
+                unobserved += shadow["fill_status"] == "UNOBSERVED_WINDOW"
+                pending += shadow["fill_status"] == "AWAITING_SHADOW_WINDOW"
                 continue
+            if profile == T65_PROFILE and key in ("shadow_m4", "shadow_m6"):
+                at, book_at = int(shadow['quoted_at_ms']), int(shadow['book_at_ms'])
+                if not start+128000 <= book_at <= at <= start+134500 or at-book_at > 1000:
+                    raise ValueError("invalid shadow quote window")
             quote = shadow["quote"]
             cash, shares = _decimal(quote["cash"]), _decimal(quote["net_shares"])
             if not 0 < cash <= _decimal(decision["unit_usdt"]) or shares <= 0:
                 raise ValueError("invalid shadow quote")
             quoted += 1
+            quoted_starts.append(start)
             official = results[own[start]]
-            if len(official) != 1 or official[0] not in ("UP", "DOWN"):
+            if profile == T65_PROFILE:
+                observer = official_winners.get(decision['market_topic'])
+                if observer:
+                    if observer[0] != decision['market_id'] or observer[1] != start:
+                        raise ValueError("official shadow market identity mismatch")
+                    evidence = {w for w in official + [observer[2]] if w in ("UP", "DOWN", "DRAW")}
+                    if len(evidence) > 1:
+                        raise ValueError("conflicting official shadow outcomes")
+                    official = list(evidence)
+            if len(official) != 1 or official[0] not in ("UP", "DOWN", "DRAW"):
                 continue
-            won = official[0] == side
-            wins += won
-            losses += not won
-            pnl += shares-cash if won else -cash
-    known = wins+losses
+            net = (shares/2 if official[0] == 'DRAW' else shares if official[0] == side else Decimal(0))-cash
+            wins += net > 0
+            losses += net < 0
+            flats += net == 0
+            pnl += net
+    known = wins+losses+flats
     return {"candidates": count, "quoted": quoted, "unquoted": count-quoted,
             "known": known, "unknown": quoted-known,
-            "wins": wins, "losses": losses, "wr": f"{wins/known:.1%}" if known else "—",
+            "wins": wins, "losses": losses, "flats": flats, "unobserved": unobserved, "pending": pending,
+            "quoted_starts": tuple(quoted_starts),
+            "wr": f"{wins/(wins+losses):.1%}" if wins+losses else "—",
             "pnl": pnl}
 
 
@@ -168,24 +207,24 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
         rows = lambda sql, args=(): [dict(r) for r in conn.execute(sql,args)]
         slots = rows("SELECT * FROM prediction_regime_slots WHERE loop_id=? ORDER BY market_start_ms",(loop_id,))
         campaigns = rows("SELECT c.*,l.strategy_profile AS lane_profile FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id "
-                         "WHERE l.strategy_profile IN (?,?,?,?,?,?) AND l.mode='LIVE'",RISK_PROFILES)
+                         "WHERE l.strategy_profile IN (?,?,?,?,?,?,?) AND l.mode='LIVE'",RISK_PROFILES)
         claims = rows("SELECT q.*,i.status,i.order_id,i.unknown,i.submission_at_ms FROM prediction_regime_entry_claims q "
                       "JOIN prediction_loops l ON l.loop_id=q.loop_id LEFT JOIN prediction_order_intents i ON i.intent_id=q.intent_id "
-                      "WHERE l.strategy_profile IN (?,?,?,?,?,?) AND l.mode='LIVE'",RISK_PROFILES)
+                      "WHERE l.strategy_profile IN (?,?,?,?,?,?,?) AND l.mode='LIVE'",RISK_PROFILES)
         fills = rows("SELECT DISTINCT f.campaign_id FROM prediction_fills f JOIN prediction_campaigns c ON c.campaign_id=f.campaign_id "
-                     "JOIN prediction_loops l ON l.loop_id=c.loop_id WHERE l.strategy_profile IN (?,?,?,?,?,?) AND l.mode='LIVE' AND f.order_side='BUY'",RISK_PROFILES)
+                     "JOIN prediction_loops l ON l.loop_id=c.loop_id WHERE l.strategy_profile IN (?,?,?,?,?,?,?) AND l.mode='LIVE' AND f.order_side='BUY'",RISK_PROFILES)
         settlements = rows("SELECT p.*,o.net_pnl AS observed_net,o.known_at_ms FROM prediction_settlements p "
                            "JOIN prediction_campaigns c ON c.campaign_id=p.campaign_id JOIN prediction_loops l ON l.loop_id=c.loop_id "
                            "LEFT JOIN prediction_regime_settlement_observations o ON o.settlement_id=p.settlement_id AND o.campaign_id=p.campaign_id "
-                           "WHERE l.strategy_profile IN (?,?,?,?,?,?) AND l.mode='LIVE'",RISK_PROFILES)
+                           "WHERE l.strategy_profile IN (?,?,?,?,?,?,?) AND l.mode='LIVE'",RISK_PROFILES)
         unknown_rows = rows("SELECT DISTINCT c.campaign_id FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id "
-                            "WHERE l.strategy_profile IN (?,?,?,?,?,?) AND l.mode='LIVE' AND (c.pending_unknown=1 OR EXISTS "
+                            "WHERE l.strategy_profile IN (?,?,?,?,?,?,?) AND l.mode='LIVE' AND (c.pending_unknown=1 OR EXISTS "
                             "(SELECT 1 FROM prediction_order_intents i WHERE i.campaign_id=c.campaign_id AND i.unknown=1))",RISK_PROFILES)
         gate_row = conn.execute("SELECT config_value_json FROM prediction_runtime_config WHERE config_key='regime_target6_risk_v1'").fetchone()
         gate = json.loads(gate_row[0]) if gate_row else None
         loop_guard_row = conn.execute(
             "SELECT config_value_json FROM prediction_runtime_config WHERE config_key=?",
-            ("regime_target6_3b_loop_risk:" + loop_id,)).fetchone() if profile == T63B_PROFILE else None
+            (profile.removesuffix("_v1") + "_loop_risk:" + loop_id,)).fetchone() if profile in (T63B_PROFILE, T65_PROFILE) else None
         loop_guard = json.loads(loop_guard_row[0]) if loop_guard_row else None
         selected_rows = conn.execute(
             "SELECT config_key,config_value_json FROM prediction_runtime_config "
@@ -223,7 +262,7 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
             unit = _decimal(q[0]["unit_usdt"])
             if (pnl != _decimal(row["observed_net"]) or row["known_at_ms"] is None
                     or int(row["known_at_ms"]) > now or unit not in (1,2,3)
-                    or (campaign["lane_profile"] not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE) and unit != 1)):
+                    or (campaign["lane_profile"] not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE) and unit != 1)):
                 raise ValueError("unconfirmed observation")
         except (ValueError, TypeError, ArithmeticError):
             issues.add("官方與風控結算觀測待核對")
@@ -234,12 +273,14 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
     pending = fill_ids-known_ids
     current = [e for e in events if e["loop"] == loop_id]
     metric = _metrics(current)
+    elapsed_slots = sum(s['verified_at_ms'] is not None and int(s['market_start_ms'])+136000 <= now for s in slots)
     own_claims = [q for q in claims if q["loop_id"] == loop_id]
     submitted = sum(q["submission_at_ms"] is not None or q["order_id"] is not None for q in own_claims)
     inflight = sum(q["status"] is None or str(q["status"]).upper() not in TERMINAL or q["unknown"] for q in own_claims)
     current_pending = len(pending & current_ids)
     empty = sum(s["empty_attested_at_ms"] is not None for s in slots)
-    label = ("T6.3b Live Report｜B／補位Shadow＋整輪回撤" if profile == T63B_PROFILE else
+    label = ("T6.5 Live Report｜A／flat／M4／M6 Shadow" if profile == T65_PROFILE else
+             "T6.3b Live Report｜B／補位Shadow＋整輪回撤" if profile == T63B_PROFILE else
              "T6.3a Live Report｜T6.1補位Shadow" if profile == T63A_PROFILE else
              "T6.3 Live Report｜A分歧／B順勢／C淨跌" if profile == T63_PROFILE else "T6.2 Live Report｜價格護欄" if profile == T62_PROFILE else
              "T6.1 Live Report｜補位" if profile == T61_PROFILE else "T6 Live Report｜市況分流")
@@ -253,13 +294,18 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
              f"待結算/核對 {current_pending}｜未終結intent {inflight}｜未知訂單市場 {len(unknown_ids & current_ids)}｜已確認未成交 {empty}"]
     selected_lane = selected.get('prediction_selected_strategy')
     selected_unit = selected.get('prediction_selected_order_unit')
-    if profile in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE) and isinstance(selected_lane, dict) and isinstance(selected_unit, dict):
-        if selected_lane.get('profile') in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE):
+    if profile in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE) and isinstance(selected_lane, dict) and isinstance(selected_unit, dict):
+        if selected_lane.get('profile') in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE):
             unit = str(selected_unit.get('order_unit_usdt') or '')
             if unit in ('1', '2', '3'):
                 lines.append(f"目前選擇 T6.2／T6.3／T6.3a／T6.3b 每筆{unit} USDT；上方本輪成交金額依該輪實際claim，兩者可能不同。")
     if not slots:
         lines.append("等待第一個正式市場登錄；尚未開始排程區段。")
+    if profile == T65_PROFILE:
+        closed_fills = sum(cid in current_ids and int(cmap[cid]['start_time_ms'])+300000 <= now for cid in fill_ids)
+        completed = int(loop['completed'])
+        if completed:
+            lines.append(f"Live fill rate {closed_fills/completed:.1%}（{closed_fills}/{completed} 已完成市場）；Shadow報價不計入成交。")
 
     if profile == T62_PROFILE:
         lines.append("T6.2：flat 原模型入場上限0.60；保留T6.1補位，可選每筆1/2/3U。")
@@ -277,14 +323,28 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
             lines.append("Shadow僅為初始盤口反事實估算，沒有真實成交；未知結果不補零。")
         except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
             issues.add("補位Shadow紀錄無法核對")
-    if profile == T63B_PROFILE:
-        lines.append("T6.3b：T6/A/C可Live；B與T6.1補位保留紙上盤口，不送Live BUY，排除分支時整場跳過。")
-        for key, branch, title in (("shadow_b", "B_late_momentum", "B Shadow"),
-                                   ("shadow_fallback", "fallback", "補位Shadow")):
+    if profile in (T63B_PROFILE, T65_PROFILE):
+        if profile == T65_PROFILE:
+            lines.append("T6.5：A、flat/original、B與補位只做Shadow；保留其他T6/C Live，M4/M6於T+128–134.5秒只觀測新鮮可執行報價。")
+        else:
+            lines.append("T6.3b：T6/A/C可Live；B與T6.1補位保留紙上盤口，不送Live BUY，排除分支時整場跳過。")
+        branches = [("shadow_b", "B_late_momentum", "B Shadow"),
+                    ("shadow_fallback", "fallback", "補位Shadow")]
+        if profile == T65_PROFILE:
+            branches += [("shadow_a", "A_jev_conflict", "A Shadow"),
+                         ("shadow_flat", "T6", "flat/original Shadow"),
+                         ("shadow_m4", "M4_first_pullback", "M4 Shadow"),
+                         ("shadow_m6", "M6_neutral_cheap", "M6 Shadow")]
+        for key, branch, title in branches:
             try:
                 shadow = _shadow_metrics(root, loop_id, slots, campaigns, settlements,
-                                         profile=T63B_PROFILE, key=key, branch=branch)
-                lines.append(f"{title}：候選 {shadow['candidates']}｜有可執行初始報價 {shadow['quoted']}｜無報價 {shadow['unquoted']}｜官方勝方已知 {shadow['known']}｜未知 {shadow['unknown']}。")
+                                         profile=profile, key=key, branch=branch)
+                if profile == T65_PROFILE:
+                    ended_quotes = sum(start+136000 <= now for start in shadow['quoted_starts'])
+                    if elapsed_slots:
+                        lines.append(f"{title} 報價參與率 {ended_quotes/elapsed_slots:.1%}（{ended_quotes}/{elapsed_slots} 已過窗口市場）。")
+                    lines.append(f"觀測遺漏 {shadow['unobserved']}｜待觀測 {shadow['pending']}；報價不等於成交。")
+                lines.append(f"{title}：候選 {shadow['candidates']}｜有可執行報價 {shadow['quoted']}｜無報價 {shadow['unquoted']}｜官方勝方已知 {shadow['known']}｜未知 {shadow['unknown']}。")
                 if shadow['known']:
                     lines.append(f"{title} 已知WR {shadow['wr']}（{shadow['wins']}勝/{shadow['losses']}負）｜假設即時成交paper PnL {shadow['pnl']:+.4f} USDT。")
             except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
@@ -293,11 +353,11 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
             lines.append(f"整輪風控1U等值：高點 {loop_guard.get('peak_1u')}｜目前 {loop_guard.get('equity_1u')}｜最大回撤 {loop_guard.get('mdd_1u')} / 3.5｜停單 {loop_guard.get('halt_reason') or '未觸發'}。")
         else:
             lines.append("整輪回撤風控尚無可核對狀態；進場仍須通過即時檢查。")
-        lines.append("Shadow是假設初始盤口即時成交；沒有真實成交，未知結果不補零。")
+        lines.append("Shadow是假設記錄報價即時成交；沒有真實成交，未知結果不補零。")
     if profile == T61_PROFILE:
         lines.append("進場順序：T6 原規則優先；原規則跳過後才評估 T6.1，並共用固定1U停單鎖。")
         lines.append("9/25–9/27 回測為同樣本挑選，非前瞻成交率或獲利保證。")
-    lines += ["", "跨 loop 持久風控（Regime T6／T6.1 共用；T6.2／T6.3／T6.3a／T6.3b接續同一風控）："]
+    lines += ["", "跨 loop 持久風控（Regime T6／T6.1 共用；T6.2／T6.3／T6.3a／T6.3b／T6.5接續同一風控）："]
     if not isinstance(gate,dict):
         lines.append("風控尚未初始化；不推定為已通過或已解鎖。")
         if claims:

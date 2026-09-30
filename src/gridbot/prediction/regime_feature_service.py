@@ -22,6 +22,8 @@ def connect(path):
     db.execute("PRAGMA synchronous=FULL")
     db.execute("CREATE TABLE IF NOT EXISTS features(start INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS decisions(start INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS t65_shadow_quotes(start INTEGER NOT NULL, branch TEXT NOT NULL, "
+               "payload TEXT NOT NULL, PRIMARY KEY(start,branch))")
     db.execute("CREATE TABLE IF NOT EXISTS health(id INTEGER PRIMARY KEY, at_ms INTEGER, status TEXT)")
     db.commit()
     return db
@@ -52,6 +54,7 @@ def collect_once(db, start, *, clock=lambda: time.time_ns()//1000000, fetch=None
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default=DEFAULT_DB)
+    parser.add_argument("--signal-db", default="prediction/data/c180-favorite-live/signals.sqlite3")
     args = parser.parse_args()
     db = connect(args.db)
     try:
@@ -59,9 +62,15 @@ def main():
             now = time.time_ns()//1000000
             start = now//SLOT_MS*SLOT_MS
             status = collect_once(db, start)
+            if start+124000 <= now <= start+137000:
+                from .regime_t65_shadow import collect_once as observe_shadow
+                try:
+                    observe_shadow(db, start, args.signal_db, time.time_ns()//1000000)
+                except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                    status += ";t65_shadow_unavailable:" + type(exc).__name__
             with db:
                 db.execute("INSERT OR REPLACE INTO health VALUES(1,?,?)", (now, status))
-            time.sleep(0.25 if 119500 <= now-start <= 123000 else 1)
+            time.sleep(0.25 if 119500 <= now-start <= 137000 else 1)
     finally:
         db.close()
 
