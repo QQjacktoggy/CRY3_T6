@@ -5,7 +5,7 @@ import json
 import tarfile
 from pathlib import Path
 
-CHANGED = ('worker.py', 'strategy.py', 'telegram.py', 'repository.py', 'regime_feature_service.py',
+CHANGED = ('worker.py', 'strategy.py', 'telegram.py', 'repository.py', 'regime_feature_service.py', 'c180_signal_runtime.py',
            'regime_live_ledger.py', 'regime_worker_bridge.py', 'live_report.py', 'release.py',
            'regime_t65_lane.py', 'regime_t65_bridge.py', 'regime_t65_shadow.py')
 
