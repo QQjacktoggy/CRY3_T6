@@ -1,0 +1,26 @@
+[project]
+name = "cry3-t6"
+version = "6.3.0"
+description = "T6 family Prediction runtime imported from VM, including T6.3a and T6.3b"
+requires-python = ">=3.11"
+dependencies = ["aiohttp>=3.9", "aiosqlite>=0.20", "python-dotenv>=1.0", "python-telegram-bot>=21.0", "requests>=2.31", "websockets>=12", "tzdata>=2024.1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "scripts*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"src.gridbot.prediction" = ["migrations/*.sql"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = [".", "tests"]

@@ -1,0 +1,30 @@
+{
+  "files": {
+    "calibration.py": "1e95fdae69f99cfb31da1c2a9cdc753c43d99fcb9acbff904a9e823575213f4a",
+    "candidate_engine.py": "bf2b7e4e6dcdf97c7f92e73820d2039e6984fb21a8e1f75bcc9113132996785d",
+    "candidate_report.py": "b4e0a8f798b4c8227450239372a9d194a9481cca48b876b453acb3751688ad29",
+    "engine.py": "363a94907fd4a35a153acbe3f1e07e3ebcdafc9490f5dac0fd8a3fce43f53273",
+    "features.py": "4a8717a28751c9e467fed968131632d9b9eb3c9a8130ccd9b91d48803a8b59ac",
+    "frozen/jev/config.py": "1850793360ad0f1d4c502cb4ec17b2c631ca58d2d771883f277cb898594a2f91",
+    "frozen/jev/features.py": "0d7f2b6fe68e6ad149a6d7f00b846382da62b96399ba6d64b8f2d19b604d3f5f",
+    "frozen/jev/market.py": "4419963d88cb04ebb43f7e057024f255615f080b16d7d8cbeeca1479db50c433",
+    "frozen/jev/models.py": "592e797b0697a3dc1febf14785c2f1057c32255372f3feb3833b21349f63d652",
+    "frozen/prediction/client.py": "35109ba801d0069c50a0d3f74b3b181a4efbb2d64e99c3485067fededd2258c4",
+    "frozen/prediction/loss_cooldown_guard.py": "6178f4900c6aeb6f385b758e5a62d66dba9aaf7a5013765c30a0742206477246",
+    "frozen/prediction/models.py": "396650f3cfdbaa564a44f32e73c0076ca89162ff935d259a2b4a902e967a7998",
+    "frozen/prediction/official_resolution.py": "c71da418adbd96554b40bede608ed9247cfbf9a77e4b47e5fb229a5df1b7bc52",
+    "frozen/prediction/rate_limit.py": "55e8f16de0147c0ac8ee57d6080f4b44dbbe916342dc7c9f491cab014a1508af",
+    "frozen/prediction/spot.py": "eb90ec6548d8d8dbf4ede96bd512d28f24718e683e3783e82b9fdb06e49d654e",
+    "legacy_features.py": "9e4d3b679640d9c21f20c93bd566935d44cf7392d6ca1ae5c5b032fa47009ce0",
+    "live.py": "fd89db75e4f5302eab83b914d8891a9da5b59694db705a313289d2714aa1b6aa",
+    "logic.py": "83415dc87e58fd6ebf975a3412c48fdf610581594cbe45794bb53631b862e389",
+    "original_logic.py": "c0fadaa325477e192b10aee5a5f9725185c37c22be5222a4d7b581a39ec53f3b",
+    "package.py": "3755df00e2e840dd8ad15b212bfebf6cabb18b7ffa5dda2dc773c076d8f1b163",
+    "report.py": "cf95642dc36cfba705981e55879d115b1645172bea20bfd2b7357045125fd81c",
+    "store.py": "ded5d6ca64f5d490d83192a6f8dab524778e971033416f83440429f826629874",
+    "test_candidate.py": "622880f9c65cf75cf2f9b9117f22fcd4319272ed0229535a4ae17499f5884343",
+    "test_v2.py": "b6cb6600684dc93c85e43e77c32cb8441445e381fca92abb4d5e6122cc75c0c8",
+    "train.py": "4cfa70c52f708d68a04d85b39e11c077e300f37c159d19729d95d669caef2b66"
+  },
+  "version": "c180-original-mix75-v1"
+}
