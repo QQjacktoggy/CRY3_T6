@@ -387,10 +387,13 @@ class C180SignalRuntime:
         self, *, logic: Any, live: Any, prediction_key: str,
         prediction_secret: str, jev_key: str, db_path: str | Path,
         prediction_db: str | Path,
+        feature_db: str | Path | None = None,
     ) -> None:
         self.logic = logic
         self.live = live
         self.prediction_db = Path(prediction_db)
+        self.feature_db = (Path(feature_db) if feature_db is not None else
+                           self.prediction_db.parent / 'regime-target6/features.sqlite3')
         self.store = C180SignalStore(db_path)
         self.client = live.ReadOnlyClient(
             prediction_key, prediction_secret,
@@ -418,6 +421,7 @@ class C180SignalRuntime:
         self._current_market: dict[str, Any] | None = None
         self._last_book_persist_ms = 0
         self._last_recovery_scan_ms = 0
+        self._last_t65_shadow_scan_ms = 0
         self._started_ms = _now_ms()
 
     def _on_raw_event(self, event: Mapping[str, Any]) -> None:
@@ -592,6 +596,19 @@ class C180SignalRuntime:
             self.store.persist_recovery_outcome(value)
             return
 
+    async def t65_shadow_scan_once(self) -> None:
+        """Resolve shadow-only markets without consuming the entry window."""
+        now = _now_ms()
+        if (119500 <= now % SLOT_MS <= 137500
+                or now-self._last_t65_shadow_scan_ms < 20000
+                or not self.feature_db.is_file()):
+            return
+        self._last_t65_shadow_scan_ms = now
+        from .regime_feature_service import connect
+        from .regime_t65_shadow import resolve_outcome_once
+        with closing(connect(self.feature_db)) as db:
+            await resolve_outcome_once(db, now, self._detail)
+
     async def run(self) -> None:
         await self.start()
         try:
@@ -609,6 +626,12 @@ class C180SignalRuntime:
                 except Exception as exc:
                     LOGGER.warning("C180 recovery evidence scan failed: %s", type(exc).__name__)
                 try:
+                    await self.t65_shadow_scan_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOGGER.warning('T6.5 shadow outcome scan failed: %s', type(exc).__name__)
+                try:
                     await asyncio.wait_for(self._stop.wait(), timeout=0.5)
                 except TimeoutError:
                     pass
@@ -620,6 +643,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only C180 Original JEV signal producer")
     parser.add_argument("--frozen-source", type=Path, required=True)
     parser.add_argument("--signal-db", type=Path, required=True)
+    parser.add_argument('--feature-db', type=Path)
     parser.add_argument("--shared-weight-db", type=Path, required=True)
     parser.add_argument("--prediction-db", type=Path, required=True,
                         help="Worker's live Prediction SQLite DB for the active order unit")
@@ -639,7 +663,7 @@ def main() -> None:
     runtime = C180SignalRuntime(
         logic=logic, live=live, prediction_key=prediction_key,
         prediction_secret=prediction_secret, jev_key=jev_key,
-        db_path=args.signal_db, prediction_db=args.prediction_db,
+        db_path=args.signal_db, prediction_db=args.prediction_db, feature_db=args.feature_db,
     )
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

@@ -51,7 +51,7 @@ def _value(metric, events, pending, field="pnl"):
     return format(metric[field], "+.4f" if field == "pnl" else ".4f")
 
 
-def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, key, branch):
+def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, key, branch, now_ms=None):
     """Count frozen fallback quotes; use only a recorded official winner.
 
     Empty Live campaigns often have a SETTLED row with winner=None. Those
@@ -63,6 +63,7 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
     from .regime_t65_lane import FINGERPRINT as T65_FINGERPRINT
     fingerprint = (T65_FINGERPRINT if profile == T65_PROFILE else
                    T63B_FINGERPRINT if profile == T63B_PROFILE else T63A_FINGERPRINT)
+    now = int(time.time()*1000) if now_ms is None else int(now_ms)
 
     own = {int(c["start_time_ms"]): c["campaign_id"] for c in campaigns
            if c["loop_id"] == loop_id}
@@ -82,6 +83,8 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
     with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
+        has_outcomes = profile == T65_PROFILE and db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='t65_shadow_outcomes'").fetchone()
         for slot in slots:
             start = int(slot["market_start_ms"])
             row = db.execute("SELECT payload FROM decisions WHERE start=?", (start,)).fetchone()
@@ -93,6 +96,15 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
             shadow = decision.get(key)
             if shadow is None:
                 continue
+            resolved = None
+            if has_outcomes:
+                outcome_row = db.execute('SELECT payload FROM t65_shadow_outcomes WHERE start=?', (start,)).fetchone()
+                if outcome_row:
+                    resolved = json.loads(outcome_row[0])
+                    if (resolved.get('fingerprint') != fingerprint or resolved.get('market_start_ms') != start
+                            or resolved.get('market_topic') != decision.get('market_topic')
+                            or resolved.get('market_id') != decision.get('market_id')):
+                        raise ValueError('official shadow outcome identity mismatch')
             if profile == T65_PROFILE and key in ("shadow_m4", "shadow_m6"):
                 observed = db.execute("SELECT payload FROM t65_shadow_quotes WHERE start=? AND branch=?",
                                       (start, branch)).fetchone()
@@ -114,8 +126,12 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
             if shadow["fill_status"] != "PAPER_QUOTE_ONLY":
                 if shadow.get("quote") is not None:
                     raise ValueError("invalid unquoted shadow")
-                unobserved += shadow["fill_status"] == "UNOBSERVED_WINDOW"
-                pending += shadow["fill_status"] == "AWAITING_SHADOW_WINDOW"
+                status = shadow['fill_status']
+                if profile == T65_PROFILE and status == 'AWAITING_SHADOW_WINDOW' and now > start+134500:
+                    status = ('NO_EXECUTABLE_WINDOW_QUOTE' if shadow.get('eligible_books', 0)
+                              else 'UNOBSERVED_WINDOW')
+                unobserved += status == 'UNOBSERVED_WINDOW'
+                pending += status == 'AWAITING_SHADOW_WINDOW'
                 continue
             if profile == T65_PROFILE and key in ("shadow_m4", "shadow_m6"):
                 at, book_at = int(shadow['quoted_at_ms']), int(shadow['book_at_ms'])
@@ -129,14 +145,19 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
             quoted_starts.append(start)
             official = results[own[start]]
             if profile == T65_PROFILE:
+                official = list(official)
+                if (resolved and resolved.get('complete') is True and resolved.get('winner') in ('UP', 'DOWN', 'DRAW')
+                        and int(resolved['known_at_ms']) <= now):
+                    official.append(resolved['winner'])
                 observer = official_winners.get(decision['market_topic'])
                 if observer:
                     if observer[0] != decision['market_id'] or observer[1] != start:
                         raise ValueError("official shadow market identity mismatch")
-                    evidence = {w for w in official + [observer[2]] if w in ("UP", "DOWN", "DRAW")}
-                    if len(evidence) > 1:
-                        raise ValueError("conflicting official shadow outcomes")
-                    official = list(evidence)
+                    official.append(observer[2])
+                evidence = {w for w in official if w in ('UP', 'DOWN', 'DRAW')}
+                if len(evidence) > 1:
+                    raise ValueError('conflicting official shadow outcomes')
+                official = list(evidence)
             if len(official) != 1 or official[0] not in ("UP", "DOWN", "DRAW"):
                 continue
             net = (shares/2 if official[0] == 'DRAW' else shares if official[0] == side else Decimal(0))-cash
@@ -302,10 +323,12 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
     if not slots:
         lines.append("等待第一個正式市場登錄；尚未開始排程區段。")
     if profile == T65_PROFILE:
-        closed_fills = sum(cid in current_ids and int(cmap[cid]['start_time_ms'])+300000 <= now for cid in fill_ids)
-        completed = int(loop['completed'])
-        if completed:
-            lines.append(f"Live fill rate {closed_fills/completed:.1%}（{closed_fills}/{completed} 已完成市場）；Shadow報價不計入成交。")
+        ended_starts = {int(s['market_start_ms']) for s in slots
+                        if s['verified_at_ms'] is not None and int(s['market_start_ms'])+SLOT <= now}
+        filled_starts = {int(cmap[cid]['start_time_ms']) for cid in fill_ids & current_ids}
+        closed_fills = len(filled_starts & ended_starts)
+        if ended_starts:
+            lines.append(f"Live fill rate {closed_fills/len(ended_starts):.1%}（{closed_fills}/{len(ended_starts)} 已結束登錄市場）；Shadow報價不計入成交。")
 
     if profile == T62_PROFILE:
         lines.append("T6.2：flat 原模型入場上限0.60；保留T6.1補位，可選每筆1/2/3U。")
@@ -338,7 +361,7 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
         for key, branch, title in branches:
             try:
                 shadow = _shadow_metrics(root, loop_id, slots, campaigns, settlements,
-                                         profile=profile, key=key, branch=branch)
+                                         profile=profile, key=key, branch=branch, now_ms=now)
                 if profile == T65_PROFILE:
                     ended_quotes = sum(start+136000 <= now for start in shadow['quoted_starts'])
                     if elapsed_slots:

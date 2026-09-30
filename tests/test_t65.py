@@ -10,6 +10,7 @@ from src.gridbot.prediction.c180_gate_runtime import LiveSettlement, LoopLedgerS
 from src.gridbot.prediction.live_report import _shadow_metrics, format_live_report
 from src.gridbot.prediction.regime_feature_service import connect
 from src.gridbot.prediction.regime_live_ledger import RegimeLiveLedger
+from src.gridbot.prediction import regime_t65_shadow as shadow_service
 from src.gridbot.prediction.regime_t65_shadow import collect_once
 from src.gridbot.prediction.repository import PredictionRepository
 from src.gridbot.prediction.strategy import StrategyConfig
@@ -65,21 +66,21 @@ def test_shadow_after_live_selection_fresh_window_and_no_overwrite(tmp_path):
         assert ready.allowed and ready.reason.startswith('t65_ready:')
         frozen = db.execute('SELECT payload FROM decisions').fetchone()[0]
         # Initial quote cannot be called an M4 shadow entry.
-        with patch.object(bridge, 'read_c180_book', return_value=book('.3', '.7', 127999)):
+        with patch.object(shadow_service, '_window_books', return_value=[book('.3', '.7', 127999)]):
             collect_once(db, S, 'unused', S+127999)
         row = json.loads(db.execute('SELECT payload FROM t65_shadow_quotes').fetchone()[0])
         assert row['quote'] is None
         for invalid in (book('.3', '.7', 126000), {**book('.3', '.7', 128000), 'market_id': 'wrong'},
                         {**book('.3', '.7', 128000), 'fee_bps': 201}):
-            with patch.object(bridge, 'read_c180_book', return_value=invalid):
+            with patch.object(shadow_service, '_window_books', return_value=[invalid]):
                 collect_once(db, S, 'unused', S+128000)
             assert json.loads(db.execute('SELECT payload FROM t65_shadow_quotes').fetchone()[0])['quote'] is None
-        with patch.object(bridge, 'read_c180_book', return_value=book('.3', '.7', 128000)):
+        with patch.object(shadow_service, '_window_books', return_value=[book('.3', '.7', 128000)]):
             collect_once(db, S, 'unused', S+128000)
         row = json.loads(db.execute('SELECT payload FROM t65_shadow_quotes').fetchone()[0])
         assert row['fill_status'] == 'PAPER_QUOTE_ONLY'
         assert row['quoted_at_ms'] == S+128000 and D('.99') < D(row['quote']['cash']) <= 1
-        with patch.object(bridge, 'read_c180_book', return_value=book('.5', '.5', 130000)):
+        with patch.object(shadow_service, '_window_books', return_value=[book('.5', '.5', 130000)]):
             collect_once(db, S, 'unused', S+130000)
         assert json.loads(db.execute('SELECT payload FROM t65_shadow_quotes').fetchone()[0]) == row
         assert db.execute('SELECT payload FROM decisions').fetchone()[0] == frozen
@@ -95,7 +96,7 @@ def test_shadow_missing_depth_and_missing_observation_distinct(tmp_path, observe
         if observed:
             thin = book('.7', '.3', 128000)
             thin['quote']['DOWN']['ask_levels'] = [['.3', '1']]
-            with patch.object(bridge, 'read_c180_book', return_value=thin):
+            with patch.object(shadow_service, '_window_books', return_value=[thin]):
                 collect_once(db, S, 'unused', S+128000)
         collect_once(db, S, 'unused', S+134501)
         row = json.loads(db.execute('SELECT payload FROM t65_shadow_quotes').fetchone()[0])
@@ -124,7 +125,7 @@ def test_shadow_report_official_outcomes_and_live_separation(tmp_path):
     db, _, ready = freeze(features, feature(2, -1), book('.3', '.7'))
     try:
         assert ready.allowed
-        with patch.object(bridge, 'read_c180_book', return_value=book('.3', '.7', 128000)):
+        with patch.object(shadow_service, '_window_books', return_value=[book('.3', '.7', 128000)]):
             collect_once(db, S, 'unused', S+128000)
         with sqlite3.connect(directory/'prediction.sqlite3') as main:
             main.executescript(SCHEMA)
