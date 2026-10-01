@@ -93,7 +93,7 @@ CANCEL_LOOP_CALLBACK_PREFIX = "predict_cancel:"
 MONITOR_CALLBACK_PREFIX = "predict_monitor:"
 SELECTABLE_LANES = (
     ("regime_target6_5_v1", "Regime T6.5 A／flat／M4／M6 Shadow（1/2/3U）"),
-    ("regime_target6_7_v1", "Regime T6.7 三策略 Live 驗證（1/2/3U）"),
+    ("regime_target6_7_v1", "Regime T6.7 四策略 Live 驗證（1/2/3U）"),
     ("regime_target6_3b_v1", "Regime T6.3b B／補位Shadow＋整輪回撤（1/2/3U）"),
     ("regime_target6_3a_v1", "Regime T6.3a 補位Shadow（1/2/3U）"),
     ("regime_target6_3_v1", "Regime T6.3 分歧／順勢／淨跌（1/2/3U）"),

@@ -1,6 +1,6 @@
-# T6.7 三策略 Live 驗證候選
+# T6.7 四策略 Live 驗證候選
 
-Profile：`regime_target6_7_v1`，BTC 五分鐘二元市場。三條策略均接入現有
+Profile：`regime_target6_7_v1`，BTC 五分鐘二元市場。四條策略均接入現有
 Live BUY／正式結算路徑；T6.7 不建立紙上交易，也不啟用 T6.6、舊 T6 shadow
 或 FAV/P3 交易。保留歷史紀錄與公共行情證據，不刪交易資料庫。
 
@@ -14,9 +14,27 @@ Live BUY／正式結算路徑；T6.7 不建立紙上交易，也不啟用 T6.6�
 | `reference_value` 開場基差校正 | T+60／120／180／240 秒首次評估，容許 1.5 秒；兩側以費後 EV 選較大者 | 相同 EV 門檻；實際 execution 再檢查 ≥0.005／U |
 | `shallow_retracement` 淺回撤 | 前兩根封閉 1m K 線方向相反；第一根至少 1bp 且幅度至少是第二根的兩倍 | T+124–134.5 秒；依複利淨變動方向，不使用 JEV；此規則沒有模型 EV 保證 |
 
+| `c_mirror_up_prior` C-UP 鏡像順勢反轉 | 前兩根封閉 1m K 線異號且各 ≥0.5bp；複合淨漲 ≥1bp；前 15 分鐘漲幅 ≥1bp；T+124–126 秒初始盤口凍結的 T6.5 Live 候選為空 | T+124–134.5 秒；UP 真實賣價及全深度在 0.65–0.75，最遲 T+136 秒提交；不使用模型 EV |
+
 最先符合者取得該市場唯一入場資格；同一時刻依表格順序。錯失已凍結的
 2 秒報價期限後整場不換策略、不重挑方向。共同價格限制 0.10–0.75，完整
 可執行深度，1／2／3U；延用原本一次 BUY、無加倉／避險、持有至官方結算。
+
+## C-UP 分支的研究範圍
+
+這個分支鏡像原 C 的淨跌條件為淨漲，並要求前段上漲；不是將低於 C 下限
+的 DOWN 訊號一律反著買。第四順位，只在原三條 T6.7 都未選到該場时參與。
+同時保留歷史研究的 T6.5 core-empty 限制：初始公共盤口、合法 features、
+完整兩側深度及費率通過後，僅在 T6.7 決策內凍結判斷，不寫舊 T6.5 決策
+或 shadow。reversal 的保留 core 不依賴付費 Original/JEV；不重新啟用付費訊號。
+錯過初始凍結窗或資格無法判定，該分支跳過，原三條策略仍按原規則評估。
+
+研究共測九組固定條件：鏡像＋前段上漲在歷史26報價25勝1負、假設費後
+PnL +10.1823U；時間延長資料1筆虧損 -.9975U，合計27筆25勝2負、
++9.1848U。這是1U報價研究，沒有重演既有風控停入場或真實延遲；T6.7
+其他三條也可能先取得入場，不能據此預測该分支的實際成交數或勝率。
+源紀錄於 2026-10-01 13:20–13:24（台灣）取得，完整九組結果及限制見
+[T6.7 C-UP 研究摘要](T6_7_C_UP_RESEARCH.md)。
 
 ## 模型與證據
 
@@ -67,15 +85,15 @@ Live arm 或建立新輪次。真正啟動自主實盤交易由使用者操作�
 
    ```sh
    cd /home/jack_shih/cry3
-   testnet/.venv/bin/python prediction/t67-live-staged-20261001/deploy/t67_manual_install.py
+   testnet/.venv/bin/python prediction/t67-live-staged-v2-20261001/deploy/t67_manual_install.py
    # 前置檢查通過後，由使用者明確執行安裝；不會選策略、arm 或開 loop。
-   testnet/.venv/bin/python prediction/t67-live-staged-20261001/deploy/t67_manual_install.py --apply
+   testnet/.venv/bin/python prediction/t67-live-staged-v2-20261001/deploy/t67_manual_install.py --apply
    ```
 
    兩者均要求 `loop:1790817223795` DONE 100/100、安全空檔、官方零曝險及
    完整 release 驗證。父版本不同會拒絕。失敗回復 source／manifest／pin，
    不回復交易 DB。`--apply` 尚未執行，工具尚未經正式 VM 安裝驗證。
-4. Telegram `/predict_lane` 選 **Regime T6.7 三策略 Live 驗證**；
+4. Telegram `/predict_lane` 選 **Regime T6.7 四策略 Live 驗證**；
    `/predict_amount` 選 **1U** 作起始驗證。選擇／金額更動會按原機制解除
    Live 授權，這是尚未啟用的安全狀態，不會執行 T6.7 paper trades。
 5. 等 signal collector 在下一個完整市場開場前暖機至少 60 秒；

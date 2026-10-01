@@ -333,14 +333,16 @@ def test_report_attributes_only_actual_fills_and_preserves_official_pnl(tmp_path
     with closing(connect(directory/'regime-target6/features.sqlite3')) as db, db:
         db.execute('CREATE TABLE t67_decisions(start INTEGER PRIMARY KEY,payload TEXT)')
         db.execute('INSERT INTO t67_decisions VALUES(?,?)',(S,json.dumps(dict(
-            selected=True,fingerprint=FINGERPRINT,branch=BRANCHES[0],market_topic='topic',market_id='up'))))
+            selected=True,fingerprint=FINGERPRINT,branch=BRANCHES[0],market_topic='topic',market_id='up',market_start_ms=S,market_end_ms=S+300000))))
     with closing(sqlite3.connect(directory/'prediction.sqlite3')) as db, db:
         db.executescript(SCHEMA)
         db.execute('ALTER TABLE prediction_campaigns ADD COLUMN market_topic_id TEXT')
         db.execute('ALTER TABLE prediction_campaigns ADD COLUMN market_id TEXT')
+        db.execute('ALTER TABLE prediction_regime_slots ADD COLUMN market_topic_id TEXT')
+        db.execute('ALTER TABLE prediction_regime_slots ADD COLUMN market_id TEXT')
         db.execute("INSERT INTO prediction_loops VALUES('new',?,'LIVE','RUNNING',100,1,1,0,0)",(PROFILE,))
-        db.execute("INSERT INTO prediction_campaigns VALUES('c','new',?,0,'topic','up')",(S,))
-        db.execute("INSERT INTO prediction_regime_slots VALUES('new',?,1,?,NULL)",(S,S))
+        db.execute("INSERT INTO prediction_campaigns VALUES('c','new',?,0,'topic','')",(S,))
+        db.execute("INSERT INTO prediction_regime_slots VALUES('new',?,1,?,NULL,'topic','up')",(S,S))
         db.execute("INSERT INTO prediction_regime_entry_claims VALUES('new',?,'c','i','1')",(S,))
         db.execute("INSERT INTO prediction_order_intents VALUES('i','c','FILLED','o',0,?)",(S+60000,))
         db.execute("INSERT INTO prediction_fills VALUES('c','BUY')")

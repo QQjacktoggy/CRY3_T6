@@ -44,17 +44,43 @@ def probability(book, spots, at_ms):
                        'basis_assumption': 'constant_proxy_vs_settlement_basis'}
 
 
-def execution(book, side, amount, probability_up=None, minimum_ev='.005', cap='.75'):
-    if dec(book['quote'][side]['ask_levels'][0][0]) < D('.10'):
+def execution(book, side, amount, probability_up=None, minimum_ev='.005', cap='.75', lower='.10'):
+    if dec(book['quote'][side]['ask_levels'][0][0]) < dec(lower):
         raise ValueError('best ask below price band')
     result = walk(book['quote'][side]['ask_levels'], book['fee_bps'], cap=dec(cap), amount=amount)
-    if not D('.10') <= result['limit'] <= dec(cap):
+    if not dec(lower) <= result['limit'] <= dec(cap):
         raise ValueError('price band')
     if probability_up is not None:
         p = dec(probability_up) if side == 'UP' else 1-dec(probability_up)
         if p*result['net_shares']-result['cash'] < dec(minimum_ev)*dec(amount):
             raise ValueError('fee net EV')
     return result
+
+
+def freeze_c_mirror_guard(features, initial, at_ms, amount):
+    """Freeze the researched C mirror eligibility, without writing T6.5 decisions."""
+    from .regime_lane import state_of
+    from .regime_t65_lane import candidates as t65_candidates
+    policy = POLICY['c_mirror_up_prior']
+    start = int(features['market_start_ms'])
+    if not start+124000 <= at_ms <= start+126000:
+        raise ValueError('c_mirror_initial_window')
+    first, last, prior = (dec(features[k]) for k in ('first_bp', 'last_bp', 'prior_bp'))
+    net = ((1+first/10000)*(1+last/10000)-1)*10000
+    eligible = (state_of(first, last) == 'reversal'
+                and net >= dec(policy['compounded_net_min_bp'])
+                and prior >= dec(policy['prior_min_bp']))
+    guard = dict(eligible=False, frozen_at_ms=at_ms, first_bp=str(first), last_bp=str(last),
+                 prior_bp=str(prior), net_bp=str(net), reason='c_mirror_signal_filter')
+    if not eligible:
+        return guard
+    # Reversal routing never needs the paid original probability. In T6.5,
+    # any A conflict and eligible fallback remain excluded from Live.
+    choices, _ = t65_candidates({**features, 'net_bp': str(net)}, None, initial, amount)
+    guard.update(eligible=not choices, initial_book_at_ms=int(initial['book_at_ms']),
+                 initial_captured_at_ms=int(initial['captured_at_ms']),
+                 reason='t65_core_present' if choices else 't65_core_empty')
+    return guard
 
 
 def model_candidate(branch, book, side, p_up, amount, model):
@@ -184,4 +210,15 @@ def candidates(book, spots, features, state, at_ms, amount, prior_books=()):
                                    probability=None, lower='.10', cap='.75', fingerprint=FINGERPRINT))
             except (ValueError, KeyError, TypeError, ArithmeticError):
                 pass
+    guard = state.get('c_mirror_guard', {})
+    policy = POLICY['c_mirror_up_prior']
+    if (guard.get('eligible') is True and start+124000 <= at_ms <= start+134500
+            and start+124000 <= int(guard['frozen_at_ms']) <= min(at_ms, start+126000)):
+        lower, cap = policy['price_band']
+        try:
+            execution(book, 'UP', amount, lower=lower, cap=cap)
+            result.append(dict(branch='c_mirror_up_prior', side='UP', action='c_mirror_up_prior',
+                               probability=None, lower=lower, cap=cap, fingerprint=FINGERPRINT))
+        except (ValueError, KeyError, TypeError, ArithmeticError):
+            pass
     return result

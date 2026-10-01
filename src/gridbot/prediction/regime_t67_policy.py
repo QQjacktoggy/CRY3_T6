@@ -4,9 +4,9 @@ import json
 
 PROFILE = 'regime_target6_7_v1'
 TIER = 'REGIME_T67'
-BRANCHES = ('external_lead_lag', 'reference_value', 'shallow_retracement')
+BRANCHES = ('external_lead_lag', 'reference_value', 'shallow_retracement', 'c_mirror_up_prior')
 POLICY = {
-    'profile': PROFILE, 'version': 1, 'branches': BRANCHES,
+    'profile': PROFILE, 'version': 2, 'branches': BRANCHES,
     'routing': 'first_eligible; simultaneous_priority_in_branch_order; one_market_one_buy',
     'shadow': False, 'units': [1, 2, 3],
     'entry_ms': [60000, 270000], 'quote_ttl_ms': 2000,
@@ -25,6 +25,13 @@ POLICY = {
     'retracement': {'first_abs_min_bp': '1', 'first_abs_to_last_abs_min': '2',
                     'opposite_minute_sign': True, 'side': 'compounded_net',
                     'entry_ms': [124000, 134500]},
+    'c_mirror_up_prior': {'state': 'reversal', 'minute_abs_min_bp': '0.5',
+                          'compounded_net_min_bp': '1', 'prior_min_bp': '1',
+                          'side': 'UP', 'price_band': ['0.65', '0.75'],
+                          'initial_decision_ms': [124000, 126000],
+                          'entry_ms': [124000, 134500], 'submission_deadline_ms': 136000,
+                          'guard': 'freeze_T65_core_empty_at_initial_book; no_paid_signal_needed_for_reversal',
+                          'priority': 'after_existing_T67_branches'},
     'risk_state_key': 'regime_target6_risk_v1', 'loop_mdd_1u': '3.5',
     'validation_mode': 'experimental_live; no_profit_or_fill_claim',
 }

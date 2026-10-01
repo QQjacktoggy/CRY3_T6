@@ -364,7 +364,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None)
         try:
             from .regime_t67_policy import FINGERPRINT as T67_FP, BRANCHES
             from .regime_t67_report import branch_metrics
-            metrics = branch_metrics(root, cmap, current_ids, fill_ids, current, fingerprint=T67_FP)
+            metrics = branch_metrics(root, cmap, current_ids, fill_ids, current, fingerprint=T67_FP, slots=slots)
             for branch in BRANCHES:
                 m = metrics[branch]
                 lines.append(f"{branch} Live｜成交 {m['fills']}｜已知WR {m['wr']}｜已知PnL {m['pnl']:+.4f} USDT｜待結算 {m['pending']}")

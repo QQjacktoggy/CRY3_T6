@@ -13,7 +13,7 @@ from contextlib import closing
 from pathlib import Path
 
 ROOT = Path('/home/jack_shih/cry3')
-STAGE = ROOT/'prediction/t67-live-staged-20261001'
+STAGE = ROOT/'prediction/t67-live-staged-v2-20261001'
 MANIFEST = 'prediction/release-manifest.json'
 PIN = 'prediction/release-pin.env'
 SERVICES = ('cry3-predict-user.service','cry3-regime-feature.service','cry3-c180-favorite-signal.service')
