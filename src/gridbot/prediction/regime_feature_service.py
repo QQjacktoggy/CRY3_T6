@@ -60,17 +60,24 @@ def main():
     parser.add_argument("--signal-db", default="prediction/data/c180-favorite-live/signals.sqlite3")
     args = parser.parse_args()
     db = connect(args.db)
+    from .regime_t67_evidence import selected_profile
+    from .regime_t67_policy import PROFILE as T67_PROFILE
+    prediction_db = Path(args.db).resolve().parent.parent / 'prediction.sqlite3'
     last_finalized_at_ms = 0
     try:
         while True:
             now = time.time_ns()//1000000
             start = now//SLOT_MS*SLOT_MS
             status = collect_once(db, start)
-            if now-last_finalized_at_ms >= 1000:
+            try:
+                shadows_enabled = selected_profile(prediction_db) != T67_PROFILE
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+                shadows_enabled = False
+            if shadows_enabled and now-last_finalized_at_ms >= 1000:
                 from .regime_t65_shadow import finalize_expired
                 finalize_expired(db, now)
                 last_finalized_at_ms = now
-            if start+124000 <= now <= start+137000:
+            if shadows_enabled and start+124000 <= now <= start+137000:
                 from .regime_t65_shadow import collect_once as observe_shadow
                 try:
                     observe_shadow(db, start, args.signal_db, time.time_ns()//1000000)
@@ -78,7 +85,8 @@ def main():
                     status += ";t65_shadow_unavailable:" + type(exc).__name__
             try:
                 from .regime_t66_observer import tick
-                tick(db, args.signal_db, time.time_ns()//1000000)
+                if shadows_enabled:
+                    tick(db, args.signal_db, time.time_ns()//1000000)
             except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
                 status += ";t66_observation_unavailable:" + type(exc).__name__
             with db:

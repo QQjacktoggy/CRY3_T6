@@ -545,7 +545,7 @@ class PredictionRepository:
         if not (durable_risk_loop and str(durable_risk_loop[0]).lower() in {
                 "c180_favorite_hold_v1", "regime_target6_v1",
                 "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1',
-                'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1'} and str(durable_risk_loop[1]).upper() == "LIVE"):
+                'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1'} and str(durable_risk_loop[1]).upper() == "LIVE"):
             latched = latched or daily <= daily_limit or consecutive >= consecutive_limit
         state = {
             "day": day.isoformat(),

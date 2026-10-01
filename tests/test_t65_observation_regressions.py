@@ -141,6 +141,7 @@ async def test_signal_service_resolves_no_fill_shadow_after_loop_completion(tmp_
         assert settled['winner'] is None
         report_database(tmp_path)
         runtime = object.__new__(C180SignalRuntime)
+        runtime._t67_active = lambda now: False  # Isolate legacy outcome resolution.
         runtime.feature_db = directory/'features.sqlite3'
         runtime._last_t65_shadow_scan_ms = 0
         runtime._detail = AsyncMock(return_value=official())
@@ -194,6 +195,7 @@ async def test_signal_outcome_scan_yields_during_feature_and_execution_windows(t
     db, _, _ = freeze(tmp_path,feature(0,0),book('.7','.3'))
     with closing(db):
         runtime = object.__new__(C180SignalRuntime)
+        runtime._t67_active = lambda now: False
         runtime.feature_db = tmp_path/'features.sqlite3'
         runtime._last_t65_shadow_scan_ms = 0
         runtime._detail = AsyncMock(return_value=official())

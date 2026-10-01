@@ -2,6 +2,8 @@
 
 獨立管理 VM 正式 T6 系列程式碼。2026-09-30 從 `cry3jack` 擷取，包含 T6、T6.1、T6.2、T6.3、T6.3a、T6.3b，並以最新 3b 整合 [T6.5](docs/T65.md)：A／flat 與 M4／M6 先 Shadow，其他 T6／C 保留 Live。
 
+T6.7 候選新增外部先行、reference 校正價格、淺回撤與 C-UP 鏡像順勢反轉四條 Live 路由，沿用原有風控且不建立新 shadow 交易。固定規則與人工啟動步驟見 [T6.7 驗證計畫](docs/T6_7_LIVE_VALIDATION.md)。候選套件不代表 VM 已切換或已啟動實盤。
+
 ## 收錄範圍
 
 - `src/gridbot/prediction/regime_*`：T6 策略、特徵、執行與風控。

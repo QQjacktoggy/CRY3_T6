@@ -23,7 +23,7 @@ from .regime_lane import STATE_KEY, FINGERPRINT, risk_result
 PROFILE = "regime_target6_v1"
 TIER = "REGIME_T6"
 RISK_PROFILES = (PROFILE, "regime_target6_1_v1", "regime_target6_2_v1",
-                 "regime_target6_3_v1", "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1")
+                 "regime_target6_3_v1", "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1", "regime_target6_7_v1")
 TERMINAL_INTENTS = ("FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED")
 TERMINAL_ORDERS = ("FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED")
 NO_FILL_TERMINAL = frozenset(("CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED"))
@@ -94,7 +94,7 @@ class RegimeLiveLedger:
         self.repository = repository
         self.state_key = state_key
         self.profile = profile
-        self.tier = ("REGIME_T65" if profile == "regime_target6_5_v1" else
+        self.tier = ("REGIME_T67" if profile == "regime_target6_7_v1" else "REGIME_T65" if profile == "regime_target6_5_v1" else
                      "REGIME_T63B" if profile == "regime_target6_3b_v1" else
                      "REGIME_T63A" if profile == "regime_target6_3a_v1" else
                      "REGIME_T63" if profile == "regime_target6_3_v1" else TIER if profile == PROFILE else
@@ -116,11 +116,11 @@ class RegimeLiveLedger:
                      "first_market_start_ms": start, "unit_usdt": "1",
                      "halt_reason": None}
         loops = await self._rows(conn,
-            "SELECT loop_id FROM prediction_loops WHERE strategy_profile IN (?,?,?,?,?,?,?) AND mode='LIVE'",
+            "SELECT loop_id FROM prediction_loops WHERE strategy_profile IN (?,?,?,?,?,?,?,?) AND mode='LIVE'",
             RISK_PROFILES)
         unknown = await self._row(conn,
             """SELECT 1 FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id
-               WHERE l.strategy_profile IN (?,?,?,?,?,?,?) AND l.mode='LIVE' AND
+               WHERE l.strategy_profile IN (?,?,?,?,?,?,?,?) AND l.mode='LIVE' AND
                (c.pending_unknown=1 OR EXISTS(SELECT 1 FROM prediction_order_intents i
                  WHERE i.campaign_id=c.campaign_id AND i.unknown=1)) LIMIT 1""", RISK_PROFILES)
         if unknown:
@@ -138,13 +138,17 @@ class RegimeLiveLedger:
                                       unresolved=unresolved, unknown=bool(unknown))
         if not complete:
             allowed, reason = False, state.get("halt_reason") or "lane_ledger_incomplete"
-        if self.profile in ("regime_target6_3b_v1", "regime_target6_5_v1") and complete:
+        if self.profile in ("regime_target6_3b_v1", "regime_target6_5_v1", "regime_target6_7_v1") and complete:
             from .regime_t63b_risk import loop_drawdown
             from .regime_t63b_lane import FINGERPRINT as guard_fingerprint
             prefix = "t63b"
             if self.profile == "regime_target6_5_v1":
                 from .regime_t65_lane import FINGERPRINT as guard_fingerprint
                 prefix = "t65"
+
+            if self.profile == "regime_target6_7_v1":
+                from .regime_t67_policy import FINGERPRINT as guard_fingerprint
+                prefix = "t67"
 
             if own_snapshot is None:
                 allowed, reason = False, f"{prefix}_loop_ledger_missing"
@@ -630,7 +634,7 @@ class RegimeLiveLedger:
                 return C180ClaimResult(False, "wrong_c180_intent")
             unit = _unit(values[5])
             if self.profile not in ("regime_target6_2_v1", "regime_target6_3_v1",
-                                    "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1") and unit != 1:
+                                    "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1", "regime_target6_7_v1") and unit != 1:
                 return C180ClaimResult(False, "regime_requires_fixed_1_usdt")
             if values[1] != str(campaign_id) or values[0] in ("", "None"):
                 return C180ClaimResult(False, "intent_identity_mismatch")
@@ -679,7 +683,8 @@ class RegimeLiveLedger:
                 ):
                     await conn.rollback()
                     return C180ClaimResult(False, "market_buy_already_claimed")
-                if not start + 124000 <= now < start + 136000 or not Decimal("0") < Decimal(str(values[6])) <= self.max_price:
+                begin, end = (60000, 270000) if self.profile == "regime_target6_7_v1" else (124000, 136000)
+                if not start + begin <= now < start + end or not Decimal("0") < Decimal(str(values[6])) <= self.max_price:
                     await conn.rollback()
                     return C180ClaimResult(False, "regime_time_or_price_invalid")
                 allowed, reason = await self._risk_conn(conn, loop, start, now)

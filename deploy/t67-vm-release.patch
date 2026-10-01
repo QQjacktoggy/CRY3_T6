@@ -1,0 +1,14 @@
+--- a/src/gridbot/prediction/release.py
++++ b/src/gridbot/prediction/release.py
+@@ -28,6 +28,11 @@
+     "src/gridbot/prediction/regime_t66_policy.py",
+     "src/gridbot/prediction/regime_t66_observer.py",
+     "src/gridbot/prediction/regime_t66_report.py",
++    "src/gridbot/prediction/regime_t67_policy.py",
++    "src/gridbot/prediction/regime_t67_evidence.py",
++    "src/gridbot/prediction/regime_t67_lane.py",
++    "src/gridbot/prediction/regime_t67_bridge.py",
++    "src/gridbot/prediction/regime_t67_report.py",
+     "src/gridbot/prediction/live_report.py",
+     "src/gridbot/prediction/regime_lane.py",
+     "src/gridbot/prediction/regime_t61_lane.py",

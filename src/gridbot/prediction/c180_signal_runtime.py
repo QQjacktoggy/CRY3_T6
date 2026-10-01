@@ -410,7 +410,7 @@ class C180SignalRuntime:
                 prediction_key, prediction_secret, callback=callback,
             ),
             on_raw_event=self._on_raw_event,
-            on_frozen=self.signals.on_frozen,
+            on_frozen=self._on_frozen,
         )
         self._stop = asyncio.Event()
         self._last_list_ms = 0
@@ -423,9 +423,91 @@ class C180SignalRuntime:
         self._last_recovery_scan_ms = 0
         self._last_t65_shadow_scan_ms = 0
         self._started_ms = _now_ms()
+        self._t67_store = None
+        self._t67_selected = False
+        self._t67_profile_checked_ms = 0
+        self._t67_book_persist_ms = 0
+        self._t67_last_error_ms = 0
+
+    def _t67_active(self, now):
+        if now-self._t67_profile_checked_ms >= 2000:
+            from .regime_t67_evidence import selected_profile
+            from .regime_t67_policy import PROFILE
+            self._t67_profile_checked_ms = now
+            self._t67_selected = None
+            try:
+                self._t67_selected = selected_profile(self.prediction_db) == PROFILE
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+                if now-self._t67_last_error_ms >= 10000:
+                    LOGGER.warning('Strategy selection unavailable: %s', type(exc).__name__)
+                    self._t67_last_error_ms = now
+        return self._t67_selected
+
+    def _on_frozen(self, evidence):
+        # T6.7 consumes public evidence, not a paid Original/JEV decision.
+        try:
+            if self._t67_active(_now_ms()) is not False:
+                return
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+            return
+        self.signals.on_frozen(evidence)
+
+    def _t67_raw_event(self, event):
+        from .regime_t67_evidence import EvidenceStore, evidence_path
+        at = int(event['received_at'])
+        if not self._t67_active(at):
+            return
+        if self._t67_store is None:
+            self._t67_store = EvidenceStore(evidence_path(self.store.path))
+        kind = event.get('kind')
+        if kind in ('binance_spot_aggTrade', 'binance_futures_aggTrade'):
+            source = 'spot' if kind == 'binance_spot_aggTrade' else 'futures'
+            # Reconnect counters alone reset on process restart. Persist a
+            # session epoch too, so old opening anchors cannot authorize a
+            # model after the feed lost its continuity.
+            generation = self._started_ms*1000000+self.evidence.trade_errors[source]
+            self._t67_store.spot(event, generation)
+            return
+        market = self._current_market
+        if kind != 'prediction_book' or market is None or at-self._t67_book_persist_ms < 100:
+            return
+        if not int(market['start']) <= at < int(market['end']):
+            return
+        raw = self.evidence.tape.books.get(str(market['market_id']))
+        if not isinstance(raw, Mapping):
+            return
+        quote = self.logic.normalize_book(raw, market, at)
+        if quote is None:
+            return
+        # Full source depth is validated before retaining enough cash depth
+        # for every supported (1/2/3U) order, rather than an unbounded raw book.
+        selected = {}
+        for side in ('UP', 'DOWN'):
+            levels, cash = [], Decimal(0)
+            for price, quantity in quote[side]['ask_levels']:
+                levels.append([str(price), str(quantity)])
+                cash += Decimal(str(price))*Decimal(str(quantity))
+                if cash >= Decimal('3.000001'):
+                    break
+            selected[side] = {'ask_levels': levels, 'ask': quote[side].get('ask'), 'bid': quote[side].get('bid')}
+        self._t67_store.book(dict(
+            market_start_ms=int(market['start']), market_topic=str(market['topic']), market_id=str(market['market_id']),
+            fee_bps=market['fee_bps'], reference=str(market['reference']),
+            reference_received_ms=int(market['identified_at']), captured_at_ms=at,
+            book_at_ms=quote['book_at_ms'], received_at=quote['received_at'], received_at_ms=raw['received_at_ms'],
+            full_depth=True, retained_cash_depth='3.000001', quote=selected))
+        self._t67_book_persist_ms = at
 
     def _on_raw_event(self, event: Mapping[str, Any]) -> None:
         """Persist a fresh full-depth book only during the live entry window."""
+
+        try:
+            self._t67_raw_event(event)
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
+            now = _now_ms()
+            if now-self._t67_last_error_ms >= 10000:
+                LOGGER.warning('T6.7 evidence unavailable: %s', type(exc).__name__)
+                self._t67_last_error_ms = now
 
         if event.get("kind") != "prediction_book" or self._current_market is None:
             return
@@ -469,6 +551,8 @@ class C180SignalRuntime:
         await self.evidence.close()
         await self.signals.close()
         self.store.close()
+        if self._t67_store is not None:
+            self._t67_store.close()
 
     def stop(self) -> None:
         self._stop.set()
@@ -549,6 +633,8 @@ class C180SignalRuntime:
     async def recovery_scan_once(self) -> None:
         """Settle at most one paper market per pass from post-halt evidence."""
         now = _now_ms()
+        if self._t67_active(now) is not False:
+            return
         if now - self._last_recovery_scan_ms < 20_000:
             return
         self._last_recovery_scan_ms = now
@@ -599,6 +685,8 @@ class C180SignalRuntime:
     async def t65_shadow_scan_once(self) -> None:
         """Resolve shadow-only markets without consuming the entry window."""
         now = _now_ms()
+        if self._t67_active(now) is not False:
+            return
         if (119500 <= now % SLOT_MS <= 137500
                 or now-self._last_t65_shadow_scan_ms < 20000
                 or not self.feature_db.is_file()):
