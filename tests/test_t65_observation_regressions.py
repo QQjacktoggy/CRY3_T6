@@ -197,3 +197,79 @@ def test_fill_rate_uses_ended_registered_markets_including_pending_settlement(tm
         report = format_live_report(tmp_path,now_ms=S+600001)
         assert 'Live fill rate 50.0%（1/2 已結束登錄市場）' in report
         assert '待結算/核對 1' in report
+
+
+def observer_quote_fixture(root, detail, *, observer_id='', observer_start=S, winner='DOWN'):
+    directory = root/'prediction/data/regime-target6'
+    directory.mkdir(parents=True)
+    db, _, _ = freeze(directory,feature(0,0),book('.7','.3'))
+    with closing(db), closing(C180SignalStore(root/'signals')) as store:
+        store.persist_book(book('.7','.3',128000))
+        collect_once(db,S,store.path,S+128000)
+        report_database(root)
+        with closing(sqlite3.connect(root/'prediction/data/prediction.sqlite3')) as main, main:
+            main.execute('ALTER TABLE prediction_shadow_observer_markets ADD COLUMN payload_json TEXT')
+            main.execute("INSERT INTO prediction_shadow_observer_markets VALUES('topic',?,?,?,'SETTLED',?)",
+                         (observer_id,observer_start,winner,json.dumps(detail) if detail is not None else None))
+
+
+@pytest.mark.parametrize('admission_snapshot', [False,True])
+def test_report_resolves_empty_observer_id_from_saved_binary_detail_read_only(tmp_path,admission_snapshot):
+    detail = official()
+    del detail['upMarketId']
+    del detail['finalOutcome']
+    detail['markets'] = [dict(marketId='up',status='SETTLED',outcomes=[
+        dict(name='UP',tokenId='u',winner=False,price='0'),
+        dict(name='DOWN',tokenId='d',winner=True,price='1')])]
+    if admission_snapshot:
+        detail['status'] = 'REGISTERED'
+        detail['markets'][0]['status'] = 'REGISTERED'
+        for outcome in detail['markets'][0]['outcomes']:
+            del outcome['winner']
+            outcome['price'] = '.5'
+    observer_quote_fixture(tmp_path,detail)
+    paths = [tmp_path/'prediction/data/prediction.sqlite3',
+             tmp_path/'prediction/data/regime-target6/features.sqlite3']
+    def dumps():
+        result = []
+        for path in paths:
+            with closing(sqlite3.connect(path)) as db:
+                result.append('\n'.join(db.iterdump()))
+        return result
+    before = dumps()
+    metric = shadow_metrics(tmp_path)
+    assert metric['candidates'] == metric['quoted'] == metric['known'] == metric['wins'] == 1
+    report = format_live_report(tmp_path,now_ms=S+600000)
+    assert 'M6 Shadow 已知WR 100.0%' in report
+    assert 'M6 Shadow紀錄無法核對' not in report
+    assert '本輪已知淨 PnL +0.0000 USDT' in report
+    assert dumps() == before
+
+
+@pytest.mark.parametrize('changes', [
+    dict(marketTopicId='other'),dict(upMarketId='wrong'),
+    dict(startTime=S+300000),dict(endTime=S+600000),
+    dict(finalOutcome='UP'),
+])
+def test_report_rejects_wrong_saved_identity_or_outcome(tmp_path,changes):
+    observer_quote_fixture(tmp_path,{**official(),**changes})
+    with pytest.raises(ValueError,match='identity mismatch'):
+        shadow_metrics(tmp_path)
+
+
+@pytest.mark.parametrize('kwargs', [
+    dict(observer_id='wrong'),dict(observer_start=S+300000),dict(detail=None),
+])
+def test_report_does_not_guess_missing_or_conflicting_observer_identity(tmp_path,kwargs):
+    observer_quote_fixture(tmp_path,**{'detail':official(),**kwargs})
+    with pytest.raises((TypeError,ValueError)):
+        shadow_metrics(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_report_keeps_outcome_conflict_check_with_empty_observer_id(tmp_path):
+    observer_quote_fixture(tmp_path,{**official(),'finalOutcome':'UP'},winner='UP')
+    with closing(sqlite3.connect(tmp_path/'prediction/data/regime-target6/features.sqlite3')) as db:
+        await resolve_outcome_once(db,S+600000,AsyncMock(return_value=official()))
+    with pytest.raises(ValueError,match='conflicting'):
+        shadow_metrics(tmp_path)

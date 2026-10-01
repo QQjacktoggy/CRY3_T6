@@ -78,8 +78,11 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
     official_winners = {}
     if profile == T65_PROFILE:
         with closing(sqlite3.connect((root/"prediction/data/prediction.sqlite3").resolve().as_uri()+"?mode=ro", uri=True)) as main:
-            official_winners = {r[0]: (r[1], r[2], r[3]) for r in main.execute(
-                "SELECT market_topic_id,market_id,start_time_ms,winner FROM prediction_shadow_observer_markets WHERE state='SETTLED'")}
+            columns = {r[1] for r in main.execute("PRAGMA table_info(prediction_shadow_observer_markets)")}
+            payload = "payload_json" if "payload_json" in columns else "NULL"
+            official_winners = {r[0]: (r[1], r[2], r[3], r[4]) for r in main.execute(
+                "SELECT market_topic_id,market_id,start_time_ms,winner," + payload +
+                " FROM prediction_shadow_observer_markets WHERE state='SETTLED'")}
     with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
@@ -151,7 +154,28 @@ def _shadow_metrics(root, loop_id, slots, campaigns, settlements, *, profile, ke
                     official.append(resolved['winner'])
                 observer = official_winners.get(decision['market_topic'])
                 if observer:
-                    if observer[0] != decision['market_id'] or observer[1] != start:
+                    observer_id = observer[0]
+                    if not observer_id:
+                        # The generic observer stores a topic-level ID, which
+                        # can be empty for binary markets. Resolve the UP ID
+                        # only from its saved official detail, never by assuming
+                        # that a matching topic alone proves the identity.
+                        from .models import MarketInfo
+                        from .worker import PredictionWorker
+                        detail = json.loads(observer[3])
+                        market = MarketInfo.from_api(detail)
+                        # The observer payload may be its admission snapshot;
+                        # its SETTLED row holds the later official winner.
+                        # Compare any winner in the detail when present, while
+                        # retaining the independent outcome conflict check below.
+                        detail_winner = PredictionWorker._official_shadow_resolution(detail)
+                        if (market.market_topic_id != decision['market_topic']
+                                or market.start_time_ms != start
+                                or market.end_time_ms != start+SLOT
+                                or (detail_winner is not None and detail_winner != observer[2])):
+                            raise ValueError("official shadow market identity mismatch")
+                        observer_id = market.up_market_id
+                    if observer_id != decision['market_id'] or observer[1] != start:
                         raise ValueError("official shadow market identity mismatch")
                     official.append(observer[2])
                 evidence = {w for w in official if w in ('UP', 'DOWN', 'DRAW')}
@@ -194,7 +218,7 @@ def report_pages(text, limit=3400):
     return pages
 
 
-def format_live_report(root, *, now_ms=None, c180_formatter=None):
+def _format_live_report(root, *, now_ms=None, c180_formatter=None):
     now = int(time.time()*1000) if now_ms is None else int(now_ms)
     root = Path(root)
     uri = (root/"prediction/data/prediction.sqlite3").resolve().as_uri()+"?mode=ro"
@@ -347,8 +371,16 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
         except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
             issues.add("補位Shadow紀錄無法核對")
     if profile in (T63B_PROFILE, T65_PROFILE):
+        retired = False
         if profile == T65_PROFILE:
-            lines.append("T6.5：A、flat/original、B與補位只做Shadow；保留其他T6/C Live，M4/M6於T+128–134.5秒只觀測新鮮可執行報價。")
+            try:
+                from .regime_t66_observer import state as observation_state
+                with closing(sqlite3.connect((root/"prediction/data/regime-target6/features.sqlite3").resolve().as_uri()+"?mode=ro", uri=True)) as feature_db:
+                    observation = observation_state(feature_db)
+                retired = bool(observation and observation['enabled'] and int(loop['created_at_ms']) >= observation['first_start_ms'])
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+                pass
+            lines.append("T6.5核心維持；A／flat／B／補位已停止新Shadow，T6.6獨立觀測見下方。" if retired else "T6.5：A、flat/original、B與補位只做Shadow；保留其他T6/C Live，M4/M6於T+128–134.5秒只觀測新鮮可執行報價。")
         else:
             lines.append("T6.3b：T6/A/C可Live；B與T6.1補位保留紙上盤口，不送Live BUY，排除分支時整場跳過。")
         branches = [("shadow_b", "B_late_momentum", "B Shadow"),
@@ -358,6 +390,8 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
                          ("shadow_flat", "T6", "flat/original Shadow"),
                          ("shadow_m4", "M4_first_pullback", "M4 Shadow"),
                          ("shadow_m6", "M6_neutral_cheap", "M6 Shadow")]
+        if retired:
+            branches = [b for b in branches if b[0] not in ("shadow_a", "shadow_flat", "shadow_b", "shadow_fallback")]
         for key, branch, title in branches:
             try:
                 shadow = _shadow_metrics(root, loop_id, slots, campaigns, settlements,
@@ -435,3 +469,13 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None):
     lines.append("WR=勝/(勝+負)，依淨損益分類，損益平手不計；未結算不補零。")
     lines.append("PnL依官方費後結算，不重複扣費；不等於已領現金，亦不含額外AI成本分攤。")
     return "\n".join(lines)
+
+
+def format_live_report(root, *, now_ms=None, c180_formatter=None):
+    report = _format_live_report(root, now_ms=now_ms, c180_formatter=c180_formatter)
+    try:
+        from .regime_t66_report import format_observation_report
+        observation = format_observation_report(root, now_ms=now_ms)
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError):
+        observation = "T6.6觀測資料無法核對；不顯示未驗證的paper損益。"
+    return report + ("\n\n" + observation if observation else "")
