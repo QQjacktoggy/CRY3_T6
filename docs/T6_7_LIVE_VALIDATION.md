@@ -67,10 +67,11 @@ Spot 最多 1.5 秒、book 最多 1 秒。來源／接收時間均不得晚於�
 
 ## 人工部署與啟動
 
-目前只準備候選與獨立 VM staging，沒有切正式檔案、重啟服務、選擇 T6.7、
-Live arm 或建立新輪次。真正啟動自主實盤交易由使用者操作。
+2026-10-01 已於使用者取消 T6.5 後的安全空檔安裝正式 code 與專用報表，
+完整驗收見 [部署紀錄](T6_7_STAGING_20261001.md)。尚未選擇 T6.7、Live arm
+或建立新輪次；啟動自主實盤交易由使用者操作。
 
-1. 在本輪完整結束且無其他 RUNNING loop、未結持倉、未終結／UNKNOWN 訂單
+1. 在本輪完整結束（或使用者已明確取消並授權部署）且無其他 RUNNING loop、未結持倉、未終結／UNKNOWN 訂單
    的空檔部署；不可中斷目前 T6.5。官方 active orders／wallet positions 也須
    為零，不能只依本地資料庫判斷。
 2. 核對候選 `validation.json`、全部 source hashes、父版本 manifest／pin。
@@ -85,14 +86,16 @@ Live arm 或建立新輪次。真正啟動自主實盤交易由使用者操作�
 
    ```sh
    cd /home/jack_shih/cry3
-   testnet/.venv/bin/python prediction/t67-live-staged-v2-20261001/deploy/t67_manual_install.py
+   testnet/.venv/bin/python prediction/t67-live-staged-v5-20261001/deploy/t67_manual_install.py
    # 前置檢查通過後，由使用者明確執行安裝；不會選策略、arm 或開 loop。
-   testnet/.venv/bin/python prediction/t67-live-staged-v2-20261001/deploy/t67_manual_install.py --apply
+   testnet/.venv/bin/python prediction/t67-live-staged-v5-20261001/deploy/t67_manual_install.py --apply
    ```
 
-   兩者均要求 `loop:1790817223795` DONE 100/100、安全空檔、官方零曝險及
+   預設要求 `loop:1790817223795` DONE 100/100。使用者於 10/01 明確取消本輪並授權部署後，
+   可加入 `--allow-cancelled-loop` 接受 CANCELLED 且停止新進場；仍必須安全空檔、官方零曝險及
    完整 release 驗證。父版本不同會拒絕。失敗回復 source／manifest／pin，
-   不回復交易 DB。`--apply` 尚未執行，工具尚未經正式 VM 安裝驗證。
+   不回復交易 DB。v5 的 `--apply --allow-cancelled-loop --allow-historical-closed-ledger`
+   已在使用者授權的空檔執行並驗收；再次安裝需重新核對父版本，不可沿用舊父版本。
 4. Telegram `/predict_lane` 選 **Regime T6.7 四策略 Live 驗證**；
    `/predict_amount` 選 **1U** 作起始驗證。選擇／金額更動會按原機制解除
    Live 授權，這是尚未啟用的安全狀態，不會執行 T6.7 paper trades。
@@ -114,3 +117,9 @@ WR＝費後淨獲利筆數／（淨獲利＋淨虧損），平手與未結不計
 固定本輪參數，第一個 100 場以每分支成交量、缺資料／過期原因、實際成交率、
 WR、PnL、MDD 與風控停單為驗證結果。未取得足夠實際成交便報不足，不編造
 預期 30%／50% fill rate 或固定獲利目標；下一版須根據新成交結果再決定。
+
+## Telegram 報表
+
+`/report` 與 `/predict_report` 只選 T6.7 Live 輪次，顯示本輪進度、實際 BUY fill rate、官方費後 WR／PnL、四個子策略與必要停單狀態。其他版本、歷史累計績效與 Shadow 不混入。沒有 T6.7 輪次時顯示尚未開跑；無結算的子策略 WR／PnL 顯示「—」。舊交易紀錄保留。
+
+安裝檢查的 `--allow-historical-closed-ledger` 僅接受其他輪次、state=DONE、結束時間早於本輪建立的舊 campaign 缺少結算表列；pending UNKNOWN、未終結訂單與本輪未結算仍拒絕。官方持倉與掛單必須於部署前再次為零。舊 ledger 不改寫或補假結算。

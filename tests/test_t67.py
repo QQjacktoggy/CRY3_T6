@@ -350,7 +350,7 @@ def test_report_attributes_only_actual_fills_and_preserves_official_pnl(tmp_path
         db.execute("INSERT INTO prediction_regime_settlement_observations VALUES('s','c','1.234',?)",(S+300000,))
     text = format_live_report(tmp_path,now_ms=S+600000)
     assert 'T6.7 Live Report' in text and 'Live fill rate 100.0%' in text
-    assert 'external_lead_lag Live｜成交 1｜已知WR 100.0%｜已知PnL +1.2340' in text
+    assert '外部先行｜成交 1｜已知WR 100.0%｜已知PnL +1.2340' in text
     assert '本輪已知淨 PnL +1.2340' in text and 'Shadow' not in text
     with closing(sqlite3.connect(directory/'prediction.sqlite3')) as db, db:
         db.execute("UPDATE prediction_campaigns SET market_id='wrong'")

@@ -219,7 +219,7 @@ def report_pages(text, limit=3400):
     return pages
 
 
-def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None):
+def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None, profile_filter=None):
     now = int(time.time()*1000) if now_ms is None else int(now_ms)
     root = Path(root)
     uri = (root/"prediction/data/prediction.sqlite3").resolve().as_uri()+"?mode=ro"
@@ -229,9 +229,14 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None)
         conn.execute("BEGIN")
         # An active Shadow/other lane must never silently display an old Live
         # result. Without an active loop, show the most recently created loop.
-        loop = conn.execute("SELECT * FROM prediction_loops ORDER BY "
-                            "CASE WHEN state='RUNNING' THEN 0 ELSE 1 END,created_at_ms DESC,loop_id DESC LIMIT 1").fetchone()
+        where = " WHERE strategy_profile=? AND mode='LIVE'" if profile_filter else ""
+        loop = conn.execute("SELECT * FROM prediction_loops" + where + " ORDER BY "
+                            "CASE WHEN state='RUNNING' THEN 0 ELSE 1 END,created_at_ms DESC,loop_id DESC LIMIT 1",
+                            (profile_filter,) if profile_filter else ()).fetchone()
         if loop is None:
+            if profile_filter == T67_PROFILE:
+                from .regime_t67_report import empty_report
+                return empty_report(now)
             return "📊 Prediction Report｜尚無 loop。"
         loop = dict(loop)
         profile, loop_id = loop["strategy_profile"], loop["loop_id"]
@@ -254,20 +259,22 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None)
 
         rows = lambda sql, args=(): [dict(r) for r in conn.execute(sql,args)]
         slots = rows("SELECT * FROM prediction_regime_slots WHERE loop_id=? ORDER BY market_start_ms",(loop_id,))
+        scope = (T67_PROFILE,) if profile == T67_PROFILE else RISK_PROFILES
+        placeholders = ",".join("?" for _ in scope)
         campaigns = rows("SELECT c.*,l.strategy_profile AS lane_profile FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id "
-                         "WHERE l.strategy_profile IN (?,?,?,?,?,?,?,?) AND l.mode='LIVE'",RISK_PROFILES)
+                         "WHERE l.strategy_profile IN (" + placeholders + ") AND l.mode='LIVE'",scope)
         claims = rows("SELECT q.*,i.status,i.order_id,i.unknown,i.submission_at_ms FROM prediction_regime_entry_claims q "
                       "JOIN prediction_loops l ON l.loop_id=q.loop_id LEFT JOIN prediction_order_intents i ON i.intent_id=q.intent_id "
-                      "WHERE l.strategy_profile IN (?,?,?,?,?,?,?,?) AND l.mode='LIVE'",RISK_PROFILES)
+                      "WHERE l.strategy_profile IN (" + placeholders + ") AND l.mode='LIVE'",scope)
         fills = rows("SELECT DISTINCT f.campaign_id FROM prediction_fills f JOIN prediction_campaigns c ON c.campaign_id=f.campaign_id "
-                     "JOIN prediction_loops l ON l.loop_id=c.loop_id WHERE l.strategy_profile IN (?,?,?,?,?,?,?,?) AND l.mode='LIVE' AND f.order_side='BUY'",RISK_PROFILES)
+                     "JOIN prediction_loops l ON l.loop_id=c.loop_id WHERE l.strategy_profile IN (" + placeholders + ") AND l.mode='LIVE' AND f.order_side='BUY'",scope)
         settlements = rows("SELECT p.*,o.net_pnl AS observed_net,o.known_at_ms FROM prediction_settlements p "
                            "JOIN prediction_campaigns c ON c.campaign_id=p.campaign_id JOIN prediction_loops l ON l.loop_id=c.loop_id "
                            "LEFT JOIN prediction_regime_settlement_observations o ON o.settlement_id=p.settlement_id AND o.campaign_id=p.campaign_id "
-                           "WHERE l.strategy_profile IN (?,?,?,?,?,?,?,?) AND l.mode='LIVE'",RISK_PROFILES)
+                           "WHERE l.strategy_profile IN (" + placeholders + ") AND l.mode='LIVE'",scope)
         unknown_rows = rows("SELECT DISTINCT c.campaign_id FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id "
-                            "WHERE l.strategy_profile IN (?,?,?,?,?,?,?,?) AND l.mode='LIVE' AND (c.pending_unknown=1 OR EXISTS "
-                            "(SELECT 1 FROM prediction_order_intents i WHERE i.campaign_id=c.campaign_id AND i.unknown=1))",RISK_PROFILES)
+                            "WHERE l.strategy_profile IN (" + placeholders + ") AND l.mode='LIVE' AND (c.pending_unknown=1 OR EXISTS "
+                            "(SELECT 1 FROM prediction_order_intents i WHERE i.campaign_id=c.campaign_id AND i.unknown=1))",scope)
         gate_row = conn.execute("SELECT config_value_json FROM prediction_runtime_config WHERE config_key='regime_target6_risk_v1'").fetchone()
         gate = json.loads(gate_row[0]) if gate_row else None
         loop_guard_row = conn.execute(
@@ -276,7 +283,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None)
         loop_guard = json.loads(loop_guard_row[0]) if loop_guard_row else None
         selected_rows = conn.execute(
             "SELECT config_key,config_value_json FROM prediction_runtime_config "
-            "WHERE config_key IN ('prediction_selected_strategy','prediction_selected_order_unit')"
+            "WHERE config_key IN ('prediction_selected_strategy','prediction_selected_order_unit','prediction_hard_stop_latched')"
         ).fetchall()
         selected = {row[0]: json.loads(row[1]) for row in selected_rows}
         conn.commit()
@@ -327,6 +334,14 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None)
     inflight = sum(q["status"] is None or str(q["status"]).upper() not in TERMINAL or q["unknown"] for q in own_claims)
     current_pending = len(pending & current_ids)
     empty = sum(s["empty_attested_at_ms"] is not None for s in slots)
+    if profile == T67_PROFILE:
+        from .regime_t67_report import format_summary
+        return format_summary(root, now=now, loop=loop, slots=slots, campaigns=cmap,
+                              current_ids=current_ids, fill_ids=fill_ids, events=current,
+                              claims=own_claims, pending=current_pending, inflight=inflight,
+                              unknown=len(unknown_ids & current_ids), gate=gate,
+                              loop_guard=loop_guard, hs=selected.get('prediction_hard_stop_latched'),
+                              issues=issues)
     label = ("T6.7 Live Report｜三策略驗證" if profile == T67_PROFILE else "T6.5 Live Report｜A／flat／M4／M6 Shadow" if profile == T65_PROFILE else
              "T6.3b Live Report｜B／補位Shadow＋整輪回撤" if profile == T63B_PROFILE else
              "T6.3a Live Report｜T6.1補位Shadow" if profile == T63A_PROFILE else
@@ -358,20 +373,6 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None)
         if ended_starts:
             suffix = "訊號／路由不計入成交。" if profile == T67_PROFILE else "Shadow報價不計入成交。"
             lines.append(f"Live fill rate {closed_fills/len(ended_starts):.1%}（{closed_fills}/{len(ended_starts)} 已結束登錄市場）；{suffix}")
-
-    if profile == T67_PROFILE:
-        lines.append("三策略共用同市場一次BUY：外部先行、reference校正、淺回撤；原有風控接續。")
-        try:
-            from .regime_t67_policy import FINGERPRINT as T67_FP, BRANCHES
-            from .regime_t67_report import branch_metrics
-            metrics = branch_metrics(root, cmap, current_ids, fill_ids, current, fingerprint=T67_FP, slots=slots)
-            for branch in BRANCHES:
-                m = metrics[branch]
-                lines.append(f"{branch} Live｜成交 {m['fills']}｜已知WR {m['wr']}｜已知PnL {m['pnl']:+.4f} USDT｜待結算 {m['pending']}")
-            if metrics['unattributed']:
-                lines.append(f"子策略歸因待核對 {metrics['unattributed']} 筆；保留官方Live總PnL。")
-        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
-            lines.append("T6.7 子策略歸因待核對；保留官方Live總PnL。")
 
     if profile == T62_PROFILE:
         lines.append("T6.2：flat 原模型入場上限0.60；保留T6.1補位，可選每筆1/2/3U。")
@@ -498,10 +499,10 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None)
     return "\n".join(lines)
 
 
-def format_live_report(root, *, now_ms=None, c180_formatter=None):
+def format_live_report(root, *, now_ms=None, c180_formatter=None, profile_filter=None):
     context = {}
-    report = _format_live_report(root, now_ms=now_ms, c180_formatter=c180_formatter, context=context)
-    if context.get('profile') == T67_PROFILE:
+    report = _format_live_report(root, now_ms=now_ms, c180_formatter=c180_formatter, context=context, profile_filter=profile_filter)
+    if profile_filter == T67_PROFILE or context.get('profile') == T67_PROFILE:
         return report
     try:
         from .regime_t66_report import format_observation_report

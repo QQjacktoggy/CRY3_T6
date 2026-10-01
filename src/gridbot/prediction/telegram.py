@@ -2291,15 +2291,15 @@ class PredictionTelegramService:
 
 
     async def cmd_predict_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Report the active loop using its own lane ledger."""
+        """Show only T6.7 Live results; historical lanes stay out of this report."""
         if await self._deny_if_unauthorized(update):
             return
         try:
             import asyncio
             import pathlib
             root = pathlib.Path(__file__).resolve().parent.parent.parent.parent
-            from .live_report import format_live_report, report_pages
-            report = await asyncio.to_thread(format_live_report, root, c180_formatter=_format_c180_live_report)
+            from .live_report import T67_PROFILE, format_live_report, report_pages
+            report = await asyncio.to_thread(format_live_report, root, profile_filter=T67_PROFILE)
             for page in report_pages(report):
                 await self._reply(update, page, parse_mode=None)
         except Exception:  # noqa: BLE001 - do not leak DB or runtime details to Telegram
