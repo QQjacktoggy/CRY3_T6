@@ -10,6 +10,7 @@ and promotion prerequisites pass.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import re
 import traceback
 from dataclasses import asdict, dataclass, field, replace
@@ -34,6 +35,8 @@ from .client import (
     PredictionAPIError,
     PredictionReadTimestampError,
     PredictionClientError,
+    PredictionEntryNotSubmitted,
+    entry_http_guard_scope,
     available_balance_display,
     normalize_amount_in,
 )
@@ -1474,7 +1477,89 @@ class PredictionWorker:
         if len(queue) >= 2000:
             self._observability_dropped += 1
             return
+        attempt = getattr(self, "_entry_attempts", {}).get(campaign_id)
+        if attempt is not None:
+            fields = {"attempt_id": attempt["id"], "profile": self._selected_strategy_profile,
+                      "elapsed_ns": time.monotonic_ns()-attempt["started_ns"],
+                      "remaining_ms": attempt["expires_at_ms"]-self._now_ms(), **fields}
         queue.append((event,campaign_id,dict(version='observability-v1',at_ms=self._now_ms(),monotonic_ns=time.monotonic_ns(),**fields)))
+
+    def _start_entry_attempt(self, campaign, ready):
+        self._entry_attempts = getattr(self, "_entry_attempts", {})
+        self._finish_entry_attempt(campaign.campaign_id, "superseded_before_execution")
+        self._entry_attempts[campaign.campaign_id] = {
+            "id": str(uuid4()), "started_ns": time.monotonic_ns(),
+            "expires_at_ms": ready.execution.expires_at_ms}
+        self._trace_event("entry_selected", campaign_id=campaign.campaign_id)
+
+    def _finish_entry_attempt(self, campaign_id, reason, **fields):
+        if campaign_id in getattr(self, "_entry_attempts", {}):
+            self._trace_event("entry_finished", campaign_id=campaign_id, reason=reason, **fields)
+            self._entry_attempts.pop(campaign_id, None)
+
+    def _entry_durable_http_guard(self, loop_id, profile):
+        import sqlite3
+        from contextlib import closing
+        from .regime_lane import STATE_KEY as lane_key
+        from .regime_live_ledger import RISK_PROFILES
+        regime_entry = profile in RISK_PROFILES
+        guard_key = profile.removesuffix("_v1")+"_loop_risk:"+str(loop_id) if regime_entry else ""
+        try:
+            with closing(sqlite3.connect(self.repository.db_path.resolve().as_uri()+"?mode=ro",
+                                         uri=True, timeout=0.05)) as db:
+                row = db.execute(
+                    """SELECT l.state,l.mode,l.strategy_profile,l.new_entries_stopped,l.hard_stop_latched,
+                              r.config_value_json,lane.config_value_json,guard.config_value_json,
+                              EXISTS(SELECT 1 FROM prediction_campaigns c
+                                JOIN prediction_loops h ON h.loop_id=c.loop_id
+                                WHERE h.mode='LIVE' AND h.strategy_profile IN (?,?,?,?,?,?,?,?,?)
+                                  AND (c.pending_unknown=1 OR EXISTS(SELECT 1 FROM prediction_order_intents i
+                                    WHERE i.campaign_id=c.campaign_id AND i.unknown=1)))
+                       FROM prediction_loops l LEFT JOIN prediction_runtime_config r
+                         ON r.config_key='prediction_risk_state'
+                       LEFT JOIN prediction_runtime_config lane ON lane.config_key=?
+                       LEFT JOIN prediction_runtime_config guard ON guard.config_key=?
+                       WHERE l.loop_id=?""", (*RISK_PROFILES, lane_key if regime_entry else "", guard_key, loop_id)).fetchone()
+                if (not row or row[:3] != ("RUNNING", "LIVE", profile) or row[3] or row[4]
+                        or (row[5] and json.loads(row[5]).get("hard_stop_latched"))
+                        or (regime_entry and (row[8] or any(value and json.loads(value).get("halt_reason")
+                                                          for value in row[6:8])))):
+                    raise PredictionEntryNotSubmitted("durable_admission_rejected_before_http")
+        except PredictionEntryNotSubmitted:
+            raise
+        except Exception as exc:
+            raise PredictionEntryNotSubmitted("durable_admission_unavailable_before_http") from exc
+
+    def _entry_http_started(self, campaign_id, intent_id, at_ms, stamp):
+        self._trace_event("entry_http_start", campaign_id=campaign_id, intent_id=intent_id,
+                          http_at_ms=at_ms, http_monotonic_ns=stamp)
+        self._finish_entry_attempt(campaign_id, "post_started")
+
+    @contextmanager
+    def _entry_stage(self, campaign_id, stage):
+        began = time.monotonic_ns()
+        try:
+            yield
+        finally:
+            if campaign_id in getattr(self, "_entry_attempts", {}):
+                self._trace_event("entry_stage", campaign_id=campaign_id, stage=stage,
+                                  duration_ns=time.monotonic_ns()-began)
+
+    async def _entry_signal_within_window(self, bridge, campaign, start):
+        # Only local, read-only readiness is retried. No schedule/risk/API work
+        # is repeated and a frozen rejection never gets another selection.
+        missing = {"regime_features_missing_skip", "regime_initial_book_missing_skip",
+                   "t67a_features_missing"}
+        for attempt in range(9):
+            ready = bridge.check_signal(
+                market=campaign.market, unit_usdt=self._selected_order_unit_usdt,
+                at_ms=self._now_ms(), last_seen_book_at_ms=start +
+                (59999 if self._selected_strategy_profile == "regime_target6_7_v1" else 120000))
+            if (ready.allowed or ready.reason not in missing or attempt == 8
+                    or not start+124000 <= self._now_ms() < start+125900):
+                return ready
+            await asyncio.sleep(0.1)
+        return ready
 
     async def _observation_repository(self):
         # Never share the execution transaction connection: its commit/rollback
@@ -1499,13 +1584,13 @@ class PredictionWorker:
             if self._observability_dropped:
                 count,self._observability_dropped = self._observability_dropped,0
                 self._trace_event('dropped',count=count)
-            for _ in range(min(100,len(self._observability_events))):
-                event,cid,fields = self._observability_events[0]
-                try:
-                    await observer_repo.record_risk_event('EXECUTION_TIMING','INFO',event,campaign_id=cid,payload=fields)
-                except Exception:
-                    break
-                self._observability_events.pop(0)
+            # One small telemetry transaction, outside the selected-entry path.
+            batch = list(self._observability_events[:32])
+            try:
+                await observer_repo.record_execution_timings(batch)
+            except Exception:
+                return  # Retain events until a later flush succeeds.
+            del self._observability_events[:len(batch)]
 
     def _observe_campaign(self, campaign):
         if not self._s3s5_profile_active():
@@ -1558,7 +1643,18 @@ class PredictionWorker:
         if method_name in SIGNED_MUTATING_ENDPOINTS and not self.live_capability:
             raise RuntimeError(f"{method_name} is blocked while effective mode is {self.mode}")
         trace_cid = kwargs.pop('_trace_campaign_id', None)
+        if method_name in ("query_active_orders", "query_positions"):
+            trace_cid = trace_cid or getattr(self, "_entry_exposure_campaign_id", None)
         trace_iid = kwargs.pop('_trace_intent_id', None)
+        trace_attempt = getattr(self, "_entry_attempts", {}).get(trace_cid)
+        trace_fields = {"attempt_id": trace_attempt["id"]} if trace_attempt else {}
+        entry_deadline = kwargs.pop('_entry_deadline_ms', None)
+        entry_book_at = kwargs.pop('_entry_book_at_ms', None)
+        entry_loop = getattr(self, "_loop_id", None)
+        entry_profile = getattr(self, "_selected_strategy_profile", None)
+        book_max_age_ms = 1000 if entry_profile in {
+            "regime_target6_3_v1", "regime_target6_3a_v1", "regime_target6_3b_v1",
+            "regime_target6_5_v1", "regime_target6_7_v1", "regime_target6_7a_v1"} else 2000
         method = getattr(self.client, method_name)
         emergency = bool(kwargs.pop("_emergency", False))
         management = bool(kwargs.pop("_management", False))
@@ -1573,18 +1669,40 @@ class PredictionWorker:
             self._rate_limiter.note_deferred(weight, error=f"{method_name} deferred by local weight budget")
             raise PredictionRateLimitDeferred(method_name, health.as_dict())
         trace_start = time.monotonic_ns()
-        self._trace_event('api_start',campaign_id=trace_cid,method=method_name,intent_id=trace_iid)
+        self._trace_event('api_start',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,**trace_fields)
         try:
+            loop = asyncio.get_running_loop()
+            def entry_guard():
+                if entry_deadline is None:
+                    return
+                clock_now = self._now_ms()
+                if (clock_now >= entry_deadline or not self.live_capability
+                        or not self._allow_new_buys or self._hard_stop_latched
+                        or self._loop_id != entry_loop or self._selected_strategy_profile != entry_profile
+                        or entry_book_at is None or not 0 <= clock_now-entry_book_at <= book_max_age_ms):
+                    raise PredictionEntryNotSubmitted("entry_expired_or_control_changed_before_http")
+            def http_guard():
+                entry_guard()
+                if entry_deadline is not None:
+                    self._entry_durable_http_guard(entry_loop, entry_profile)
+                    entry_guard()  # The durable read itself must not consume the deadline.
+                    # Capture the actual boundary time, not later telemetry flush.
+                    at_ms, stamp = self._now_ms(), time.monotonic_ns()
+                    loop.call_soon_threadsafe(lambda: self._entry_http_started(trace_cid, trace_iid, at_ms, stamp))
+            def invoke():
+                entry_guard()  # Also guards injected/custom clients before invocation.
+                with entry_http_guard_scope(http_guard if entry_deadline is not None else None):
+                    return method(*args, **kwargs)
             with request_budget_scope("exit" if emergency else ("management" if management else "normal"), shared_prepaid):
-                result = await asyncio.to_thread(method, *args, **kwargs)
+                result = await asyncio.to_thread(invoke)
         except SharedBudgetDeferred as exc:
             raise PredictionRateLimitDeferred(method_name, exc.health) from exc
         except Exception as exc:
-            self._trace_event('api_error',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,error_type=type(exc).__name__)
+            self._trace_event('api_error',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,error_type=type(exc).__name__,**trace_fields)
             if getattr(exc, "status_code", None) == 429 or "429" in str(exc) or "rate limit" in str(exc).lower():
                 self._rate_limiter.note_rate_limit(error=str(exc))
             raise
-        self._trace_event('api_ack',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start)
+        self._trace_event('api_ack',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,**trace_fields)
         self._rate_limiter.note_success()
         now = self._now_ms()
         self.heartbeat.last_api_ok_at_ms = now
@@ -1610,7 +1728,10 @@ class PredictionWorker:
         now = self._now_ms()
         self.heartbeat.last_db_write_at_ms = now
         await self.repository.set_runtime_config("prediction_heartbeat", self.heartbeat.as_dict())
-        if hasattr(self,'_observability_flush_lock'):
+        tight_window = any(not c.pending_intent_id and not c.position.has_any
+                           and int(c.market.start_time_ms)+123000 <= now < int(c.market.start_time_ms)+126000
+                           for c in self._active_campaigns.values())
+        if hasattr(self,'_observability_flush_lock') and not tight_window and not getattr(self, "_entry_attempts", {}):
             await self._flush_observability()
 
     def _status(self) -> dict[str, Any]:
@@ -1814,33 +1935,25 @@ class PredictionWorker:
 
     async def _persist_risk_state(self, snapshot: RiskSnapshot) -> None:
         day = datetime.now(ZoneInfo("Asia/Taipei")).date().isoformat()
+        payload = {"day": day, "daily_net_pnl": str(snapshot.daily_net_pnl),
+                   "loop_net_pnl": str(snapshot.loop_net_pnl),
+                   "consecutive_losses": snapshot.consecutive_losses,
+                   "order_attempts": snapshot.order_attempts, "buy_count": snapshot.buy_count,
+                   "hard_stop_latched": bool(snapshot.hard_stop_latched),
+                   "soft_cooldown_until_ms": snapshot.soft_cooldown_until_ms}
+        saver = getattr(self.repository, "save_risk_snapshot", None)
+        if callable(saver):
+            await saver(payload)
+            return
         existing = await self.repository.get_runtime_config("prediction_risk_state", {})
         existing = existing if isinstance(existing, Mapping) else {}
-        reset_fields = {
-            key: existing[key]
-            for key in (
-                "hard_stop_reset_day",
-                "hard_stop_reset_at_ms",
-                "hard_stop_reset_count",
-                "hard_stop_reset_baseline_pnl",
-                "raw_daily_net_pnl",
-            )
-            if key in existing
-        }
-        await self.repository.set_runtime_config(
-            "prediction_risk_state",
-            {
-                **reset_fields,
-                "day": day,
-                "daily_net_pnl": str(snapshot.daily_net_pnl),
-                "loop_net_pnl": str(snapshot.loop_net_pnl),
-                "consecutive_losses": snapshot.consecutive_losses,
-                "order_attempts": snapshot.order_attempts,
-                "buy_count": snapshot.buy_count,
-                "hard_stop_latched": bool(snapshot.hard_stop_latched),
-                "soft_cooldown_until_ms": snapshot.soft_cooldown_until_ms,
-            },
-        )
+        for key in ("hard_stop_reset_day", "hard_stop_reset_at_ms", "hard_stop_reset_count",
+                    "hard_stop_reset_baseline_pnl", "raw_daily_net_pnl"):
+            if key in existing:
+                payload[key] = existing[key]
+        if existing.get("day") == day and existing.get("hard_stop_latched"):
+            payload["hard_stop_latched"] = True
+        await self.repository.set_runtime_config("prediction_risk_state", payload)
 
     async def status(self) -> dict[str, Any]:
         await self.restore_order_unit()
@@ -5412,12 +5525,24 @@ class PredictionWorker:
         if not self.settings.wallet_address:
             return False
         try:
-            orders = await self._query_active_order_rows()
-            positions = await self._call_api(
-                "query_positions", wallet_address=self.settings.wallet_address,
-            )
+            if getattr(self.client, "concurrent_reads", False) is True:
+                results = await asyncio.gather(
+                    self._query_active_order_rows(),
+                    self._call_api("query_positions", wallet_address=self.settings.wallet_address),
+                    return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
+                orders, positions = results
+            else:
+                # Session-based/custom transports have not opted into threading.
+                orders = await self._query_active_order_rows()
+                positions = await self._call_api(
+                    "query_positions", wallet_address=self.settings.wallet_address)
         except (PredictionRateLimitDeferred, PredictionClientError):
             return False
+        finally:
+            self._entry_exposure_campaign_id = None
         return not orders and not any(
             self._official_position_shares(item) > 0
             for item in self._official_position_rows(positions)
@@ -5425,6 +5550,7 @@ class PredictionWorker:
 
     async def _c180_decide(self, campaign, now_ms):
         def hold(reason):
+            self._finish_entry_attempt(campaign.campaign_id, reason)
             return StrategyDecision(ActionType.HOLD, campaign.state, "c180 " + reason)
         bridge = self._c180_bridge_for_worker()
         if bridge is None or not self._loop_id:
@@ -5458,16 +5584,20 @@ class PredictionWorker:
             # Freeze the original T+124..126 signal before the wallet/network
             # checks.  This is read-only and cannot submit an order.  The
             # durable claim still rechecks risk and fresh execution depth.
-            ready = bridge.check_signal(
-                market=campaign.market, unit_usdt=self._selected_order_unit_usdt,
-                at_ms=self._now_ms(), last_seen_book_at_ms=start + (59999 if self._selected_strategy_profile == "regime_target6_7_v1" else 120000),
-            )
+            ready = await self._entry_signal_within_window(bridge, campaign, start)
             if not ready.allowed or ready.signal is None or ready.execution is None:
                 return hold(ready.reason)
-            gate = await bridge.prepare_market(
-                loop_id=self._loop_id, market=campaign.market, now_ms=self._now_ms(),
-                unit_usdt=self._selected_order_unit_usdt, already_registered=True,
-            )
+            self._start_entry_attempt(campaign, ready)
+            self._entry_exposure_campaign_id = campaign.campaign_id
+            try:
+                with self._entry_stage(campaign.campaign_id, "prepare_risk_and_official_exposure"):
+                    gate = await bridge.prepare_market(
+                        loop_id=self._loop_id, market=campaign.market, now_ms=self._now_ms(),
+                        unit_usdt=self._selected_order_unit_usdt, already_registered=True,
+                        trace=lambda stage, duration_ns: self._trace_event("entry_stage",
+                            campaign_id=campaign.campaign_id, stage=stage, duration_ns=duration_ns))
+            finally:
+                self._entry_exposure_campaign_id = None
         else:
             gate = await bridge.prepare_market(
                 loop_id=self._loop_id, market=campaign.market, now_ms=now_ms,
@@ -5989,6 +6119,8 @@ class PredictionWorker:
                     return False
         elif decision.is_trade and permitted:
             await self._handle_decision(campaign, decision)
+        elif decision.is_trade:
+            self._finish_entry_attempt(campaign.campaign_id, "buy_permission_disabled")
 
         # Sibling Lane: FAV_P3_LIVE Independent Real Order Lane
         try:
@@ -7599,7 +7731,26 @@ class PredictionWorker:
         self.heartbeat.markets_seen += 1
         return await self.manage_campaign(campaign)
 
+    async def _reject_unsubmitted_entry(self, campaign, intent, previous_state, reason):
+        # The claim/counters remain durable. Known no HTTP must not latch UNKNOWN.
+        await self.repository.update_intent(intent.intent_id, status="REJECTED", unknown=False,
+            payload_json={"not_submitted": True, "reason": reason})
+        campaign.pending_intent_id = None
+        campaign.pending_unknown = False
+        campaign.state = previous_state
+        await self.repository.save_campaign(campaign)
+        self._finish_entry_attempt(campaign.campaign_id, reason)
+
     async def _handle_decision(self, campaign: Campaign, decision: StrategyDecision) -> None:
+        try:
+            await self._handle_decision_inner(campaign, decision)
+        except BaseException as exc:
+            self._finish_entry_attempt(campaign.campaign_id, "execution_exception", error_type=type(exc).__name__)
+            raise
+        finally:
+            self._finish_entry_attempt(campaign.campaign_id, "execution_return_without_post")
+
+    async def _handle_decision_inner(self, campaign: Campaign, decision: StrategyDecision) -> None:
         from src.gridbot.prediction import r3_reversal_guard as r3guard
         c180_buy = (self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1'}
                     and decision.action is ActionType.BUY_INITIAL)
@@ -7608,6 +7759,7 @@ class PredictionWorker:
             if (not bound_loop or str(bound_loop.get("strategy_profile") or "").lower() not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1'}
                     or str(bound_loop.get("mode") or "").upper() != "LIVE"
                     or str(bound_loop.get("state") or "").upper() != "RUNNING"):
+                self._finish_entry_attempt(campaign.campaign_id, "loop_not_live")
                 return
             ready = getattr(self, "_c180_ready", {}).get(campaign.campaign_id)
             has_buy = getattr(self.repository, "has_market_buy", None)
@@ -7617,6 +7769,7 @@ class PredictionWorker:
                     or campaign.position.has_any or campaign.buy_count
                     or campaign.pending_intent_id or campaign.pending_unknown
                     or not callable(has_buy) or await has_buy(campaign.campaign_id)):
+                self._finish_entry_attempt(campaign.campaign_id, "frozen_entry_invalid")
                 return
         if c180_buy and self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1'}:
             if (bound_loop.get("strategy_profile") != self._selected_strategy_profile
@@ -7625,6 +7778,7 @@ class PredictionWorker:
                     or ready.execution is None
                     or decision.outcome.value != ready.signal.entry.side
                     or decision.limit_price != ready.execution.worst_ask_limit):
+                self._finish_entry_attempt(campaign.campaign_id, "profile_or_frozen_provenance_mismatch")
                 return
         # Defense at the execution boundary, independent of in-memory signals.
         # An old/stale BUY_ADD decision must not bypass the single-market rule.
@@ -7689,7 +7843,8 @@ class PredictionWorker:
             if shares <= 0 or decision.amount != shares:
                 return
             strategy_leg = "FAV_EXIT" if fav_exit else "R3_EXIT_A"
-        snapshot = await self._risk_snapshot(campaign)
+        with self._entry_stage(campaign.campaign_id, "generic_risk_snapshot"):
+            snapshot = await self._risk_snapshot(campaign)
         snapshot.hard_stop_latched = self._hard_stop_latched or snapshot.hard_stop_latched
         # C180's settled-trade 20-run gate replaces the previous Loop/day PnL
         # and consecutive-loss soft guards, while preserving hard-stop latch,
@@ -7700,12 +7855,14 @@ class PredictionWorker:
         risk = self.risk_engine.evaluate(assessed, now_ms=self._now_ms(), action=decision.action)
         if assessed.hard_stop_latched:
             snapshot.hard_stop_latched = True
-        await self._persist_risk_state(snapshot)
+        with self._entry_stage(campaign.campaign_id, "generic_risk_persist"):
+            await self._persist_risk_state(snapshot)
         if risk.mode.value == "HARD_STOP" and (not c180_buy or assessed.hard_stop_latched):
             # A C180 per-market attempt cap blocks this market; it must not
             # become a process-wide operator/unknown hard-stop latch.
             self._hard_stop_latched = True
         if not risk.allow_trading:
+            self._finish_entry_attempt(campaign.campaign_id, "risk_rejected")
             return
         is_buy = decision.order_side is OrderSide.BUY or decision.action in {
             ActionType.BUY_INITIAL,
@@ -7718,21 +7875,27 @@ class PredictionWorker:
             # a deterministic LIMIT fill in SQLite instead of returning at
             # the signed API boundary.
             if ((is_buy and not self._allow_new_buys) or (not is_buy and not self._allow_reductions)):
+                self._finish_entry_attempt(campaign.campaign_id, "buy_permission_disabled")
                 return
             if decision.is_trade:
                 await self._simulate_shadow_decision(campaign, decision)
+            self._finish_entry_attempt(campaign.campaign_id, "live_not_armed")
             return
         if is_buy and (not self._allow_new_buys or self._hard_stop_latched):
+            self._finish_entry_attempt(campaign.campaign_id, "buy_permission_disabled")
             return
         if not is_buy and not self._allow_reductions:
+            self._finish_entry_attempt(campaign.campaign_id, "reduction_permission_disabled")
             return
         if not self.settings.wallet_address or not self.settings.wallet_id:
+            self._finish_entry_attempt(campaign.campaign_id, "wallet_configuration_missing")
             return
         if decision.action is ActionType.BUY_INITIAL:
             # Check the local/read-only regime monitor before constructing an
             # intent or reserving execution weight.  Repeated RED/WAIT_DATA
             # decisions must not consume the capacity needed by recovery.
             if not await self._check_regime_entry_gate(campaign):
+                self._finish_entry_attempt(campaign.campaign_id, "regime_gate_rejected")
                 return
         is_fav_baseline = (strategy_leg == "FAV" and decision.action is ActionType.BUY_INITIAL)
         is_sniper = (strategy_leg == "LATE_SNIPER" and decision.action is ActionType.BUY_INITIAL)
@@ -7809,6 +7972,7 @@ class PredictionWorker:
                     "priority": "initial_entry" if initial_entry_priority else "normal",
                 },
             )
+            self._finish_entry_attempt(campaign.campaign_id, "local_budget_deferred")
             return
 
         shared_budget = getattr(self.client, "request_budget", None)
@@ -7821,6 +7985,7 @@ class PredictionWorker:
                 payload={"order_side": intent.order_side.value, "retryable": True, "read_only": True,
                          "health": shared_budget.health()},
             )
+            self._finish_entry_attempt(campaign.campaign_id, "execution_guard_rejected")
             return
 
         if fresh_exit_book:
@@ -7949,6 +8114,7 @@ class PredictionWorker:
                     "read_only": True,
                 },
             )
+            self._finish_entry_attempt(campaign.campaign_id, "execution_guard_rejected")
             return
         quote_id = str(quote.get("quoteId") or quote.get("quote_id") or "") if isinstance(quote, Mapping) else ""
         if not quote_id:
@@ -7966,6 +8132,7 @@ class PredictionWorker:
                     "read_only": True,
                 },
             )
+            self._finish_entry_attempt(campaign.campaign_id, "quote_missing_id")
             return
         self.heartbeat.last_error = None
 
@@ -7985,41 +8152,60 @@ class PredictionWorker:
             bridge = self._c180_bridge_for_worker()
             ready = getattr(self, "_c180_ready", {}).get(campaign.campaign_id)
             if bridge is None or ready is None or ready.book_at_ms is None:
+                self._finish_entry_attempt(campaign.campaign_id, "bridge_or_frozen_book_missing")
                 return
-            refreshed = None
-            for _ in range(8):
-                refreshed = bridge.check_signal(
-                    market=campaign.market, unit_usdt=self._selected_order_unit_usdt,
-                    at_ms=self._now_ms(), last_seen_book_at_ms=ready.book_at_ms,
-                )
-                if refreshed.reason != "quote_not_new_after_ready":
-                    break
-                await asyncio.sleep(0.1)
+            with self._entry_stage(campaign.campaign_id, "fresh_book_wait"):
+                refreshed = None
+                for _ in range(8):
+                    refreshed = bridge.check_signal(
+                        market=campaign.market, unit_usdt=self._selected_order_unit_usdt,
+                        at_ms=self._now_ms(), last_seen_book_at_ms=ready.book_at_ms,
+                    )
+                    if refreshed.reason != "quote_not_new_after_ready":
+                        break
+                    await asyncio.sleep(0.1)
             if (not refreshed.allowed or refreshed.execution is None
                     or refreshed.execution.worst_ask_limit is None
                     or refreshed.execution.worst_ask_limit > intent.limit_price
                     or refreshed.signal != ready.signal):
+                self._finish_entry_attempt(campaign.campaign_id, "fresh_execution_rejected", detail=refreshed.reason)
                 return
             if self._now_ms() >= refreshed.execution.expires_at_ms:
+                self._finish_entry_attempt(campaign.campaign_id, "execution_expired_after_book")
                 return
             balance = await self._call_api(
                 "query_payment_option_balances", recv_window=self.settings.recv_window,
+                _trace_campaign_id=campaign.campaign_id, _trace_intent_id=intent.intent_id,
                 _weight_pre_acquired=True, _shared_pre_acquired=True,
             )
             available = available_balance_display(
                 balance, account_type=self._balance_account_type(self.settings))
             if available is None or available < max(intent.amount, self.settings.required_balance_usdt):
+                self._finish_entry_attempt(campaign.campaign_id, "balance_insufficient")
                 return
             wallet_checked_at_ms = self._now_ms()
             if wallet_checked_at_ms >= refreshed.execution.expires_at_ms:
+                self._finish_entry_attempt(campaign.campaign_id, "execution_expired_after_balance")
                 return
             intent = replace(intent, created_at_ms=wallet_checked_at_ms)
-            claim = await bridge.ledger.reserve_c180_intent(
-                loop_id=self._loop_id, market_start_ms=campaign.market.start_time_ms,
-                campaign_id=campaign.campaign_id, intent=intent,
-                decision_at_ms=self._now_ms(),
-                wallet_reconciled_at_ms=wallet_checked_at_ms,
-            )
+            atomic_regime_entry = self._selected_strategy_profile.startswith("regime_target6")
+            claim_options = {}
+            if atomic_regime_entry:
+                claim_options = dict(
+                    expires_at_ms=ready.execution.expires_at_ms,
+                    entry_campaign=replace(campaign, state=decision.state,
+                        initial_attempts=campaign.initial_attempts+1,
+                        order_attempts=campaign.order_attempts+1,
+                        pending_intent_id=intent.intent_id, pending_unknown=False),
+                    trace=lambda stage, duration_ns: self._trace_event(
+                        "entry_stage", campaign_id=campaign.campaign_id, stage=stage, duration_ns=duration_ns))
+            with self._entry_stage(campaign.campaign_id, "claim_total"):
+                claim = await bridge.ledger.reserve_c180_intent(
+                    loop_id=self._loop_id, market_start_ms=campaign.market.start_time_ms,
+                    campaign_id=campaign.campaign_id, intent=intent,
+                    decision_at_ms=self._now_ms(),
+                    wallet_reconciled_at_ms=wallet_checked_at_ms, **claim_options,
+                )
             if not claim.claimed:
                 await self.repository.record_risk_event(
                     "C180_ENTRY_CLAIM_REJECTED", "WARNING", claim.reason,
@@ -8030,6 +8216,7 @@ class PredictionWorker:
                         "reason": claim.reason,
                     },
                 )
+                self._finish_entry_attempt(campaign.campaign_id, "claim_rejected", detail=claim.reason)
                 return
         if s3s5_buy:
             if strategy_leg == "FAV":
@@ -8052,8 +8239,10 @@ class PredictionWorker:
         campaign.pending_intent_id = intent.intent_id
         campaign.pending_unknown = False
         campaign.order_attempts += 1
-        if s3s5_buy or c180_buy:
-            # The intent is already durable, even if this campaign save fails.
+        if c180_buy and atomic_regime_entry:
+            pass  # Full entry transition was committed with the claim/intent.
+        elif s3s5_buy or c180_buy:
+            # Legacy C180 and S3 keep their original persistence path.
             await self.repository.save_campaign(campaign)
         elif hasattr(self.repository, "save_campaign_and_intent"):
             await self.repository.save_campaign_and_intent(campaign, intent)
@@ -8063,11 +8252,35 @@ class PredictionWorker:
         # boundary; API start/ack below carry the precise monotonic span.
         if c180_buy:
             ready = getattr(self, "_c180_ready", {}).get(campaign.campaign_id)
-            if ready is None or ready.execution is None or self._now_ms() > ready.execution.expires_at_ms:
+            if ready is None or ready.execution is None or self._now_ms() >= ready.execution.expires_at_ms:
                 # The claim is durable; retain it for reconciliation.  No
                 # signed request is made after the frozen execution window.
-                campaign.pending_unknown = True
+                await self._reject_unsubmitted_entry(campaign, intent, pre_submit_state,
+                                                      "execution_expired_after_claim")
+                return
+        if c180_buy:
+            checked = bridge.check_signal(market=campaign.market,
+                unit_usdt=self._selected_order_unit_usdt, at_ms=self._now_ms(),
+                last_seen_book_at_ms=ready.book_at_ms)
+            bound = await self.repository.get_loop(self._loop_id)
+            risk_state = await self.repository.get_runtime_config("prediction_risk_state", {})
+            if (not checked.allowed or checked.signal != ready.signal or checked.execution is None
+                    or checked.execution.worst_ask_limit is None
+                    or checked.execution.worst_ask_limit > intent.limit_price
+                    or not self.live_capability or not self._allow_new_buys or self._hard_stop_latched
+                    or bool(risk_state.get("hard_stop_latched"))
+                    or not bound or bound.get("state") != "RUNNING"
+                    or bound.get("new_entries_stopped") or bound.get("hard_stop_latched")
+                    or self._now_ms() >= ready.execution.expires_at_ms):
+                # Durable claim remains a one-entry barrier. This is known not sent.
+                await self.repository.update_intent(intent.intent_id, status="REJECTED", unknown=False,
+                    payload_json={"not_submitted": True, "reason": "post_claim_admission_rejected"})
+                campaign.pending_intent_id = None
+                campaign.pending_unknown = False
+                campaign.state = pre_submit_state
                 await self.repository.save_campaign(campaign)
+                self._finish_entry_attempt(campaign.campaign_id, "post_claim_admission_rejected",
+                                           book_reason=checked.reason)
                 return
         submitted_ms = self._now_ms()
         ttl_deadline_ms = submitted_ms + max(0, int(intent.ttl_ms))
@@ -8075,18 +8288,31 @@ class PredictionWorker:
             # The frozen shadow entry expires at the absolute C180 deadline.
             # Submission latency must not extend a real order beyond it.
             ttl_deadline_ms = min(ttl_deadline_ms, ready.execution.expires_at_ms)
-        await self.repository.update_intent(intent.intent_id, submission_at_ms=submitted_ms,
-            ttl_deadline_ms=ttl_deadline_ms)
+        with self._entry_stage(campaign.campaign_id, "submission_marker"):
+            await self.repository.update_intent(intent.intent_id, submission_at_ms=submitted_ms,
+                ttl_deadline_ms=ttl_deadline_ms)
         intent = replace(intent, created_at_ms=submitted_ms)
         if c180_buy:
             ready = getattr(self, "_c180_ready", {}).get(campaign.campaign_id)
-            if ready is None or ready.execution is None or self._now_ms() > ready.execution.expires_at_ms:
-                campaign.pending_unknown = True
-                await self.repository.save_campaign(campaign)
+            if ready is None or ready.execution is None or self._now_ms() >= ready.execution.expires_at_ms:
+                await self._reject_unsubmitted_entry(campaign, intent, pre_submit_state,
+                                                      "execution_expired_after_claim")
+                return
+        if c180_buy:
+            final_book = bridge.check_signal(market=campaign.market,
+                unit_usdt=self._selected_order_unit_usdt, at_ms=self._now_ms(),
+                last_seen_book_at_ms=ready.book_at_ms)
+            if (not final_book.allowed or final_book.signal != ready.signal
+                    or final_book.execution is None or final_book.execution.worst_ask_limit is None
+                    or final_book.execution.worst_ask_limit > intent.limit_price):
+                await self._reject_unsubmitted_entry(campaign, intent, pre_submit_state,
+                                                      "book_rejected_after_submission_marker")
                 return
         try:
             order = await self._call_api(
                 "place_order", _trace_campaign_id=campaign.campaign_id, _trace_intent_id=intent.intent_id, wallet_address=self.settings.wallet_address, wallet_id=self.settings.wallet_id,
+                _entry_deadline_ms=ready.execution.expires_at_ms if c180_buy else None,
+                _entry_book_at_ms=final_book.book_at_ms if c180_buy else None,
                 quote_id=quote_id, account_type=self.settings.account_type, order_type=self.settings.order_type,
                 time_in_force=self.settings.time_in_force, slippage_bps=self.settings.slippage_bps,
                 price_limit=str(intent.limit_price), funding_source=getattr(self.settings, "funding_source", "MPC"),
@@ -8155,19 +8381,20 @@ class PredictionWorker:
                 # Action counters/flags were committed with the cumulative
                 # snapshot; avoid a second in-memory increment here.
                 await self.repository.save_campaign(campaign)
-        except PredictionRateLimitDeferred as exc:
-            # The HTTP budget rejected place_order before transport was called.
+        except (PredictionRateLimitDeferred, PredictionEntryNotSubmitted) as exc:
+            # Budget/admission rejected place_order before transport was called.
             # Keep the attempt, but do not invent an unknown exchange submission.
-            if exc.method_name != "place_order":
+            if isinstance(exc, PredictionRateLimitDeferred) and exc.method_name != "place_order":
                 raise
             campaign.pending_unknown = False
             campaign.pending_intent_id = None
             campaign.state = pre_submit_state
             await self.repository.update_intent(intent.intent_id, unknown=False, status="REJECTED",
-                payload_json={"error": str(exc), "not_submitted": True, "shared_budget_deferred": True})
+                payload_json={"error": str(exc), "not_submitted": True, "shared_budget_deferred": isinstance(exc, PredictionRateLimitDeferred)})
             await self.repository.save_campaign(campaign)
             await self.repository.record_risk_event("EXECUTION_DEFERRED", "WARNING", str(exc),
                 campaign_id=campaign.campaign_id, payload={"not_submitted": True, "intent_id": intent.intent_id})
+            self._finish_entry_attempt(campaign.campaign_id, "not_submitted_before_http")
             return
         except Exception as exc:  # noqa: BLE001 - unknown execution is never retried blindly
             campaign.pending_unknown = True

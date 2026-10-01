@@ -42,6 +42,11 @@ class FakeBridge:
 
 class FakeWorker:
     _c180_decide = PredictionWorker._c180_decide
+    _finish_entry_attempt = PredictionWorker._finish_entry_attempt
+    _start_entry_attempt = PredictionWorker._start_entry_attempt
+    _entry_stage = PredictionWorker._entry_stage
+    _entry_signal_within_window = PredictionWorker._entry_signal_within_window
+    _trace_event = PredictionWorker._trace_event
 
     def __init__(self, bridge, times):
         self.bridge = bridge

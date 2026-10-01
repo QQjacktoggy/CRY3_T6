@@ -19,6 +19,8 @@ the indexed ``cancelInfoList[0].orderId`` keys are not rewritten to
 from __future__ import annotations
 
 import hashlib
+from contextvars import ContextVar
+from contextlib import contextmanager
 import os
 from .rate_limit import SharedRequestBudget, SharedBudgetDeferred, REQUEST_PRIORITY, REQUEST_PREPAID
 import hmac
@@ -51,6 +53,22 @@ READ_TIMESTAMP_RETRY_PATHS = frozenset(
         "/position/settled-history", "/redeem/status",
     )
 )
+
+
+class PredictionEntryNotSubmitted(RuntimeError):
+    """Local admission failed before the HTTP transport; no unknown execution."""
+
+
+_ENTRY_HTTP_GUARD = ContextVar("prediction_entry_http_guard", default=None)
+
+
+@contextmanager
+def entry_http_guard_scope(guard):
+    token = _ENTRY_HTTP_GUARD.set(guard)
+    try:
+        yield
+    finally:
+        _ENTRY_HTTP_GUARD.reset(token)
 
 
 class PredictionClientError(RuntimeError):
@@ -119,6 +137,8 @@ class PredictionTransport(Protocol):
 
 class UrllibTransport:
     """stdlib transport; no third-party HTTP package is required."""
+
+    concurrent_reads = True  # No shared session/cookies or mutable request state.
 
     def request(
         self,
@@ -409,6 +429,10 @@ class BinancePredictionClient:
         self.request_budget = SharedRequestBudget(budget_path) if budget_path else None
         self.last_response_budget_headers = {}
 
+    @property
+    def concurrent_reads(self) -> bool:
+        return getattr(self.transport, "concurrent_reads", False) is True
+
     def set_order_unit_usdt(self, value: Decimal | str | int) -> Decimal:
         """Update the HTTP BUY ceiling to one reviewed runtime unit."""
 
@@ -462,6 +486,10 @@ class BinancePredictionClient:
                 body = canonical.encode("utf-8")
             sent_at = int(time.time() * 1000)
             monotonic_start = time.monotonic_ns()
+            if upper_method == "POST" and path == PREDICTION_PREFIX + "/trade/place-order-bundle":
+                guard = _ENTRY_HTTP_GUARD.get()
+                if guard is not None:
+                    guard()  # After budget/signing, immediately before transport.
             response = self.transport.request(upper_method, url, headers=headers, body=body, timeout=self.timeout)
             received_at = int(time.time() * 1000)
             timing = dict(attempt=attempt+1, signed_at_ms=signed_at, sent_at_ms=sent_at,

@@ -14,6 +14,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Mapping
+import re
+
+from .repository import CAMPAIGN_UPSERT_SQL
 
 from .c180_batch_gate import SettledTrade, block_bounds, evaluate_batch_gate
 from .c180_gate_runtime import LiveSettlement, LoopLedgerSnapshot, SLOT_MS
@@ -84,6 +87,47 @@ def _campaign_matches_slot(campaign: Mapping[str, Any] | None,
         return False
 
 
+class _LoopSnapshotReads:
+    """Transaction-local SELECT batching; reuse the exact single-loop validators.
+
+    No cache survives a risk check. Each evidence query is read for every loop
+    in chunks on the caller's existing SQLite snapshot, then partitioned by ID.
+    Only the explicit one-loop SELECTs used by _snapshot_conn are accepted.
+    """
+    def __init__(self, ledger, conn, loops):
+        self.ledger, self.conn = ledger, conn
+        self.loops = {row["loop_id"]: row for row in loops}
+        self.cache = {}
+
+    async def rows(self, sql, params):
+        if len(params) != 1 or params[0] not in self.loops:
+            raise ValueError("invalid batched snapshot query")
+        if sql == "SELECT * FROM prediction_loops WHERE loop_id=?":
+            return [self.loops[params[0]]]
+        if sql not in self.cache:
+            match = re.search(r"WHERE (c\.)?loop_id=\?", sql)
+            if not match:
+                raise ValueError("unreviewed batched snapshot query")
+            column = (match.group(1) or "") + "loop_id"
+            select = re.match(r"SELECT(?: DISTINCT)? ", sql)
+            if not select:
+                raise ValueError("unreviewed batched snapshot select")
+            grouped = {key: [] for key in self.loops}
+            ids = list(self.loops)
+            for offset in range(0, len(ids), 200):
+                chunk = ids[offset:offset+200]
+                query = sql[:match.start()] + "WHERE " + column + " IN (" + ",".join("?" for _ in chunk) + ")" + sql[match.end():]
+                query = query[:select.end()] + column + " AS _snapshot_loop_id," + query[select.end():]
+                # The orphan probe's LIMIT 1 is per loop in the original path.
+                # Fetch all probes here so an orphan in any loop is retained.
+                query = re.sub(r" LIMIT 1\s*$", "", query)
+                for row in await self.ledger._rows(self.conn, query, tuple(chunk)):
+                    key = row.pop("_snapshot_loop_id")
+                    grouped[key].append(row)
+            self.cache[sql] = grouped
+        return self.cache[sql][params[0]]
+
+
 class RegimeLiveLedger:
     """Use one already-initialized PredictionRepository instance."""
 
@@ -116,7 +160,7 @@ class RegimeLiveLedger:
                      "first_market_start_ms": start, "unit_usdt": "1",
                      "halt_reason": None}
         loops = await self._rows(conn,
-            "SELECT loop_id FROM prediction_loops WHERE strategy_profile IN (?,?,?,?,?,?,?,?,?) AND mode='LIVE'",
+            "SELECT * FROM prediction_loops WHERE strategy_profile IN (?,?,?,?,?,?,?,?,?) AND mode='LIVE'",
             RISK_PROFILES)
         unknown = await self._row(conn,
             """SELECT 1 FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id
@@ -127,8 +171,9 @@ class RegimeLiveLedger:
             state["halt_reason"] = state.get("halt_reason") or "unknown_order_reconciliation_required"
         settlements, unresolved, complete = [], False, True
         own_snapshot = None
+        reads = _LoopSnapshotReads(self, conn, loops)
         for loop in loops:
-            snapshot = await self._snapshot_conn(conn, loop["loop_id"], now)
+            snapshot = await self._snapshot_conn(reads, loop["loop_id"], now)
             if loop["loop_id"] == loop_id:
                 own_snapshot = snapshot
             complete = complete and snapshot.complete
@@ -208,6 +253,8 @@ class RegimeLiveLedger:
                 raise
 
     async def _rows(self, conn: Any, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        if isinstance(conn, _LoopSnapshotReads):
+            return await conn.rows(sql, params)
         cursor = await conn.execute(sql, params)
         try:
             return [dict(row) for row in await cursor.fetchall()]
@@ -314,6 +361,32 @@ class RegimeLiveLedger:
             if not possible_exposure:
                 safe.add(start)
         return safe
+
+    async def market_is_registered(self, *, loop_id, market) -> bool:
+        """One durable read proves the full schedule, identity and risk epoch.
+
+        A restart or changed/deleted row cannot be hidden by a memory cache.
+        Failure falls back to the original registration/epoch initialization.
+        Admission and atomic claim still perform current full risk checks.
+        """
+        rows = await self.repository._fetchall(
+            """SELECT sl.*,l.target,l.strategy_profile,r.config_value_json AS risk_state
+               FROM prediction_regime_slots sl JOIN prediction_loops l ON l.loop_id=sl.loop_id
+               LEFT JOIN prediction_runtime_config r ON r.config_key=?
+               WHERE sl.loop_id=? ORDER BY sl.run_ordinal""", (self.state_key, str(loop_id)))
+        if not rows or not rows[0]["risk_state"]:
+            return False
+        anchor = int(rows[0]["market_start_ms"])
+        if (anchor <= 0 or anchor % SLOT_MS or len(rows) < int(rows[0]["target"])
+                or rows[0]["strategy_profile"] != self.profile
+                or any(int(row["run_ordinal"]) != index+1 or
+                       int(row["market_start_ms"]) != anchor+index*SLOT_MS
+                       for index, row in enumerate(rows))):
+            return False
+        return any(int(row["market_start_ms"]) == int(market.start_time_ms)
+                   and row["verified_at_ms"] is not None
+                   and row["market_topic_id"] == market.market_topic_id
+                   and row["market_id"] == market.up_market_id for row in rows)
 
     async def seed_schedule(self, *, loop_id: str, first_market_start_ms: int) -> int:
         """Persist all target 5-minute slots before the first live entry."""
@@ -618,6 +691,7 @@ class RegimeLiveLedger:
     async def reserve_c180_intent(
         self, *, loop_id: str, market_start_ms: int, campaign_id: str,
         intent: Any, decision_at_ms: int, wallet_reconciled_at_ms: int,
+        expires_at_ms: int | None = None, entry_campaign: Any = None, trace=None,
     ) -> C180ClaimResult:
         """Recheck gate and insert one BUY intent/claim in one IMMEDIATE tx.
 
@@ -647,10 +721,31 @@ class RegimeLiveLedger:
         except Exception:
             return C180ClaimResult(False, "invalid_c180_intent")
 
+        def measured(stage, began):
+            if trace is not None:
+                try:
+                    trace(stage, time.monotonic_ns() - began)
+                except Exception:
+                    pass  # Telemetry failure cannot change trading authorization.
+        lock_started = time.monotonic_ns()
         async with self.repository._operation_gate.lock:
+            measured("claim_lock", lock_started)
             conn = self.repository._require_conn()
+            begin_started = time.monotonic_ns()
             await self.repository._begin(conn)
+            measured("claim_begin", begin_started)
             try:
+                # Lock/BEGIN may have waited. Do not authorize using an old clock.
+                now = _now_ms()
+                if abs(now - int(decision_at_ms)) > 2000:
+                    await conn.rollback()
+                    return C180ClaimResult(False, "decision_time_stale_after_lock")
+                if not 0 <= now - int(wallet_reconciled_at_ms) <= 2000:
+                    await conn.rollback()
+                    return C180ClaimResult(False, "wallet_reconciliation_stale_after_lock")
+                if expires_at_ms is not None and now >= int(expires_at_ms):
+                    await conn.rollback()
+                    return C180ClaimResult(False, "execution_expired_after_lock")
                 loop_row = await self._loop(conn, loop)
                 if str(loop_row.get("strategy_profile") or "").lower() != self.profile:
                     await conn.rollback()
@@ -691,10 +786,32 @@ class RegimeLiveLedger:
                 if not start + begin <= now < start + end or not Decimal("0") < Decimal(str(values[6])) <= self.max_price:
                     await conn.rollback()
                     return C180ClaimResult(False, "regime_time_or_price_invalid")
+                risk_started = time.monotonic_ns()
                 allowed, reason = await self._risk_conn(conn, loop, start, now)
+                measured("claim_history_risk", risk_started)
                 if not allowed:
                     await conn.commit()
                     return C180ClaimResult(False, reason)
+                final_now = _now_ms()
+                if (not start + begin <= final_now < start + end
+                        or (expires_at_ms is not None and final_now >= int(expires_at_ms))
+                        or not 0 <= final_now - int(wallet_reconciled_at_ms) <= 2000):
+                    await conn.commit()  # Preserve any newly latched risk state.
+                    return C180ClaimResult(False, "execution_expired_during_claim_risk")
+                campaign_values = None
+                if entry_campaign is not None:
+                    campaign_values = list(self.repository._campaign_values(entry_campaign))
+                    campaign_values[1] = loop
+                    if (campaign_values[0] != str(campaign_id)
+                            or campaign_values[2] != campaign["market_topic_id"]
+                            or campaign_values[5] != start
+                            or campaign_values[7] != "INITIAL_PENDING"
+                            or campaign_values[14] != int(campaign["order_attempts"])+1
+                            or campaign_values[15] != int(campaign["initial_attempts"])+1
+                            or campaign_values[17] != values[0] or campaign_values[18]
+                            or campaign["pending_intent_id"] or campaign["pending_unknown"]):
+                        await conn.rollback()
+                        return C180ClaimResult(False, "entry_campaign_transition_invalid")
                 await conn.execute(
                     """INSERT INTO prediction_order_intents
                        (intent_id,campaign_id,action,outcome,order_side,amount,limit_price,
@@ -708,16 +825,23 @@ class RegimeLiveLedger:
                        VALUES(?,?,?,?,?,?)""",
                     (loop, start, str(campaign_id), values[0], str(unit), now),
                 )
-                await conn.execute(
-                    "UPDATE prediction_campaigns SET pending_intent_id=?,updated_at_ms=? WHERE campaign_id=?",
-                    (values[0], now, str(campaign_id)),
-                )
+                if campaign_values is not None:
+                    await conn.execute(CAMPAIGN_UPSERT_SQL, tuple(campaign_values))
+                else:
+                    # Standalone callers retain the legacy minimal transition.
+                    await conn.execute(
+                        "UPDATE prediction_campaigns SET pending_intent_id=?,updated_at_ms=? WHERE campaign_id=?",
+                        (values[0], now, str(campaign_id)))
                 row = await self._row(conn,
                     "SELECT * FROM prediction_order_intents WHERE intent_id=?", (values[0],),
                 )
+                commit_started = time.monotonic_ns()
                 await conn.commit()
+                measured("claim_commit", commit_started)
                 return C180ClaimResult(True, "claimed", row)
-            except Exception as exc:
+            except BaseException as exc:
                 await conn.rollback()
+                if not isinstance(exc, Exception):
+                    raise
                 logging.getLogger(__name__).exception("regime_claim_transaction_failed")
                 return C180ClaimResult(False, "claim_transaction_failed:" + type(exc).__name__)

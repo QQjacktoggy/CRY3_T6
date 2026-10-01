@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
@@ -47,6 +48,9 @@ class RegimeWorkerBridge:
                 or (self.profile not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE) and unit_usdt != Decimal(1))):
             return C180Ready(False, "regime_requires_fixed_1_usdt")
         try:
+            if await self.ledger.market_is_registered(loop_id=loop_id, market=market):
+                self._registered_loop_id = str(loop_id)
+                return C180Ready(True, "regime_market_registered")
             rows = await self.repository._fetchall(
                 "SELECT MIN(market_start_ms) AS anchor FROM prediction_regime_slots WHERE loop_id=?", (loop_id,))
             anchor = rows[0]["anchor"] if rows and rows[0]["anchor"] else int(market.start_time_ms)
@@ -62,7 +66,7 @@ class RegimeWorkerBridge:
         return C180Ready(True, "regime_market_registered")
 
     async def prepare_market(self, *, loop_id, market, now_ms, unit_usdt,
-                             already_registered=False):
+                             already_registered=False, trace=None):
         # The worker registers every campaign before deciding.  Preserve the
         # standalone caller path, but do not repeat schedule/identity/risk
         # registration inside its two-second initial-decision window.
@@ -72,7 +76,13 @@ class RegimeWorkerBridge:
             if not registered.allowed:
                 return registered
         try:
+            began = time.monotonic_ns()
             allowed, reason = await self.ledger.check_risk(loop_id, market.start_time_ms, now_ms)
+            if trace is not None:
+                try:
+                    trace("prepare_history_risk", time.monotonic_ns()-began)
+                except Exception:
+                    pass
             if allowed and (self.exposure_checker is None or not await self.exposure_checker()):
                 return C180Ready(False, "account_exposure_not_clear")
             return C180Ready(allowed, reason)
