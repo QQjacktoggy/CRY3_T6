@@ -1285,7 +1285,7 @@ class PredictionRepository:
         return claimed
 
     async def load_unresolved_intents(self) -> list[dict[str, Any]]:
-        return await self._fetchall("SELECT * FROM prediction_order_intents WHERE status NOT IN ('FILLED','CLOSED','CANCELLED','CANCELED','EXPIRED','FAILED') OR unknown = 1 ORDER BY created_at_ms")
+        return await self._fetchall("SELECT * FROM prediction_order_intents WHERE status NOT IN ('FILLED','CLOSED','CANCELLED','CANCELED','EXPIRED','FAILED','REJECTED') OR unknown = 1 ORDER BY created_at_ms")
 
     async def get_order_cumulative(self, order_id: str) -> dict[str, Any] | None:
         return await self.get_order(order_id)
