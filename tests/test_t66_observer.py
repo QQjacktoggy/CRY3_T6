@@ -71,6 +71,16 @@ def test_frozen_direction_and_boundaries():
     assert new['M7_DOWN']['side']=='DOWN'
 
 
+def test_stress_ignores_deep_levels_outside_binary_price_domain():
+    b=book('.6','.4',128000)
+    b['quote']['UP']['ask_levels'] += [['.97','100'],['.98','100'],['.99','100']]
+    c=policy.candidates(feature(2,'-.1',2),None,book('.6','.4'))[1]['M8_UP']
+    q=obs._quote(c,b)
+    assert q['stress_tick2'] is not None
+    assert D(q['stress_tick2']['limit'])==D('.62')
+    assert 0<D(q['stress_tick2']['cash'])<=1
+
+
 def test_activation_idempotent_bounded_and_no_trade_schema(tmp_path):
     db,sig=setup(tmp_path)
     old=obs.state(db)

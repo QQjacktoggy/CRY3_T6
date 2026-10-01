@@ -118,7 +118,9 @@ def _quote(candidate, book):
     ex = eligible_execution(candidate, book, Decimal(1))
     result = {k: str(ex[k]) for k in ("cash", "net_shares", "limit")}
     result["fee_bps"] = str(book["fee_bps"])
-    stressed = [[str(dec(p)+Decimal('.02')), q] for p, q in book["quote"][candidate["side"]]["ask_levels"]]
+    stressed = [[str(dec(p)+Decimal('.02')), q]
+                for p, q in book["quote"][candidate["side"]]["ask_levels"]
+                if dec(p)+Decimal('.02') < 1]
     # Same frozen candidate at a worse price; do not select a new favorable market.
     try:
         ex = walk(stressed, book["fee_bps"], cap=Decimal('.99'), amount=Decimal(1))
