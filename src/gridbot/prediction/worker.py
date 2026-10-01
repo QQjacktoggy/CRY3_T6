@@ -2819,6 +2819,19 @@ class PredictionWorker:
                     # The local flag still prevents admission if persistence
                     # is unavailable; the caller will retry reconciliation.
                     self._hard_stop_latched = True
+                # A denied cancellation must keep existing execution alive
+                # for reconciliation/settlement under the latched Hard Stop.
+                # Releasing this flag never enables admission or BUY.
+                self._cancel_requested = False
+                active_exposure = any(
+                    campaign.state not in {CampaignState.DONE, CampaignState.CANCELLED}
+                    and (campaign.position.has_any or campaign.pending_intent_id or campaign.pending_unknown)
+                    for campaign in self._active_campaigns.values()
+                )
+                task = getattr(self, "_task", None)
+                if (active_exposure and loop_id and self._loop_id == loop_id
+                        and (task is None or task.done())):
+                    self._task = asyncio.create_task(self._run_loop(), name="prediction-market-loop")
                 return {**self._status(), "action_denied": True, "reason": message, **extra}
 
             active_loop = await self.repository.get_active_loop()
