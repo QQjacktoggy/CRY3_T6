@@ -18,6 +18,25 @@ def schema(db):
     db.commit()
 
 
+def _usable_depth(book):
+    """Incomplete public depth cannot form a Shadow trigger/checkpoint."""
+    try:
+        for side in ('UP', 'DOWN'):
+            levels = book['quote'][side]['ask_levels']
+            if not isinstance(levels, (list, tuple)) or not levels:
+                return False
+            for level in levels:
+                if not isinstance(level, (list, tuple)) or len(level) != 2:
+                    return False
+                price, quantity = (dec(value) for value in level)
+                if (not price.is_finite() or not quantity.is_finite()
+                        or not 0 < price < 1 or quantity <= 0):
+                    return False
+        return True
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False
+
+
 def observe(db, prediction_db, signal_db, at_ms):
     """First causal executable quote per branch, even when Live is filled/held."""
     from .regime_worker_bridge import RegimeWorkerBridge
@@ -46,6 +65,11 @@ def observe(db, prediction_db, signal_db, at_ms):
     stamp = RegimeWorkerBridge._book(book, market, at_ms)
     if at_ms-stamp > 1000 or int(book['reference_received_ms']) > at_ms or dec(book['reference']) <= 0:
         raise ValueError('shadow_reference_or_book_stale')
+    if not _usable_depth(book):
+        return 'shadow_book_depth_unavailable'
+    # Invalid historical depth is missing evidence, never a manufactured
+    # trigger or confirmation. Keep the valid book clocks unchanged.
+    prior_books = [snapshot for snapshot in books[:-1] if _usable_depth(snapshot)]
     schema(db)
     prior = db.execute('SELECT payload FROM t67a_shadow_states WHERE start=?', (start,)).fetchone()
     state = json.loads(prior[0]) if prior else dict(
@@ -58,7 +82,7 @@ def observe(db, prediction_db, signal_db, at_ms):
         raise ValueError('shadow_frozen_identity_unit_fee_mismatch')
     # No feature input means the public-model observer cannot manufacture any
     # old core, shallow, C-UP or Live eligibility.
-    choices = candidates(book, spots, None, state, at_ms, unit, books[:-1])
+    choices = candidates(book, spots, None, state, at_ms, unit, prior_books)
     with db:
         for c in choices:
             if c['branch'] not in SHADOW_BRANCHES:
