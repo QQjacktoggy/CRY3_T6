@@ -2405,6 +2405,7 @@ class PredictionWorker:
             self._target_markets = count
             self._loop_loss_limit_reached = False
             self._cancel_requested = False
+            self._settlement_only_recovery = False
             self._accept_new_markets = True
             self._allow_new_orders = True
             self._allow_new_buys = True
@@ -2823,15 +2824,32 @@ class PredictionWorker:
                 # for reconciliation/settlement under the latched Hard Stop.
                 # Releasing this flag never enables admission or BUY.
                 self._cancel_requested = False
-                active_exposure = any(
-                    campaign.state not in {CampaignState.DONE, CampaignState.CANCELLED}
-                    and (campaign.position.has_any or campaign.pending_intent_id or campaign.pending_unknown)
-                    for campaign in self._active_campaigns.values()
-                )
+                # A restarted process may not have adopted the durable loop
+                # yet. Recover only campaigns owned by this exact loop, and
+                # include fully reduced fills still awaiting final settlement.
                 task = getattr(self, "_task", None)
-                if (active_exposure and loop_id and self._loop_id == loop_id
+                if (loop_id and self._loop_id in (None, loop_id)
                         and (task is None or task.done())):
-                    self._task = asyncio.create_task(self._run_loop(), name="prediction-market-loop")
+                    metadata = await self.repository.get_active_campaign_metadata()
+                    owned = {str(row['campaign_id']) for row in metadata
+                             if str(row.get('loop_id') or '') == loop_id}
+                    needs_management = False
+                    for campaign in self._active_campaigns.values():
+                        if (campaign.campaign_id not in owned or
+                                campaign.state in {CampaignState.DONE, CampaignState.CANCELLED}):
+                            continue
+                        if (campaign.position.has_any or campaign.pending_intent_id
+                                or campaign.pending_unknown
+                                or await self.repository.get_fills(campaign.campaign_id)):
+                            needs_management = True
+                            break
+                    if needs_management:
+                        self._loop_id = loop_id
+                        self._target_markets = int(active_loop['target'])
+                        self._loop_created_at_ms = self._loop_origin_ms(active_loop, loop_id=loop_id)
+                        self.heartbeat.markets_completed = int(active_loop['completed'])
+                        self._settlement_only_recovery = True
+                        self._task = asyncio.create_task(self._run_loop(), name="prediction-market-loop")
                 return {**self._status(), "action_denied": True, "reason": message, **extra}
 
             active_loop = await self.repository.get_active_loop()
@@ -3137,6 +3155,7 @@ class PredictionWorker:
             return {**self._status(), "action_denied": True, "reason": "hard stop is latched"}
         existing = await self.repository.get_active_loop()
         if not existing:
+            self._settlement_only_recovery = False
             self._accept_new_markets = True
             self._allow_new_orders = True
             self._allow_new_buys = True
@@ -3210,6 +3229,7 @@ class PredictionWorker:
                 },
             )
             self._adaptive_jump_stop_latched = False
+        self._settlement_only_recovery = False
         self._accept_new_markets = True
         self._allow_new_orders = True
         self._allow_new_buys = True
@@ -3487,11 +3507,15 @@ class PredictionWorker:
     async def settle_campaign(self, campaign: Campaign) -> dict[str, Any]:
         """Persist settlement/PnL and redeem only after a confirmed close."""
 
-        # Shadow is an execution boundary, not merely a missing-wallet
-        # fallback.  Even if dotenv contains wallet fields, Shadow must use
-        # the counterfactual settlement path and can never redeem on-chain.
-        if self._effective_mode is RuntimeMode.SHADOW:
+        execution_mode = await self.repository.get_campaign_execution_mode(campaign.campaign_id)
+        if execution_mode == "SHADOW":
             return await self._settle_shadow_campaign(campaign)
+        if execution_mode != "LIVE":
+            return {"campaign_id": campaign.campaign_id, "status": "SETTLEMENT_PROVENANCE_UNKNOWN"}
+        if self._effective_mode is not RuntimeMode.LIVE:
+            # A restart/Live-off revokes signing permission, not ownership of
+            # real fills. Keep the campaign recoverable until Live is armed.
+            return {"campaign_id": campaign.campaign_id, "status": "LIVE_SETTLEMENT_PENDING_AUTHORIZATION"}
         if not self.settings.wallet_address:
             return {"campaign_id": campaign.campaign_id, "status": "SHADOW_PENDING"}
         prior = await self.repository.get_settlement(campaign.campaign_id)
@@ -4073,6 +4097,8 @@ class PredictionWorker:
     async def _settle_shadow_campaign(self, campaign: Campaign) -> dict[str, Any]:
         """Resolve official market outcome and append shadow settlement/evidence."""
 
+        if await self.repository.get_campaign_execution_mode(campaign.campaign_id) != "SHADOW":
+            return {"campaign_id": campaign.campaign_id, "status": "SETTLEMENT_PROVENANCE_UNKNOWN"}
         await self._ensure_shadow_window()
         existing_shadow: Mapping[str, Any] | None = None
         existing_getter = getattr(self.repository, "get_shadow_campaign_for_campaign", None)
@@ -5910,6 +5936,8 @@ class PredictionWorker:
                 self._active_campaigns.pop(campaign.campaign_id, None)
                 self._settlement_attempt_at_ms.pop(campaign.campaign_id, None)
                 return True
+            return False
+        if getattr(self, "_settlement_only_recovery", False):
             return False
         if self._selected_strategy_profile not in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1'} and self._defer_pre_entry_quote_collection(campaign, now_ms=self._now_ms()):
             # The staged policy intentionally starts its first book sample

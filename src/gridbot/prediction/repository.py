@@ -297,6 +297,31 @@ class PredictionRepository:
             "SELECT * FROM prediction_loops ORDER BY created_at_ms DESC, rowid DESC LIMIT 1"
         )
 
+    async def get_campaign_execution_mode(self, campaign_id: str) -> str | None:
+        """Durable execution identity; the current process mode is not provenance."""
+        row = await self._fetchone(
+            """SELECT l.mode,
+                      EXISTS(SELECT 1 FROM prediction_order_intents WHERE campaign_id=c.campaign_id)
+                      OR EXISTS(SELECT 1 FROM prediction_orders WHERE campaign_id=c.campaign_id)
+                      OR EXISTS(SELECT 1 FROM prediction_fills WHERE campaign_id=c.campaign_id)
+                      OR EXISTS(SELECT 1 FROM prediction_settlements WHERE campaign_id=c.campaign_id)
+                      AS live_execution,
+                      EXISTS(SELECT 1 FROM prediction_shadow_campaigns WHERE campaign_id=c.campaign_id)
+                      AS shadow_execution
+               FROM prediction_campaigns c
+               LEFT JOIN prediction_loops l ON l.loop_id=c.loop_id
+               WHERE c.campaign_id=?""", (str(campaign_id),),
+        )
+        if row is None:
+            return None
+        # Execution evidence also protects legacy loops whose migration mode
+        # defaulted to SHADOW. Paper execution lives in separate shadow tables.
+        if row['live_execution'] or str(row['mode'] or '').upper() == 'LIVE':
+            return 'LIVE'
+        if str(row['mode'] or '').upper() == 'SHADOW' or row['shadow_execution']:
+            return 'SHADOW'
+        return None
+
     async def get_active_campaign_metadata(self) -> list[dict[str, Any]]:
         """Return the durable ownership cursor for active campaigns.
 
@@ -542,10 +567,11 @@ class PredictionRepository:
                 "SELECT strategy_profile,mode FROM prediction_loops WHERE loop_id=?",
                 (str(loop_id),),
             )
-        if not (durable_risk_loop and str(durable_risk_loop[0]).lower() in {
-                "c180_favorite_hold_v1", "regime_target6_v1",
-                "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1',
-                'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1'} and str(durable_risk_loop[1]).upper() == "LIVE"):
+        from .regime_live_ledger import RISK_PROFILES
+
+        if not (durable_risk_loop and str(durable_risk_loop[0]).lower() in
+                ("c180_favorite_hold_v1", *RISK_PROFILES)
+                and str(durable_risk_loop[1]).upper() == "LIVE"):
             latched = latched or daily <= daily_limit or consecutive >= consecutive_limit
         state = {
             "day": day.isoformat(),
