@@ -17,6 +17,123 @@ from src.gridbot.prediction.strategy import StrategyConfig
 from src.gridbot.prediction.telegram import _regime_risk_text, selectable_lanes_for_market
 from src.gridbot.prediction.worker import PredictionWorker
 from test_t63 import S, book, feature
+from test_t67a import setup, state
+
+
+@pytest.mark.parametrize('first,last,prior,initial_up,next_up,branch', [
+    (2, -1, 2, '.30', '.29', 'core_first_up'),
+    (2, -1, -2, '.60', '.61', 'shallow_retracement'),
+    (-1, 3, 2, '.70', '.69', 'c_mirror_up_prior'),
+])
+def test_new_book_refreshes_execution_but_preserves_selected_signal_across_restart(
+        tmp_path, first, last, prior, initial_up, next_up, branch):
+    from src.gridbot.prediction import regime_worker_bridge as b
+    from src.gridbot.prediction.regime_lane import walk
+
+    bridge, check = setup(tmp_path, feature(first, last, prior), book(initial_up, '.40', 124000))
+    ready = check()
+    assert ready.allowed, ready.reason
+    assert state(bridge)['branch'] == branch
+    frozen_json = state(bridge)['signal']
+    newer = book(next_up, '.40', 124400)
+    refreshed = check(newer, seen=ready.book_at_ms)
+    assert refreshed.allowed, refreshed.reason
+    # The worker compares these immutable signals before reserving its BUY.
+    assert refreshed.signal == ready.signal
+    assert refreshed.execution.expected_shares != ready.execution.expected_shares
+    assert refreshed.signal.entry.expected_shares == ready.execution.expected_shares
+    assert refreshed.execution.expected_shares == walk(
+        newer['quote']['UP']['ask_levels'], newer['fee_bps'],
+        cap=refreshed.execution.worst_ask_limit, amount=D(1))['net_shares']
+    assert state(bridge)['signal'] == frozen_json
+
+    restarted = b.RegimeWorkerBridge(None, bridge.signal_db, feature_db=bridge.feature_db, profile=PROFILE)
+    restarted._registered_loop_id = bridge._registered_loop_id
+    market = SimpleNamespace(start_time_ms=S, market_topic_id='topic', up_market_id='up')
+    with patch.object(b, 'read_c180_book', return_value=newer):
+        after_restart = restarted.check_signal(market=market, unit_usdt=D(1),
+            at_ms=S+124400, last_seen_book_at_ms=ready.book_at_ms)
+    assert after_restart.allowed, after_restart.reason
+    assert after_restart.signal == ready.signal
+    assert after_restart.execution == refreshed.execution
+
+
+def test_same_book_requests_worker_retry_but_stale_book_does_not(tmp_path):
+    bridge, check = setup(tmp_path, feature(2, -1, 2), book('.30', '.70', 124000))
+    ready = check()
+    assert ready.allowed, ready.reason
+    same = check(at=S+124100, seen=ready.book_at_ms)
+    assert not same.allowed and same.reason == 'quote_not_new_after_ready'
+    stale = check(at=S+125100, seen=ready.book_at_ms)
+    assert not stale.allowed and stale.reason == 't67a_fresh_book_required'
+    assert check(book('.29', '.71', 125200), seen=ready.book_at_ms).allowed
+
+
+@pytest.mark.parametrize('failure', ['cap', 'depth', 'original_ev'])
+def test_frozen_signal_does_not_authorize_adverse_fresh_execution(tmp_path, failure):
+    from src.gridbot.prediction.c180_favorite import C180EntryDecision
+    from src.gridbot.prediction.c180_signal_service import C180Signal
+
+    original = None
+    f = feature(2, -1, 2)
+    initial = book('.30', '.70', 124000)
+    newer = book('.31', '.69', 124400)
+    if failure == 'depth':
+        newer = book('.29', '.71', 124400)
+        newer['quote']['UP']['ask_levels'] = [['.29', '.01']]
+    elif failure == 'original_ev':
+        f = feature(2, 1, 2)
+        initial = book('.80', '.20', 124000)
+        initial['quote']['DOWN']['ask_levels'] = [['.15', '1'], ['.20', '100']]
+        entry = C180EntryDecision('DOWN', 'original', 'DOWN', D(1), D(5), None)
+        original = C180Signal(S, 'topic', 'up', S+120000, S+120500,
+            'entry_positive_cost_after_ev', entry, D('.795'), None, None, D(200))
+        newer = book('.80', '.20', 124400)
+    bridge, check = setup(tmp_path, f, initial, original)
+    ready = check()
+    assert ready.allowed, ready.reason
+    frozen = state(bridge)['signal']
+    if failure == 'original_ev':
+        from src.gridbot.prediction.regime_lane import walk
+        assert D(newer['quote']['DOWN']['ask_levels'][0][0]) <= D(state(bridge)['cap'])
+        execution = walk(newer['quote']['DOWN']['ask_levels'], newer['fee_bps'], D(state(bridge)['cap']))
+        assert (1-ready.signal.original_p_up)*execution['net_shares']-execution['cash'] <= D('.005')
+    rejected = check(newer, seen=ready.book_at_ms)
+    assert not rejected.allowed
+    assert state(bridge)['signal'] == frozen
+    assert state(bridge)['side'] == ready.signal.entry.side
+
+
+@pytest.mark.parametrize('failure', ['missing', 'topic', 'id', 'unit', 'fee'])
+def test_existing_selection_requires_valid_stored_signal_without_rebuilding(tmp_path, failure):
+    import json
+
+    bridge, check = setup(tmp_path, feature(2, -1, 2), book('.30', '.70', 124000))
+    ready = check()
+    assert ready.allowed, ready.reason
+    d = state(bridge)
+    if failure == 'missing':
+        del d['signal']
+    else:
+        signal = json.loads(d['signal'])
+        if failure == 'topic':
+            signal['market_topic'] = 'different'
+        elif failure == 'id':
+            signal['market_id'] = 'different'
+        elif failure == 'unit':
+            signal['entry']['stake_usdt'] = '2'
+        elif failure == 'fee':
+            signal['frozen_fee_bps'] = '300'
+        d['signal'] = json.dumps(signal)
+    with sqlite3.connect(bridge.feature_db) as db:
+        db.execute('UPDATE t67a_decisions SET payload=? WHERE start=?', (json.dumps(d), S))
+    rejected = check(book('.29', '.71', 124400), seen=ready.book_at_ms)
+    assert not rejected.allowed
+    assert rejected.reason == ('t67a_frozen_signal_missing' if failure == 'missing'
+                               else 't67a_frozen_signal_identity_unit_fee_mismatch')
+    persisted = state(bridge)
+    assert persisted['selected'] and persisted['selected_at_ms'] == S+124000
+    assert persisted.get('signal') == d.get('signal')
 
 
 def test_t67a_profile_keeps_fixed_units_risk_and_suppresses_sibling_lanes():

@@ -88,8 +88,10 @@ def check_signal(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
     try:
         snapshot = b.read_c180_book(bridge.signal_db, start)
         stamp = bridge._book(snapshot, market, at_ms)
-        if at_ms-stamp > 1000 or stamp <= last_seen_book_at_ms:
+        if at_ms-stamp > 1000:
             return b.C180Ready(False, 't67a_fresh_book_required')
+        if stamp <= last_seen_book_at_ms:
+            return b.C180Ready(False, 'quote_not_new_after_ready')
         with closing(b.connect(bridge.feature_db)) as db:
             db.execute('CREATE TABLE IF NOT EXISTS t67a_decisions(start INTEGER PRIMARY KEY,payload TEXT NOT NULL)')
             db.commit()
@@ -129,6 +131,14 @@ def check_signal(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
                         continue
                     d.update(candidate, selected=True, selected_at_ms=at_ms,
                              expires_at_ms=start+136000 if not guard['empty'] else min(start+136000, at_ms+POLICY['quote_ttl_ms']))
+                    p = dec(d['probability']) if d.get('action') == 'original' else None
+                    if p is not None and d['side'] == 'DOWN':
+                        p = 1-p
+                    entry = b.C180EntryDecision(d['side'], 'regime_entry', d['side'], unit_usdt,
+                                                ex['net_shares'], None)
+                    signal = b.C180Signal(start, market.market_topic_id, market.up_market_id, start+120000,
+                                         at_ms, 'regime_frozen_entry', entry, p, FINGERPRINT, None, dec(d['fee_bps']))
+                    d['signal'] = b._signal_json(signal)
                     break
             d['last_evaluated_ms'] = at_ms
             db.execute('INSERT INTO t67a_decisions VALUES(?,?) ON CONFLICT(start) DO UPDATE SET payload=excluded.payload',
@@ -138,15 +148,19 @@ def check_signal(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
             return b.C180Ready(False, 't67a_no_live_candidate:'+guard['reason'])
         if at_ms >= d['expires_at_ms']:
             return b.C180Ready(False, 't67a_selected_quote_expired')
+        if not d.get('signal'):
+            return b.C180Ready(False, 't67a_frozen_signal_missing')
+        signal = b._from_signal_json(d['signal'])
+        if (signal.market_start_ms != start or signal.market_topic != market.market_topic_id
+                or signal.market_id != market.up_market_id or signal.cutoff_ms != start+120000
+                or signal.completed_at_ms != d['selected_at_ms'] or not signal.is_entry
+                or signal.entry.side != d['side'] or signal.entry.action != d['side']
+                or signal.entry.stake_usdt != unit_usdt or signal.frozen_fee_bps != dec(d['fee_bps'])
+                or signal.original_input_sha256 != FINGERPRINT):
+            return b.C180Ready(False, 't67a_frozen_signal_identity_unit_fee_mismatch')
         is_core = d['branch'].startswith('core_')
         ex = (eligible_execution(d, snapshot, unit_usdt) if is_core else
               new_execution(snapshot, d['side'], unit_usdt, lower=d['lower'], cap=d['cap']))
-        p = dec(d['probability']) if d.get('action') == 'original' else None
-        if p is not None and d['side'] == 'DOWN':
-            p = 1-p
-        entry = b.C180EntryDecision(d['side'], 'regime_entry', d['side'], unit_usdt, ex['net_shares'], None)
-        signal = b.C180Signal(start, market.market_topic_id, market.up_market_id, start+120000,
-                             d['selected_at_ms'], 'regime_frozen_entry', entry, p, FINGERPRINT, None, dec(d['fee_bps']))
         recheck = b.C180ExecutionRecheck(True, 't67a_ready', at_ms, d['expires_at_ms'],
                                       dec(d['cap']), ex['cash'], ex['net_shares'], None)
         return b.C180Ready(True, 't67a_ready:'+d['branch'], signal, recheck, stamp)
