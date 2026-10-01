@@ -4,6 +4,8 @@
 
 T6.7 候選新增外部先行、reference 校正價格、淺回撤與 C-UP 鏡像順勢反轉四條 Live 路由，沿用原有風控且不建立新 shadow 交易。固定規則與人工啟動步驟見 [T6.7 驗證計畫](docs/T6_7_LIVE_VALIDATION.md)。候選套件不代表 VM 已切換或已啟動實盤。
 
+T6.7a 以舊 T6／C 為基底：五條舊核心與 C-UP／淺回撤共七組 Live，外部先行與參考價模型兩組 Shadow。核心先凍結、空缺才新增；TG 逐子策略列 WR／PnL。規則與驗證見 [T6.7a](docs/T6_7A.md)。
+
 ## 收錄範圍
 
 - `src/gridbot/prediction/regime_*`：T6 策略、特徵、執行與風控。

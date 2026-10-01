@@ -1,0 +1,235 @@
+"""T6.7a execution boundaries and inherited durable risk regressions."""
+import sqlite3
+from decimal import Decimal as D
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
+
+from src.gridbot.prediction.c180_gate_runtime import LiveSettlement, LoopLedgerSnapshot
+from src.gridbot.prediction.c180_signal_runtime import C180SignalRuntime
+from src.gridbot.prediction.models import Campaign, MarketInfo
+from src.gridbot.prediction.regime_lane import FINGERPRINT as RISK_FP
+from src.gridbot.prediction.regime_live_ledger import RISK_PROFILES, RegimeLiveLedger
+from src.gridbot.prediction.regime_t67a_policy import FINGERPRINT, PROFILE, TIER
+from src.gridbot.prediction.repository import PredictionRepository
+from src.gridbot.prediction.strategy import StrategyConfig
+from src.gridbot.prediction.telegram import _regime_risk_text, selectable_lanes_for_market
+from src.gridbot.prediction.worker import PredictionWorker
+from test_t63 import S, book, feature
+
+
+def test_t67a_profile_keeps_fixed_units_risk_and_suppresses_sibling_lanes():
+    assert PROFILE in PredictionWorker._selectable_strategy_profiles()
+    assert PROFILE in dict(selectable_lanes_for_market('BTCUSDT'))
+    assert PROFILE not in dict(selectable_lanes_for_market('ETHUSDT'))
+    cfg = StrategyConfig.for_profile(PROFILE)
+    assert cfg.provenance_payload['regime_policy_fingerprint'] == FINGERPRINT
+    assert cfg.entry_start_seconds >= 120 and cfg.entry_end_seconds == 136
+    assert cfg.max_initial_attempts == 1
+    assert cfg.max_scale_in_attempts == cfg.max_hedge_attempts == 0
+    assert not cfg.protective_exit_enabled and not cfg.profit_lock_enabled
+    assert RegimeLiveLedger(None, profile=PROFILE).tier == TIER == 'REGIME_T67A'
+    worker = object.__new__(PredictionWorker)
+    worker._selected_strategy_profile = PROFILE
+    worker._fav_p3_arm_override = 'live'
+    worker._shadow_lane_strategies = {'legacy': object()}
+    assert not worker._fav_p3_live_orders_enabled()
+    assert not worker._shadow_lane_experiment_enabled()
+    for unit in (D(1), D(2), D(3)):
+        sized = PredictionWorker._sized_strategy_config(PROFILE, unit)
+        assert sized.max_buy_usdt == sized.max_market_buy_usdt == unit
+        assert '本輪MDD' in _regime_risk_text(PROFILE, unit)
+
+
+@pytest.mark.parametrize('profile,called', [(PROFILE, True), ('regime_target6_7_v1', False)])
+def test_original_cutoff_signal_restored_only_for_t67a(tmp_path, profile, called):
+    path = tmp_path/'prediction.sqlite3'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE prediction_runtime_config(config_key TEXT PRIMARY KEY,config_value_json TEXT)')
+        db.execute('INSERT INTO prediction_runtime_config VALUES(?,?)',
+                   ('prediction_selected_strategy', '{"profile":"'+profile+'"}'))
+    runtime = object.__new__(C180SignalRuntime)
+    runtime.prediction_db = path
+    runtime.signals = SimpleNamespace(on_frozen=Mock())
+    runtime._t67_profile_checked_ms = 0
+    runtime._t67_selected = False
+    runtime._t67_last_error_ms = 0
+    with patch('src.gridbot.prediction.c180_signal_runtime._now_ms', return_value=S+120000):
+        assert runtime._t67_active(S+120000) is True  # Both profiles retain the public evidence collector.
+        runtime._on_frozen({'frozen': 'cutoff evidence'})
+    assert runtime.signals.on_frozen.called is called
+
+
+def test_unknown_selection_does_not_reuse_cached_t67a_for_paid_original():
+    runtime = object.__new__(C180SignalRuntime)
+    runtime.prediction_db = 'unused'
+    runtime.signals = SimpleNamespace(on_frozen=Mock())
+    runtime._t67_profile_checked_ms = 0
+    runtime._t67_selected = True
+    runtime._t67_selected_profile = PROFILE
+    runtime._t67_last_error_ms = 0
+    with patch('src.gridbot.prediction.c180_signal_runtime._now_ms', return_value=S+120000), \
+            patch('src.gridbot.prediction.regime_t67_evidence.selected_profile', side_effect=OSError):
+        runtime._on_frozen({'frozen':'cutoff evidence'})
+    runtime.signals.on_frozen.assert_not_called()
+
+
+@pytest.mark.parametrize('first,last,prior,up,down,branch', [
+    (2, -1, 2, '.30', '.71', 'core_first_up'),
+    (-2, 1, -2, '.71', '.30', 'core_first_down'),
+    (2, '.2', 2, '.61', '.40', 'core_stall_down'),
+])
+def test_structural_core_retains_old_initial_age_and_ignores_opposite_thin_depth_and_late_original(
+        first, last, prior, up, down, branch):
+    from src.gridbot.prediction.c180_signal_service import C180Signal
+    from src.gridbot.prediction.regime_t67a_bridge import freeze_core
+    from src.gridbot.prediction.regime_worker_bridge import RegimeWorkerBridge
+    initial = book(up, down, 124000)
+    initial['book_at_ms'] -= 1500  # Valid original initial-book age; current execution stays <=1s.
+    opposite = 'DOWN' if branch == 'core_first_up' else 'UP'
+    initial['quote'][opposite]['ask_levels'][0][1] = '.01'
+    old_signal = C180Signal(S, 'topic', 'up', S+120000, S+123001,
+                            'model_timeout', None, None, None, None, D(200))
+    bridge = SimpleNamespace(signal_db='unused', _first_book=Mock(return_value=initial),
+                             _book=RegimeWorkerBridge._book)
+    market = SimpleNamespace(start_time_ms=S, market_topic_id='topic', up_market_id='up')
+    with patch('src.gridbot.prediction.regime_worker_bridge.read_c180_signal', return_value=old_signal):
+        guard = freeze_core(bridge, market, feature(first, last, prior), S+124000, D(1))
+    assert guard['verified'] and not guard['empty']
+    assert [choice['branch'] for choice in guard['candidates']] == [branch]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('offset,halt,price,allowed', [
+    (123999, False, '.40', False),
+    (124000, False, '.40', True),
+    (135999, False, '.75', True),
+    (136000, False, '.40', False),
+    (240000, False, '.40', False),
+    (124000, True, '.40', False),
+    (124000, False, '.7501', False),
+])
+async def test_t67a_atomic_window_hs_cap_and_duplicate_buy(tmp_path, offset, halt, price, allowed):
+    repo = PredictionRepository(tmp_path/'db')
+    await repo.initialize()
+    try:
+        await repo._execute('ALTER TABLE prediction_order_intents ADD COLUMN client_order_id TEXT')
+        await repo._execute('ALTER TABLE prediction_order_intents ADD COLUMN tier TEXT')
+        await repo.start_loop('current', 100, mode='LIVE', strategy_profile=PROFILE)
+        market = MarketInfo('topic', 'up', 'test', S, S+300000,
+                            up_market_id='up', down_market_id='down')
+        await repo.save_campaign(Campaign('campaign', market), loop_id='current')
+        ledger = RegimeLiveLedger(repo, profile=PROFILE)
+        await ledger.seed_schedule(loop_id='current', first_market_start_ms=S)
+        await ledger.verify_market(loop_id='current', market_start_ms=S,
+                                   market_topic_id='topic', market_id='up', verified_at_ms=S+120000)
+        if halt:
+            await repo._execute("UPDATE prediction_loops SET hard_stop_latched=1 WHERE loop_id='current'")
+        intent = dict(intent_id='intent', campaign_id='campaign', action='BUY_INITIAL', outcome='UP',
+                      order_side='BUY', amount='2', limit_price=price, created_at_ms=S+offset,
+                      ttl_ms=1000, attempt=1, status='PENDING', tier=TIER, payload={})
+        with patch('src.gridbot.prediction.regime_live_ledger._now_ms', return_value=S+offset):
+            claim = await ledger.reserve_c180_intent(loop_id='current', market_start_ms=S,
+                campaign_id='campaign', intent=intent, decision_at_ms=S+offset,
+                wallet_reconciled_at_ms=S+offset)
+            assert claim.claimed is allowed, claim.reason
+            if allowed:
+                duplicate = await ledger.reserve_c180_intent(loop_id='current', market_start_ms=S,
+                    campaign_id='campaign', intent={**intent, 'intent_id':'second'},
+                    decision_at_ms=S+offset, wallet_reconciled_at_ms=S+offset)
+                assert not duplicate.claimed and duplicate.reason == 'market_buy_already_claimed'
+                rows = await repo._fetchall('SELECT unit_usdt FROM prediction_regime_entry_claims')
+                assert [D(row['unit_usdt']) for row in rows] == [D(2)]
+            else:
+                assert not await repo._fetchall('SELECT 1 FROM prediction_regime_entry_claims')
+                assert not await repo._fetchall('SELECT 1 FROM prediction_order_intents')
+    finally:
+        await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_t67a_risk_includes_every_old_profile_and_preserves_epoch(tmp_path):
+    repo = PredictionRepository(tmp_path/'db')
+    await repo.initialize()
+    try:
+        assert len(RISK_PROFILES) == len(set(RISK_PROFILES)) == 9
+        assert PROFILE in RISK_PROFILES
+        await repo.start_loop('oldest', 100, mode='LIVE', strategy_profile=RISK_PROFILES[0])
+        oldest = RegimeLiveLedger(repo, profile=RISK_PROFILES[0])
+        await oldest.seed_schedule(loop_id='oldest', first_market_start_ms=S)
+        assert (await oldest.check_risk('oldest', S, S+124000))[0]
+        loops = {'oldest': RISK_PROFILES[0]}
+        for index, profile in enumerate(RISK_PROFILES[1:], 1):
+            name = 'current' if profile == PROFILE else 'historical-'+str(index)
+            await repo.start_loop(name, 100, mode='LIVE', strategy_profile=profile)
+            loops[name] = profile
+        losses = {}
+        for index, profile in enumerate((RISK_PROFILES[0], 'regime_target6_5_v1', 'regime_target6_7_v1')):
+            name = next(name for name, value in loops.items() if value == profile)
+            start = S+index*20*300000
+            losses[name] = (LiveSettlement('loss-'+str(index), start, D('-2'), start+300000, D(1)),)
+
+        async def snapshot(_conn, loop, _now):
+            return LoopLedgerSnapshot(loop, True, (), (), losses.get(loop, ()), ())
+
+        ledger = RegimeLiveLedger(repo, profile=PROFILE)
+        current = S+60*300000
+        await ledger.seed_schedule(loop_id='current', first_market_start_ms=current)
+        with patch.object(ledger, '_snapshot_conn', AsyncMock(side_effect=snapshot)) as snapshots:
+            assert await ledger.check_risk('current', current, current+124000) == (False, 'cumulative_loss_6')
+            assert {call.args[1] for call in snapshots.await_args_list} == set(loops)
+        state = await repo.get_runtime_config('regime_target6_risk_v1')
+        assert state['first_market_start_ms'] == S and state['fingerprint'] == RISK_FP
+        assert D(state['risk_equity_1u']) == -6
+    finally:
+        await repo.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('old_profile', ['regime_target6_5_v1', 'regime_target6_7_v1', PROFILE])
+async def test_old_unknown_exposure_blocks_t67a_without_reset(tmp_path, old_profile):
+    repo = PredictionRepository(tmp_path/'db')
+    await repo.initialize()
+    try:
+        await repo.start_loop('old', 100, mode='LIVE', strategy_profile=old_profile)
+        old = RegimeLiveLedger(repo, profile=old_profile)
+        await old.seed_schedule(loop_id='old', first_market_start_ms=S)
+        assert (await old.check_risk('old', S, S+124000))[0]
+        await repo.save_campaign(Campaign('unknown', MarketInfo('topic', 'up', 'test', S, S+300000)), loop_id='old')
+        await repo._execute("UPDATE prediction_campaigns SET pending_unknown=1 WHERE campaign_id='unknown'")
+        await repo.start_loop('current', 100, mode='LIVE', strategy_profile=PROFILE)
+        ledger = RegimeLiveLedger(repo, profile=PROFILE)
+        await ledger.seed_schedule(loop_id='current', first_market_start_ms=S+300000)
+        result = await ledger.check_risk('current', S+300000, S+424000)
+        assert result == (False, 'unknown_order_reconciliation_required')
+        assert (await repo.get_runtime_config('regime_target6_risk_v1'))['first_market_start_ms'] == S
+    finally:
+        await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_t67a_loop_mdd_latch_survives_restart_and_tampered_fingerprint(tmp_path):
+    repo = PredictionRepository(tmp_path/'db')
+    await repo.initialize()
+    try:
+        await repo.start_loop('current', 100, mode='LIVE', strategy_profile=PROFILE)
+        ledger = RegimeLiveLedger(repo, profile=PROFILE)
+        await ledger.seed_schedule(loop_id='current', first_market_start_ms=S)
+        assert (await ledger.check_risk('current', S, S+124000))[0]
+        rows = (LiveSettlement('profit', S, D(3), S+300000, D(1)),
+                LiveSettlement('loss', S+300000, D('-3.5'), S+600000, D(1)))
+        value = LoopLedgerSnapshot('current', True, (), (), rows, ())
+        with patch.object(ledger, '_snapshot_conn', AsyncMock(return_value=value)):
+            assert await ledger.check_risk('current', S+600000, S+724000) == (False, 't67a_loop_mdd_3.5')
+        key = 'regime_target6_7a_loop_risk:current'
+        guard = await repo.get_runtime_config(key)
+        assert guard['fingerprint'] == FINGERPRINT and D(guard['mdd_1u']) == D('3.5')
+        restarted = RegimeLiveLedger(repo, profile=PROFILE)
+        empty = LoopLedgerSnapshot('current', True, (), (), (), ())
+        with patch.object(restarted, '_snapshot_conn', AsyncMock(return_value=empty)):
+            assert await restarted.check_risk('current', S+900000, S+1024000) == (False, 't67a_loop_mdd_3.5')
+            await repo.set_runtime_config(key, {**guard, 'fingerprint':'wrong'})
+            assert await restarted.check_risk('current', S+900000, S+1024000) == (False, 't67a_loop_risk_state_invalid')
+    finally:
+        await repo.close()

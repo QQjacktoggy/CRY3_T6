@@ -70,9 +70,17 @@ def main():
             start = now//SLOT_MS*SLOT_MS
             status = collect_once(db, start)
             try:
-                shadows_enabled = selected_profile(prediction_db) != T67_PROFILE
+                profile = selected_profile(prediction_db)
+                shadows_enabled = profile not in (T67_PROFILE, 'regime_target6_7a_v1')
             except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+                profile = None
                 shadows_enabled = False
+            if profile == 'regime_target6_7a_v1':
+                from .regime_t67a_shadow import observe
+                try:
+                    status += ';t67a:' + observe(db, prediction_db, args.signal_db, time.time_ns()//1000000)
+                except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                    status += ';t67a_shadow_unavailable:' + type(exc).__name__
             if shadows_enabled and now-last_finalized_at_ms >= 1000:
                 from .regime_t65_shadow import finalize_expired
                 finalize_expired(db, now)
