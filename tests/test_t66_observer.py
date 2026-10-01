@@ -157,13 +157,18 @@ def test_missing_decision_restart_never_replays_old_books(tmp_path):
     db.close()
 
 
-def test_retire_paper_branches_without_touching_history_or_core(tmp_path):
+@pytest.mark.parametrize('damaged_state', [
+    {}, {'fingerprint': policy.FINGERPRINT},
+    {'fingerprint': policy.FINGERPRINT, 'enabled': True},
+    {'fingerprint': policy.FINGERPRINT, 'enabled': True, 'first_start_ms': None},
+])
+def test_retire_paper_branches_without_touching_history_or_core(tmp_path, damaged_state):
     db=connect(tmp_path/'f.db');shadows=dict(shadow_a={'old':1},shadow_m4={'keep':1})
     assert obs.filter_retired_shadows(db,S,shadows)==shadows
     obs.activate(db,S-1)
     assert obs.filter_retired_shadows(db,S-300000,shadows)==shadows
     assert obs.filter_retired_shadows(db,S,shadows)=={'shadow_m4':{'keep':1}}
-    with db:db.execute("UPDATE t66_observation_state SET payload='{}'")
+    with db:db.execute("UPDATE t66_observation_state SET payload=?", (json.dumps(damaged_state),))
     assert obs.filter_retired_shadows(db,S,shadows)=={'shadow_m4':{'keep':1}}
     db.close()
 

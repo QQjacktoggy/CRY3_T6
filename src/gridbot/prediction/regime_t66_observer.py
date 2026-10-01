@@ -55,11 +55,11 @@ def activate(db, now_ms, target=500):
 def filter_retired_shadows(db, start, shadows):
     try:
         config = state(db)
+        if config and config["enabled"] and start >= config["first_start_ms"]:
+            return {k: v for k, v in shadows.items() if k not in RETIRED_KEYS}
     except (sqlite3.Error, ValueError, TypeError, KeyError):
         # An observation-state failure must never block unchanged core trading
         # or silently reactivate retired paper branches.
-        return {k: v for k, v in shadows.items() if k not in RETIRED_KEYS}
-    if config and config["enabled"] and start >= config["first_start_ms"]:
         return {k: v for k, v in shadows.items() if k not in RETIRED_KEYS}
     return shadows
 

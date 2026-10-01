@@ -34,6 +34,28 @@ def report_database(root):
         db.execute("INSERT INTO prediction_settlements VALUES('c','c','SETTLED','0',NULL)")
 
 
+@pytest.mark.parametrize('boundary, mixed', [(S, False), (S+300000, False), (S+300000, True)])
+def test_shadow_retirement_report_uses_registered_markets_and_preserves_history(tmp_path, boundary, mixed):
+    from src.gridbot.prediction.regime_t66_observer import activate
+    directory = tmp_path/'prediction/data/regime-target6'
+    directory.mkdir(parents=True)
+    db, _, _ = freeze(directory,feature(0,0),book('.7','.3'))
+    with closing(db):
+        activate(db, boundary-60000)
+        report_database(tmp_path)
+        with closing(sqlite3.connect(tmp_path/'prediction/data/prediction.sqlite3')) as main, main:
+            # Created after activation but before the first observation market.
+            main.execute("UPDATE prediction_loops SET created_at_ms=?", (S-30000,))
+            if mixed:
+                main.execute("INSERT INTO prediction_regime_slots VALUES('new',?,2,?,NULL)",
+                             (S+300000,S+300000))
+        report = format_live_report(tmp_path,now_ms=S+600000)
+        live_section = report.split('🧪 T6.6')[0]
+        assert ('已停止新Shadow' in live_section) == (boundary == S or mixed)
+        assert ('B Shadow：' in live_section) == (boundary > S)
+        assert ('本輪跨觀測啟用邊界' in live_section) == mixed
+
+
 def shadow_metrics(root, **changes):
     return _shadow_metrics(root, 'new', [dict(market_start_ms=S)],
         [dict(loop_id='new',start_time_ms=S,campaign_id='c')],

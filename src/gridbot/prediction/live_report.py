@@ -372,15 +372,22 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None):
             issues.add("補位Shadow紀錄無法核對")
     if profile in (T63B_PROFILE, T65_PROFILE):
         retired = False
+        retirement_started = False
         if profile == T65_PROFILE:
             try:
                 from .regime_t66_observer import state as observation_state
                 with closing(sqlite3.connect((root/"prediction/data/regime-target6/features.sqlite3").resolve().as_uri()+"?mode=ro", uri=True)) as feature_db:
                     observation = observation_state(feature_db)
-                retired = bool(observation and observation['enabled'] and int(loop['created_at_ms']) >= observation['first_start_ms'])
+                starts = [int(slot['market_start_ms']) for slot in slots]
+                retirement_started = bool(observation and observation['enabled'] and
+                                          any(start >= observation['first_start_ms'] for start in starts))
+                retired = bool(retirement_started and
+                               all(start >= observation['first_start_ms'] for start in starts))
             except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
                 pass
-            lines.append("T6.5核心維持；A／flat／B／補位已停止新Shadow，T6.6獨立觀測見下方。" if retired else "T6.5：A、flat/original、B與補位只做Shadow；保留其他T6/C Live，M4/M6於T+128–134.5秒只觀測新鮮可執行報價。")
+            lines.append("T6.5核心維持；A／flat／B／補位已停止新Shadow，T6.6獨立觀測見下方。" if retirement_started else "T6.5：A、flat/original、B與補位只做Shadow；保留其他T6/C Live，M4/M6於T+128–134.5秒只觀測新鮮可執行報價。")
+            if retirement_started and not retired:
+                lines.append("本輪跨觀測啟用邊界；以下保留啟用前的A／flat／B／補位歷史Shadow。")
         else:
             lines.append("T6.3b：T6/A/C可Live；B與T6.1補位保留紙上盤口，不送Live BUY，排除分支時整場跳過。")
         branches = [("shadow_b", "B_late_momentum", "B Shadow"),
