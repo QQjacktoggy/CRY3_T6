@@ -435,8 +435,10 @@ class C180SignalRuntime:
             from .regime_t67_policy import PROFILE
             self._t67_profile_checked_ms = now
             self._t67_selected = None
+            self._t67_selected_profile = None
             try:
-                self._t67_selected = selected_profile(self.prediction_db) == PROFILE
+                self._t67_selected_profile = selected_profile(self.prediction_db)
+                self._t67_selected = self._t67_selected_profile in (PROFILE, 'regime_target6_7a_v1')
             except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
                 if now-self._t67_last_error_ms >= 10000:
                     LOGGER.warning('Strategy selection unavailable: %s', type(exc).__name__)
@@ -446,7 +448,10 @@ class C180SignalRuntime:
     def _on_frozen(self, evidence):
         # T6.7 consumes public evidence, not a paid Original/JEV decision.
         try:
-            if self._t67_active(_now_ms()) is not False:
+            active = self._t67_active(_now_ms())
+            if active is None:
+                return
+            if active is not False and getattr(self, '_t67_selected_profile', None) != 'regime_target6_7a_v1':
                 return
         except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
             return
@@ -685,7 +690,16 @@ class C180SignalRuntime:
     async def t65_shadow_scan_once(self) -> None:
         """Resolve shadow-only markets without consuming the entry window."""
         now = _now_ms()
-        if self._t67_active(now) is not False:
+        active = self._t67_active(now)
+        if active is not False:
+            if (getattr(self, '_t67_selected_profile', None) == 'regime_target6_7a_v1'
+                    and not 119500 <= now % SLOT_MS <= 137500
+                    and now-self._last_t65_shadow_scan_ms >= 20000 and self.feature_db.is_file()):
+                self._last_t65_shadow_scan_ms = now
+                from .regime_feature_service import connect
+                from .regime_t67a_shadow import resolve_once
+                with closing(connect(self.feature_db)) as db:
+                    await resolve_once(db, now, self._detail)
             return
         if (119500 <= now % SLOT_MS <= 137500
                 or now-self._last_t65_shadow_scan_ms < 20000
