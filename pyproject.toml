@@ -1,7 +1,7 @@
 [project]
 name = "cry3-t6"
-version = "6.7.1"
-description = "T6 family Prediction runtime with T6.7a retained core and additive Live/Shadow routing and existing shared risk"
+version = "6.7.2"
+description = "T6 family Prediction runtime with T6.7b retained core, read-only selected rechecks, atomic entry and existing shared risk"
 requires-python = ">=3.11"
 dependencies = ["aiohttp>=3.9", "aiosqlite>=0.20", "python-dotenv>=1.0", "python-telegram-bot>=21.0", "requests>=2.31", "websockets>=12", "tzdata>=2024.1"]
 

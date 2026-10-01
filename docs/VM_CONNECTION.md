@@ -8,6 +8,9 @@
 
 T6.7a 延續核心的版本與部署核對見 [T6.7a](T6_7A.md)。連線後仍須查詢實際選定 profile 與最新 loop，安裝版本不等於已啟動 Live。
 
+T6.7b 的 PR9 送單優化、唯讀重檢及獨立版本／報表見 [T6.7b](T6_7B.md)。
+部署後也須重新核對正式 release、選定 profile 與 loop；不能只依文件推定已開始 Live。
+
 ## 目標
 
 - VM：`cry3jack`

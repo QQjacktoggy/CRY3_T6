@@ -71,10 +71,16 @@ def main():
             status = collect_once(db, start)
             try:
                 profile = selected_profile(prediction_db)
-                shadows_enabled = profile not in (T67_PROFILE, 'regime_target6_7a_v1')
+                shadows_enabled = profile not in (T67_PROFILE, 'regime_target6_7a_v1', 'regime_target6_7b_v1')
             except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
                 profile = None
                 shadows_enabled = False
+            if profile == 'regime_target6_7b_v1':
+                from .regime_t67b_shadow import observe
+                try:
+                    status += ';t67b:' + observe(db, prediction_db, args.signal_db, time.time_ns()//1000000)
+                except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                    status += ';t67b_shadow_unavailable:' + type(exc).__name__
             if profile == 'regime_target6_7a_v1':
                 from .regime_t67a_shadow import observe
                 try:
