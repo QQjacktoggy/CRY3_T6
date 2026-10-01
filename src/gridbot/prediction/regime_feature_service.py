@@ -26,6 +26,8 @@ def connect(path):
                "payload TEXT NOT NULL, PRIMARY KEY(start,branch))")
     db.execute("CREATE TABLE IF NOT EXISTS t65_shadow_outcomes(start INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS health(id INTEGER PRIMARY KEY, at_ms INTEGER, status TEXT)")
+    from .regime_t66_observer import schema
+    schema(db)
     db.commit()
     return db
 
@@ -74,6 +76,11 @@ def main():
                     observe_shadow(db, start, args.signal_db, time.time_ns()//1000000)
                 except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
                     status += ";t65_shadow_unavailable:" + type(exc).__name__
+            try:
+                from .regime_t66_observer import tick
+                tick(db, args.signal_db, time.time_ns()//1000000)
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                status += ";t66_observation_unavailable:" + type(exc).__name__
             with db:
                 db.execute("INSERT OR REPLACE INTO health VALUES(1,?,?)", (now, status))
             time.sleep(0.25 if 119500 <= now-start <= 137000 else 1)

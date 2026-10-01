@@ -608,6 +608,8 @@ class C180SignalRuntime:
         from .regime_t65_shadow import resolve_outcome_once
         with closing(connect(self.feature_db)) as db:
             await resolve_outcome_once(db, now, self._detail)
+            from .regime_t66_observer import resolve_once
+            await resolve_once(db, now, self._detail)
 
     async def run(self) -> None:
         await self.start()

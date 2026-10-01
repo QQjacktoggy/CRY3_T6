@@ -29,6 +29,8 @@ def check_signal(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
                 initial=bridge._first_book(market,at_ms)
                 if initial is None: return b.C180Ready(False,'regime_initial_book_missing_skip')
                 choices,shadows=candidates(f,json.loads(b._signal_json(original)) if original else None,initial,unit_usdt)
+                from .regime_t66_observer import filter_retired_shadows
+                shadows=filter_retired_shadows(db,start,shadows)
                 for shadow in shadows.values():
                     if shadow is not None and shadow['fill_status'] == 'PAPER_QUOTE_ONLY':
                         shadow['quoted_at_ms']=int(initial['captured_at_ms'])
