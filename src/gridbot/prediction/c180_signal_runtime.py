@@ -690,28 +690,22 @@ class C180SignalRuntime:
     async def t65_shadow_scan_once(self) -> None:
         """Resolve shadow-only markets without consuming the entry window."""
         now = _now_ms()
-        active = self._t67_active(now)
-        if active is not False:
-            if (getattr(self, '_t67_selected_profile', None) == 'regime_target6_7a_v1'
-                    and not 119500 <= now % SLOT_MS <= 137500
-                    and now-self._last_t65_shadow_scan_ms >= 20000 and self.feature_db.is_file()):
-                self._last_t65_shadow_scan_ms = now
-                from .regime_feature_service import connect
-                from .regime_t67a_shadow import resolve_once
-                with closing(connect(self.feature_db)) as db:
-                    await resolve_once(db, now, self._detail)
-            return
         if (119500 <= now % SLOT_MS <= 137500
                 or now-self._last_t65_shadow_scan_ms < 20000
                 or not self.feature_db.is_file()):
             return
         self._last_t65_shadow_scan_ms = now
         from .regime_feature_service import connect
-        from .regime_t65_shadow import resolve_outcome_once
+        from .regime_t67a_shadow import resolve_once as resolve_t67a
         with closing(connect(self.feature_db)) as db:
-            await resolve_outcome_once(db, now, self._detail)
-            from .regime_t66_observer import resolve_once
-            await resolve_once(db, now, self._detail)
+            # Pending paper outcomes belong to their stored profile/loop.
+            # Changing the admission profile must not strand that backlog.
+            await resolve_t67a(db, now, self._detail)
+            if self._t67_active(now) is False:
+                from .regime_t65_shadow import resolve_outcome_once
+                from .regime_t66_observer import resolve_once
+                await resolve_outcome_once(db, now, self._detail)
+                await resolve_once(db, now, self._detail)
 
     async def run(self) -> None:
         await self.start()

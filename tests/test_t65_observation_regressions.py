@@ -133,7 +133,8 @@ async def test_signal_service_resolves_no_fill_shadow_after_loop_completion(tmp_
         campaign = Campaign('c',MarketInfo('topic','up','slug',S,S+300000))
         worker = SimpleNamespace(_effective_mode=RuntimeMode.LIVE,
             settings=SimpleNamespace(wallet_address='test'),
-            repository=SimpleNamespace(get_settlement=AsyncMock(return_value=None),
+            repository=SimpleNamespace(get_campaign_execution_mode=AsyncMock(return_value="LIVE"),
+                get_settlement=AsyncMock(return_value=None),
                 get_fills=AsyncMock(return_value=[]),load_unresolved_intents=AsyncMock(return_value=[])),
             _selected_strategy_profile=lane.PROFILE,_now_ms=lambda:S+600000,
             _finalize_settlement_with_c180=AsyncMock())

@@ -287,7 +287,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
         loop_guard = json.loads(loop_guard_row[0]) if loop_guard_row else None
         selected_rows = conn.execute(
             "SELECT config_key,config_value_json FROM prediction_runtime_config "
-            "WHERE config_key IN ('prediction_selected_strategy','prediction_selected_order_unit','prediction_hard_stop_latched')"
+            "WHERE config_key IN ('prediction_selected_strategy','prediction_selected_order_unit','prediction_hard_stop_latched','prediction_risk_state')"
         ).fetchall()
         selected = {row[0]: json.loads(row[1]) for row in selected_rows}
         conn.commit()
@@ -353,7 +353,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
                               current_ids=current_ids, fill_ids=fill_ids, events=current,
                               claims=own_claims, pending=current_pending, inflight=inflight,
                               unknown=len(unknown_ids & current_ids), gate=gate,
-                              loop_guard=loop_guard, hs=selected.get('prediction_hard_stop_latched'),
+                              loop_guard=loop_guard, hs=_reported_hard_stop(selected, now),
                               selected_unit=selected.get('prediction_selected_order_unit'),
                               issues=issues)
     if profile == T67_PROFILE:
@@ -362,7 +362,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
                               current_ids=current_ids, fill_ids=fill_ids, events=current,
                               claims=own_claims, pending=current_pending, inflight=inflight,
                               unknown=len(unknown_ids & current_ids), gate=gate,
-                              loop_guard=loop_guard, hs=selected.get('prediction_hard_stop_latched'),
+                              loop_guard=loop_guard, hs=_reported_hard_stop(selected, now),
                               issues=issues)
     label = ("T6.7 Live Report｜三策略驗證" if profile == T67_PROFILE else "T6.5 Live Report｜A／flat／M4／M6 Shadow" if profile == T65_PROFILE else
              "T6.3b Live Report｜B／補位Shadow＋整輪回撤" if profile == T63B_PROFILE else
@@ -553,3 +553,16 @@ def t67_family_report_profile(root):
                           "THEN 0 ELSE 1 END,created_at_ms DESC,loop_id DESC LIMIT 1",
                           (T67_PROFILE, T67A_PROFILE)).fetchone()
         return loop[0] if loop else T67_PROFILE
+
+
+def _reported_hard_stop(config, now_ms):
+    """Match the worker's current-day risk latch; retain legacy stop evidence."""
+    state = config.get('prediction_risk_state')
+    legacy = config.get('prediction_hard_stop_latched')
+    values = []
+    if isinstance(state, dict) and isinstance(state.get('hard_stop_latched'), bool):
+        today = datetime.fromtimestamp(now_ms/1000, TZ).date().isoformat()
+        values.append(state['hard_stop_latched'] if str(state.get('day') or today) == today else False)
+    if isinstance(legacy, dict) and isinstance(legacy.get('latched'), bool):
+        values.append(legacy['latched'])
+    return {'latched': any(values)} if values else None
