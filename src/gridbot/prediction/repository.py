@@ -40,6 +40,31 @@ from .models import (
 )
 
 
+# Shared by the ordinary save and the atomic Regime entry claim.
+CAMPAIGN_UPSERT_SQL = """INSERT INTO prediction_campaigns
+               (campaign_id, loop_id, market_topic_id, market_id, slug,
+                start_time_ms, end_time_ms, state, initial_outcome, hedge_used,
+                profit_lock_used, loser_unwind_count, loser_unwind_shares,
+                buy_count, order_attempts, initial_attempts, hedge_attempts,
+                pending_intent_id, pending_unknown, hedged_at_ms, last_error,
+                payload_json, created_at_ms, updated_at_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(campaign_id) DO UPDATE SET
+                 loop_id=COALESCE(excluded.loop_id, prediction_campaigns.loop_id), market_topic_id=excluded.market_topic_id,
+                 market_id=excluded.market_id, slug=excluded.slug,
+                 start_time_ms=excluded.start_time_ms, end_time_ms=excluded.end_time_ms,
+                 state=excluded.state, initial_outcome=excluded.initial_outcome,
+                 hedge_used=excluded.hedge_used, profit_lock_used=excluded.profit_lock_used,
+                 loser_unwind_count=excluded.loser_unwind_count,
+                 loser_unwind_shares=excluded.loser_unwind_shares,
+                 buy_count=excluded.buy_count, order_attempts=excluded.order_attempts,
+                 initial_attempts=excluded.initial_attempts, hedge_attempts=excluded.hedge_attempts,
+                 pending_intent_id=excluded.pending_intent_id,
+                 pending_unknown=excluded.pending_unknown, hedged_at_ms=excluded.hedged_at_ms,
+                 last_error=excluded.last_error, payload_json=excluded.payload_json,
+                 updated_at_ms=excluded.updated_at_ms"""
+
+
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 ACTIVE_STATES = {
     CampaignState.BOOTSTRAP.value,
@@ -693,28 +718,7 @@ class PredictionRepository:
         if loop_id is not None:
             values[1] = loop_id
         await self._execute(
-            """INSERT INTO prediction_campaigns
-               (campaign_id, loop_id, market_topic_id, market_id, slug,
-                start_time_ms, end_time_ms, state, initial_outcome, hedge_used,
-                profit_lock_used, loser_unwind_count, loser_unwind_shares,
-                buy_count, order_attempts, initial_attempts, hedge_attempts,
-                pending_intent_id, pending_unknown, hedged_at_ms, last_error,
-                payload_json, created_at_ms, updated_at_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(campaign_id) DO UPDATE SET
-                 loop_id=COALESCE(excluded.loop_id, prediction_campaigns.loop_id), market_topic_id=excluded.market_topic_id,
-                 market_id=excluded.market_id, slug=excluded.slug,
-                 start_time_ms=excluded.start_time_ms, end_time_ms=excluded.end_time_ms,
-                 state=excluded.state, initial_outcome=excluded.initial_outcome,
-                 hedge_used=excluded.hedge_used, profit_lock_used=excluded.profit_lock_used,
-                 loser_unwind_count=excluded.loser_unwind_count,
-                 loser_unwind_shares=excluded.loser_unwind_shares,
-                 buy_count=excluded.buy_count, order_attempts=excluded.order_attempts,
-                 initial_attempts=excluded.initial_attempts, hedge_attempts=excluded.hedge_attempts,
-                 pending_intent_id=excluded.pending_intent_id,
-                 pending_unknown=excluded.pending_unknown, hedged_at_ms=excluded.hedged_at_ms,
-                 last_error=excluded.last_error, payload_json=excluded.payload_json,
-                 updated_at_ms=excluded.updated_at_ms""",
+            CAMPAIGN_UPSERT_SQL,
             tuple(values),
         )
 
@@ -2030,6 +2034,56 @@ class PredictionRepository:
         return row
 
     # -- Risk and runtime configuration -------------------------------
+
+    async def save_risk_snapshot(self, payload: Mapping[str, Any]) -> None:
+        """Merge a snapshot with current control/reset state under the write gate.
+
+        A concurrently committed operator HS must not be replaced by an older
+        admission snapshot. Explicit operator reset uses its separate path.
+        """
+        conn = self._require_conn()
+        await self._begin(conn)
+        try:
+            row = await self._tx_fetchone(conn,
+                "SELECT config_value_json FROM prediction_runtime_config WHERE config_key='prediction_risk_state'")
+            old = _json_load(row[0], {}) if row else {}
+            if not isinstance(old, Mapping):
+                raise ValueError("invalid persisted risk state")
+            merged = dict(payload)
+            for key in ("hard_stop_reset_day", "hard_stop_reset_at_ms", "hard_stop_reset_count",
+                        "hard_stop_reset_baseline_pnl", "raw_daily_net_pnl"):
+                if key in old:
+                    merged[key] = old[key]
+            if old.get("day") == merged.get("day") and old.get("hard_stop_latched"):
+                merged["hard_stop_latched"] = True
+            await conn.execute(
+                """INSERT INTO prediction_runtime_config(config_key,config_value_json,updated_at_ms)
+                   VALUES('prediction_risk_state',?,?) ON CONFLICT(config_key) DO UPDATE SET
+                   config_value_json=excluded.config_value_json,updated_at_ms=excluded.updated_at_ms""",
+                (_json_dumps(merged), _now_ms()))
+            await conn.commit()
+        except BaseException:
+            await conn.rollback()
+            raise
+
+    async def record_execution_timings(self, events: Sequence[tuple[str, str | None, Mapping[str, Any]]]) -> None:
+        """Bounded telemetry only: one commit; trading evidence uses its own path."""
+        if len(events) > 32:
+            raise ValueError("execution timing batch exceeds 32")
+        if not events:
+            return
+        conn = self._require_conn()
+        await self._begin(conn)
+        try:
+            await conn.executemany(
+                """INSERT INTO prediction_risk_events
+                   (campaign_id,event_time_ms,event_type,severity,message,payload_json)
+                   VALUES(?,?,'EXECUTION_TIMING','INFO',?,?)""",
+                [(cid, _now_ms(), event, _json_dumps(fields)) for event, cid, fields in events])
+            await conn.commit()
+        except BaseException:
+            await conn.rollback()
+            raise
 
     async def record_risk_event(
         self,
