@@ -3,7 +3,6 @@ import argparse
 import hashlib
 import json
 import os
-import runpy
 import shutil
 import sqlite3
 import subprocess
@@ -11,6 +10,10 @@ import sys
 import time
 from contextlib import closing
 from pathlib import Path
+
+# The reviewed installer and verifier must be shipped together outside STAGE.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from release_verifier import approved_fingerprint, safe_path, verify_release, validate_candidate
 
 ROOT = Path('/home/jack_shih/cry3')
 STAGE = ROOT/'prediction/t67b-entry-staged-v1-20261001'
@@ -98,6 +101,8 @@ def official_clear():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--expected-fingerprint', required=True, type=approved_fingerprint,
+                        help='SHA-256 approved out of band; never obtain this value from STAGE')
     parser.add_argument('--loop-id',default='loop:1790839356188')
     parser.add_argument('--apply',action='store_true',help='Operator explicitly installs code/reloads services; no Live activation')
     parser.add_argument('--allow-cancelled-loop',action='store_true',help='Explicit user-authorized cancellation boundary; all exposure checks still required')
@@ -105,27 +110,25 @@ def main():
     args = parser.parse_args()
     if not (os.getuid()!=0):
         raise RuntimeError('Run as application user jack_shih')
-    candidate = json.loads((STAGE/'candidate.json').read_text())
-    validation = json.loads((STAGE/'validation.json').read_text())
+    candidate = json.loads(safe_path(STAGE, 'candidate.json').read_text())
+    validation = json.loads(safe_path(STAGE, 'validation.json').read_text())
     if not (validation['status']=='STAGED_VERIFIED_NOT_DEPLOYED'):
         raise RuntimeError('Installer safety check failed')
-    old = json.loads((ROOT/MANIFEST).read_text())
-    new = json.loads((STAGE/MANIFEST).read_text())
+    old = json.loads(safe_path(ROOT, MANIFEST).read_text())
+    new = json.loads(safe_path(STAGE, MANIFEST).read_text())
     if not (old['release_fingerprint']==candidate['parent']==validation['parent']):
         raise RuntimeError('Parent changed; inspect before installing')
     if not (new['release_fingerprint']==validation['fingerprint']):
         raise RuntimeError('Installer safety check failed')
-    parent = runpy.run_path(str(ROOT/'src/gridbot/prediction/release.py'))
-    release = runpy.run_path(str(STAGE/'src/gridbot/prediction/release.py'))
-    if (parent['verify_release_manifest'](ROOT,old,pin_path=ROOT/PIN)):
-        raise RuntimeError('Installer safety check failed')
-    if (release['verify_release_manifest'](STAGE,new,pin_path=STAGE/PIN)):
-        raise RuntimeError('Installer safety check failed')
-    for row in candidate['files']:
-        if not (digest(ROOT/row['path'])==row['before']):
-            raise RuntimeError('Deployed source changed: '+row['path'])
-        if not (digest(STAGE/row['path'])==row['after']):
-            raise RuntimeError('Candidate source changed: '+row['path'])
+    if new['release_fingerprint'] != args.expected_fingerprint:
+        raise RuntimeError('Release differs from operator-approved fingerprint')
+    old_pin = safe_path(ROOT, PIN).read_text()
+    new_pin = safe_path(STAGE, PIN).read_text()
+    old_bytes = verify_release(ROOT, old, pin_text=old_pin)
+    new_bytes = verify_release(STAGE, new, pin_text=new_pin, expected_fingerprint=args.expected_fingerprint)
+    validate_candidate(ROOT, STAGE, candidate, old_bytes, new_bytes)
+    source_modes = {row['path']: safe_path(STAGE, row['path']).stat().st_mode & 0o777
+                    for row in candidate['files']}
     guard_path = ROOT/'prediction/hs-recovery-startup.env'
     guard = guard_path.read_bytes()
     if not (b'PREDICTION_LIVE_ARM_ON_START=false' in guard and b'PREDICTION_AUTO_START_LOOP=false' in guard):
@@ -139,12 +142,13 @@ def main():
     if not args.apply:
         print(json.dumps(dict(status='READ_ONLY_PREFLIGHT_PASSED',candidate=new['release_fingerprint'],live_activated=False)))
         return
+    verify_release(ROOT, old, pin_text=old_pin)
     backup = ROOT/'prediction'/('t67b-rollback-'+str(time.time_ns()//1000000))
     backup.mkdir(mode=0o700)
     for path in [r['path'] for r in candidate['files'] if r['before'] is not None]+[MANIFEST,PIN]:
         dest=backup/path
         dest.parent.mkdir(parents=True,exist_ok=True)
-        shutil.copy2(ROOT/path,dest)
+        shutil.copy2(safe_path(ROOT, path),dest)
     (backup/'before.json').write_text(json.dumps(dict(snapshot=before,candidate=candidate),indent=2)+'\n')
     try:
         for name in SERVICES:service('stop',name)
@@ -154,16 +158,17 @@ def main():
         # here are read-only; this helper never creates/cancels/redeems orders.
         official_clear()
         for row in candidate['files']:
-            dest=ROOT/row['path']
+            dest=safe_path(ROOT, row['path'])
             temp=dest.with_name(dest.name+'.t67b-new')
-            shutil.copy2(STAGE/row['path'],temp)
+            dest.parent.mkdir(parents=True,exist_ok=True)
+            # Use the immutable bytes checked before stopping services.
+            with temp.open('xb') as output:
+                output.write(new_bytes[row['path']])
+            temp.chmod(source_modes[row['path']])
             os.replace(temp,dest)
-        deployed=runpy.run_path(str(ROOT/'src/gridbot/prediction/release.py'))
-        if not (deployed['build_release_manifest'](ROOT)==new):
-            raise RuntimeError('Installer safety check failed')
-        for path in (MANIFEST,PIN):shutil.copy2(STAGE/path,ROOT/path)
-        if (deployed['verify_release_manifest'](ROOT,new,pin_path=ROOT/PIN)):
-            raise RuntimeError('Installer safety check failed')
+        verify_release(ROOT, new, pin_text=new_pin, expected_fingerprint=args.expected_fingerprint)
+        safe_path(ROOT, MANIFEST).write_text(json.dumps(new, indent=2)+'\n')
+        safe_path(ROOT, PIN).write_text(new_pin)
         if not (guard_path.read_bytes()==guard and snapshot(args.loop_id,allow_cancelled=args.allow_cancelled_loop,allow_historical_closed=args.allow_historical_closed_ledger)==before):
             raise RuntimeError('Installer safety check failed')
         for name in reversed(SERVICES):service('start',name)
@@ -183,12 +188,11 @@ def main():
     except BaseException:
         for name in SERVICES:service('stop',name)
         for row in candidate['files']:
-            dest=ROOT/row['path']
+            dest=safe_path(ROOT, row['path'])
             if row['before'] is None:dest.unlink(missing_ok=True)
             else:shutil.copy2(backup/row['path'],dest)
         for path in (MANIFEST,PIN):shutil.copy2(backup/path,ROOT/path)
-        if (parent['verify_release_manifest'](ROOT,old,pin_path=ROOT/PIN)):
-            raise RuntimeError('Installer safety check failed')
+        verify_release(ROOT, old, pin_text=old_pin)
         for name in reversed(SERVICES):service('start',name)
         print('Source/manifest/pin rolled back; trading DB retained; Live not activated.',file=sys.stderr)
         raise

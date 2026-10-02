@@ -36,7 +36,7 @@ from .client import (
     PredictionReadTimestampError,
     PredictionClientError,
     PredictionEntryNotSubmitted,
-    entry_http_guard_scope,
+    entry_http_guard_scope, request_admission_guard_scope,
     available_balance_display,
     normalize_amount_in,
 )
@@ -1515,14 +1515,18 @@ class PredictionWorker:
                                 JOIN prediction_loops h ON h.loop_id=c.loop_id
                                 WHERE h.mode='LIVE' AND h.strategy_profile IN ({placeholders})
                                   AND (c.pending_unknown=1 OR EXISTS(SELECT 1 FROM prediction_order_intents i
-                                    WHERE i.campaign_id=c.campaign_id AND i.unknown=1)))
+                                    WHERE i.campaign_id=c.campaign_id AND i.unknown=1))),
+                              legacy.config_value_json
                        FROM prediction_loops l LEFT JOIN prediction_runtime_config r
                          ON r.config_key='prediction_risk_state'
+                       LEFT JOIN prediction_runtime_config legacy
+                         ON legacy.config_key='prediction_hard_stop_latched'
                        LEFT JOIN prediction_runtime_config lane ON lane.config_key=?
                        LEFT JOIN prediction_runtime_config guard ON guard.config_key=?
                        WHERE l.loop_id=?""", (*RISK_PROFILES, lane_key if regime_entry else "", guard_key, loop_id)).fetchone()
                 if (not row or row[:3] != ("RUNNING", "LIVE", profile) or row[3] or row[4]
                         or (row[5] and json.loads(row[5]).get("hard_stop_latched"))
+                        or (row[9] and json.loads(row[9]).get("latched"))
                         or (regime_entry and (row[8] or any(value and json.loads(value).get("halt_reason")
                                                           for value in row[6:8])))):
                     raise PredictionEntryNotSubmitted("durable_admission_rejected_before_http")
@@ -1641,7 +1645,11 @@ class PredictionWorker:
             await self._flush_observability()
 
     async def _call_api(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        entry_deadline = kwargs.pop('_entry_deadline_ms', None)
+        entry_buy = bool(kwargs.pop('_entry_buy', False)) or entry_deadline is not None
         if method_name in SIGNED_MUTATING_ENDPOINTS and not self.live_capability:
+            if entry_buy:
+                raise PredictionEntryNotSubmitted("live_capability_revoked_before_http")
             raise RuntimeError(f"{method_name} is blocked while effective mode is {self.mode}")
         trace_cid = kwargs.pop('_trace_campaign_id', None)
         if method_name in ("query_active_orders", "query_positions"):
@@ -1649,10 +1657,9 @@ class PredictionWorker:
         trace_iid = kwargs.pop('_trace_intent_id', None)
         trace_attempt = getattr(self, "_entry_attempts", {}).get(trace_cid)
         trace_fields = {"attempt_id": trace_attempt["id"]} if trace_attempt else {}
-        entry_deadline = kwargs.pop('_entry_deadline_ms', None)
         entry_book_at = kwargs.pop('_entry_book_at_ms', None)
-        entry_loop = getattr(self, "_loop_id", None)
-        entry_profile = getattr(self, "_selected_strategy_profile", None)
+        entry_loop = kwargs.pop('_entry_loop_id', getattr(self, "_loop_id", None))
+        entry_profile = kwargs.pop('_entry_profile', getattr(self, "_selected_strategy_profile", None))
         book_max_age_ms = 1000 if entry_profile in {
             "regime_target6_3_v1", "regime_target6_3a_v1", "regime_target6_3b_v1",
             "regime_target6_5_v1", "regime_target6_7_v1", "regime_target6_7a_v1", "regime_target6_7b_v1", "regime_target6_7c_v1"} else 2000
@@ -1665,7 +1672,9 @@ class PredictionWorker:
         # called from a tight management loop.  A single process-wide budget
         # prevents discovery/detail/quote storms across campaigns.
         weight = self._endpoint_weight(method_name)
-        if not weight_pre_acquired and not self._rate_limiter.acquire(weight, block=False, emergency=emergency, management=management):
+        allowed = (self._rate_limiter.can_send_prepaid() if weight_pre_acquired else
+                   self._rate_limiter.acquire(weight, block=False, emergency=emergency, management=management))
+        if not allowed:
             health = self._rate_limiter.health()
             self._rate_limiter.note_deferred(weight, error=f"{method_name} deferred by local weight budget")
             raise PredictionRateLimitDeferred(method_name, health.as_dict())
@@ -1674,25 +1683,34 @@ class PredictionWorker:
         try:
             loop = asyncio.get_running_loop()
             def entry_guard():
-                if entry_deadline is None:
+                if not entry_buy:
                     return
+                if (not self.live_capability or not self._allow_new_buys or self._hard_stop_latched
+                        or self._loop_id != entry_loop or self._selected_strategy_profile != entry_profile):
+                    raise PredictionEntryNotSubmitted("entry_control_changed_before_http")
                 clock_now = self._now_ms()
-                if (clock_now >= entry_deadline or not self.live_capability
-                        or not self._allow_new_buys or self._hard_stop_latched
-                        or self._loop_id != entry_loop or self._selected_strategy_profile != entry_profile
+                if entry_deadline is not None and (clock_now >= entry_deadline
                         or entry_book_at is None or not 0 <= clock_now-entry_book_at <= book_max_age_ms):
                     raise PredictionEntryNotSubmitted("entry_expired_or_control_changed_before_http")
-            def http_guard():
+            def admission_guard():
                 entry_guard()
-                if entry_deadline is not None:
+                if entry_buy:
                     self._entry_durable_http_guard(entry_loop, entry_profile)
-                    entry_guard()  # The durable read itself must not consume the deadline.
+                    entry_guard()  # Recheck controls/deadline after the durable read.
+            def http_guard():
+                admission_guard()
+                cooldown_guard()
+                if entry_buy:
                     # Capture the actual boundary time, not later telemetry flush.
                     at_ms, stamp = self._now_ms(), time.monotonic_ns()
                     loop.call_soon_threadsafe(lambda: self._entry_http_started(trace_cid, trace_iid, at_ms, stamp))
+            def cooldown_guard():
+                if not self._rate_limiter.can_send_prepaid():
+                    raise PredictionRateLimitDeferred(method_name, self._rate_limiter.health().as_dict())
             def invoke():
-                entry_guard()  # Also guards injected/custom clients before invocation.
-                with entry_http_guard_scope(http_guard if entry_deadline is not None else None):
+                admission_guard()  # Also guards injected/custom clients before invocation.
+                cooldown_guard()
+                with request_admission_guard_scope(cooldown_guard), entry_http_guard_scope(http_guard if entry_buy else None):
                     return method(*args, **kwargs)
             with request_budget_scope("exit" if emergency else ("management" if management else "normal"), shared_prepaid):
                 result = await asyncio.to_thread(invoke)
@@ -1700,7 +1718,10 @@ class PredictionWorker:
             raise PredictionRateLimitDeferred(method_name, exc.health) from exc
         except Exception as exc:
             self._trace_event('api_error',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,error_type=type(exc).__name__,**trace_fields)
-            if getattr(exc, "status_code", None) == 429 or "429" in str(exc) or "rate limit" in str(exc).lower():
+            status = getattr(exc, "status_code", None)
+            if status in (418, 429):
+                self._rate_limiter.note_response(status, getattr(exc, "headers", None), error=str(exc))
+            elif "429" in str(exc) or "rate limit" in str(exc).lower():
                 self._rate_limiter.note_rate_limit(error=str(exc))
             raise
         self._trace_event('api_ack',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,**trace_fields)
@@ -6234,6 +6255,7 @@ class PredictionWorker:
         """Independent switchable FAV_P3 lane (EXP-P3-01). Does not gate Baseline."""
         from src.gridbot.prediction import s3s5_pair as s3
 
+        entry_loop, entry_profile = self._loop_id, self._selected_strategy_profile
         arm = self._fav_p3_arm()
         if arm == "off" and not self._is_fav_p3_profile():
             return
@@ -6451,6 +6473,7 @@ class PredictionWorker:
             await _p3_exec_reject("cap_rate_limit")
             return
 
+        order_post_completed = False
         try:
             quote_resp = await self._call_api(
                 "get_quote",
@@ -6476,6 +6499,7 @@ class PredictionWorker:
 
             order_resp = await self._call_api(
                 "place_order",
+                _entry_buy=True, _entry_loop_id=entry_loop, _entry_profile=entry_profile,
                 _trace_campaign_id=p3_camp_id,
                 _trace_intent_id=intent.intent_id,
                 wallet_address=self.settings.wallet_address,
@@ -6490,6 +6514,7 @@ class PredictionWorker:
                 _weight_pre_acquired=True,
                 _shared_pre_acquired=True,
             )
+            order_post_completed = True
             order_id = str(order_resp.get("orderId") or order_resp.get("order_id") or "") if isinstance(order_resp, Mapping) else ""
             if not order_id:
                 LOGGER.error("[FAV_P3] place_order response had no orderId: %s", order_resp)
@@ -6550,6 +6575,14 @@ class PredictionWorker:
                         status="CANCELLED",
                         reject_reason="P3_REJECT_ORDER_TIMEOUT",
                     )
+        except (PredictionEntryNotSubmitted, PredictionRateLimitDeferred) as exc:
+            # Admission failed before any order POST. Preserve the intent audit
+            # record without stranding the campaign behind an unknown order.
+            if order_post_completed:
+                LOGGER.warning("[FAV_P3] Order management deferred for %s: %s", p3_camp_id, exc)
+                return
+            await self._reject_unsubmitted_entry(p3_campaign, intent, p3_campaign.state, str(exc))
+            await _p3_exec_reject("entry_not_submitted")
         except Exception as exc:
             LOGGER.exception("[FAV_P3] Execution error for %s: %s", p3_camp_id, exc)
 
@@ -7752,6 +7785,7 @@ class PredictionWorker:
             self._finish_entry_attempt(campaign.campaign_id, "execution_return_without_post")
 
     async def _handle_decision_inner(self, campaign: Campaign, decision: StrategyDecision) -> None:
+        entry_loop, entry_profile = self._loop_id, self._selected_strategy_profile
         from src.gridbot.prediction import r3_reversal_guard as r3guard
         c180_buy = (self._selected_strategy_profile in {"c180_favorite_hold_v1", "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1'}
                     and decision.action is ActionType.BUY_INITIAL)
@@ -8312,6 +8346,7 @@ class PredictionWorker:
         try:
             order = await self._call_api(
                 "place_order", _trace_campaign_id=campaign.campaign_id, _trace_intent_id=intent.intent_id, wallet_address=self.settings.wallet_address, wallet_id=self.settings.wallet_id,
+                _entry_buy=is_buy, _entry_loop_id=entry_loop, _entry_profile=entry_profile,
                 _entry_deadline_ms=ready.execution.expires_at_ms if c180_buy else None,
                 _entry_book_at_ms=final_book.book_at_ms if c180_buy else None,
                 quote_id=quote_id, account_type=self.settings.account_type, order_type=self.settings.order_type,

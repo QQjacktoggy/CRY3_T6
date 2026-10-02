@@ -19,6 +19,7 @@ the indexed ``cancelInfoList[0].orderId`` keys are not rewritten to
 from __future__ import annotations
 
 import hashlib
+from .http_bounds import ERROR_BODY_BYTES, PREDICTION_BODY_BYTES, ResponseBodyError, read_bounded
 from contextvars import ContextVar
 from contextlib import contextmanager
 import os
@@ -71,21 +72,40 @@ def entry_http_guard_scope(guard):
         _ENTRY_HTTP_GUARD.reset(token)
 
 
+_REQUEST_ADMISSION_GUARD = ContextVar('prediction_request_admission_guard', default=None)
+
+
+@contextmanager
+def request_admission_guard_scope(guard):
+    """Recheck server cooldowns for every HTTP operation, including prepaid work."""
+    token = _REQUEST_ADMISSION_GUARD.set(guard)
+    try:
+        yield
+    finally:
+        _REQUEST_ADMISSION_GUARD.reset(token)
+
+
 class PredictionClientError(RuntimeError):
     """Base class for client and transport failures."""
 
 
 class PredictionTransportError(PredictionClientError):
-    """Raised when the HTTP transport cannot obtain a response."""
+    """Raised when HTTP cannot provide a bounded response; retain ban metadata."""
+
+    def __init__(self, message, *, status_code=None, headers=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.headers = dict(headers or {})
 
 
 class PredictionAPIError(PredictionClientError):
     """Raised for non-2xx responses or Binance error envelopes."""
 
-    def __init__(self, message: str, *, status_code: int | None = None, payload: Any = None) -> None:
+    def __init__(self, message: str, *, status_code: int | None = None, payload: Any = None, headers=None) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+        self.headers = dict(headers or {})
 
 
 class PredictionReadTimestampError(PredictionAPIError):
@@ -107,6 +127,7 @@ class TransportResponse:
     status_code: int
     body: bytes | str | Mapping[str, Any] | Sequence[Any] | None = None
     headers: Mapping[str, str] | None = None
+    body_error: str | None = None
 
     def json(self) -> Any:
         if isinstance(self.body, (Mapping, list, tuple)):
@@ -135,73 +156,62 @@ class PredictionTransport(Protocol):
         ...
 
 
+def _bounded_response(stream, status, headers):
+    # Retain status/headers even if a hostile error body exceeds its cap, so
+    # 418/429 cooldowns are still recorded before surfacing the body failure.
+    limit = PREDICTION_BODY_BYTES if 200 <= status < 300 else ERROR_BODY_BYTES
+    try:
+        body = read_bounded(stream, headers, limit)
+        return TransportResponse(status, body, headers)
+    except Exception as exc:
+        # Once response headers exist, even a truncated/read-failed body must
+        # retain a server ban; do not turn it into an unclassified network error.
+        message = str(exc) if isinstance(exc, ResponseBodyError) else 'HTTP body read failed: ' + type(exc).__name__
+        return TransportResponse(status, None, headers, message)
+
+
 class UrllibTransport:
-    """stdlib transport; no third-party HTTP package is required."""
+    """stdlib transport with bounded wire and decompressed response bodies."""
+    concurrent_reads = True
 
-    concurrent_reads = True  # No shared session/cookies or mutable request state.
-
-    def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: Mapping[str, str],
-        body: bytes | None = None,
-        timeout: float = 10.0,
-    ) -> TransportResponse:
-        request = urllib.request.Request(url, data=body, headers=dict(headers), method=method.upper())
+    def request(self, method, url, *, headers, body=None, timeout=10.0):
+        headers = dict(headers)
+        headers["Accept-Encoding"] = "gzip, deflate"
+        request = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return TransportResponse(
-                    status_code=int(response.status),
-                    body=response.read(),
-                    headers=dict(response.headers.items()),
-                )
+                return _bounded_response(response, int(response.status), dict(response.headers.items()))
         except urllib.error.HTTPError as exc:
-            # Preserve the Binance JSON error envelope for useful diagnostics.
-            return TransportResponse(
-                status_code=int(exc.code),
-                body=exc.read(),
-                headers=dict(exc.headers.items()) if exc.headers else {},
-            )
+            with exc:
+                return _bounded_response(exc, int(exc.code), dict(exc.headers.items()) if exc.headers else {})
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise PredictionTransportError(f"Prediction HTTP request failed: {exc}") from exc
 
 
 class RequestsTransport:
-    """Optional requests-backed transport.
-
-    Importing ``requests`` is delayed until construction so importing this
-    client never adds a hard dependency to the project.
-    """
-
-    def __init__(self, session: Any = None) -> None:
+    """Optional requests transport; decompression is bounded explicitly."""
+    def __init__(self, session=None):
         if session is None:
             try:
                 import requests
-            except ImportError as exc:  # pragma: no cover - environment-specific
+            except ImportError as exc:
                 raise PredictionTransportError("requests is not installed") from exc
             session = requests.Session()
         self.session = session
 
-    def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: Mapping[str, str],
-        body: bytes | None = None,
-        timeout: float = 10.0,
-    ) -> TransportResponse:
+    def request(self, method, url, *, headers, body=None, timeout=10.0):
+        headers = dict(headers)
+        headers["Accept-Encoding"] = "gzip, deflate"
         try:
-            response = self.session.request(method.upper(), url, headers=dict(headers), data=body, timeout=timeout)
-        except Exception as exc:  # requests exposes several transport exception classes
+            response = self.session.request(method.upper(), url, headers=headers, data=body,
+                                            timeout=timeout, stream=True)
+            try:
+                response.raw.decode_content = False
+                return _bounded_response(response.raw, int(response.status_code), dict(response.headers))
+            finally:
+                response.close()
+        except Exception as exc:
             raise PredictionTransportError(f"Prediction HTTP request failed: {exc}") from exc
-        return TransportResponse(
-            status_code=int(response.status_code),
-            body=response.content,
-            headers=dict(response.headers),
-        )
 
 
 def _stringify(value: Any) -> str:
@@ -486,11 +496,7 @@ class BinancePredictionClient:
                 body = canonical.encode("utf-8")
             sent_at = int(time.time() * 1000)
             monotonic_start = time.monotonic_ns()
-            if upper_method == "POST" and path == PREDICTION_PREFIX + "/trade/place-order-bundle":
-                guard = _ENTRY_HTTP_GUARD.get()
-                if guard is not None:
-                    guard()  # After budget/signing, immediately before transport.
-            response = self.transport.request(upper_method, url, headers=headers, body=body, timeout=self.timeout)
+            response = self._transport_request(upper_method, url, headers=headers, body=body, timeout=self.timeout)
             received_at = int(time.time() * 1000)
             timing = dict(attempt=attempt+1, signed_at_ms=signed_at, sent_at_ms=sent_at,
                           received_at_ms=received_at, duration_ms=(time.monotonic_ns()-monotonic_start)//1_000_000)
@@ -517,7 +523,7 @@ class BinancePredictionClient:
                     status_code=int(response.status_code), payload=payload, path=path,
                     attempts=attempt+1, timings=timings)
             raise PredictionAPIError(self._error_message(payload, response.status_code),
-                                     status_code=int(response.status_code), payload=payload)
+                                     status_code=int(response.status_code), payload=payload, headers=response.headers)
         raise AssertionError("timestamp attempt loop did not terminate")
 
     def _before_http(self, *, use_prepaid=True):
@@ -529,14 +535,37 @@ class BinancePredictionClient:
             if not allowed:
                 raise SharedBudgetDeferred(self.request_budget.health())
 
+    def _transport_request(self, *args, **kwargs):
+        budget = self.request_budget
+        token = budget.begin_request() if budget else None
+        if budget and token is None:
+            raise SharedBudgetDeferred(budget.health())
+        try:
+            admission = _REQUEST_ADMISSION_GUARD.get()
+            if admission is not None:
+                admission()
+            if (str(args[0]).upper() == 'POST'
+                    and urllib.parse.urlsplit(args[1]).path == PREDICTION_PREFIX + '/trade/place-order-bundle'):
+                guard = _ENTRY_HTTP_GUARD.get()
+                if guard is not None:
+                    guard()  # Journal fsync may consume the deadline or change stop state.
+            response = self.transport.request(*args, **kwargs)
+        except BaseException:
+            if budget:
+                budget.transport_failed(token)
+            raise
+        if budget:
+            budget.note_response(response.status_code, response.headers, token=token)
+        return response
+
     def _after_http(self, response):
         self.last_response_budget_headers = {
             str(k).lower(): str(v) for k, v in (response.headers or {}).items()
             if str(k).lower() == "retry-after" or str(k).lower().startswith(
                 ("x-mbx-used-weight", "x-sapi-used-ip-weight", "x-sapi-used-uid-weight"))
         }
-        if self.request_budget:
-            self.request_budget.note_response(response.status_code, response.headers)
+        if response.body_error:
+            raise PredictionTransportError(response.body_error, status_code=int(response.status_code), headers=response.headers)
 
     @staticmethod
     def _error_message(payload: Any, status_code: int | None) -> str:
@@ -775,7 +804,7 @@ class BinancePredictionClient:
         }
         if self.api_key:
             headers["X-MBX-APIKEY"] = self.api_key
-        response = self.transport.request(
+        response = self._transport_request(
             method.upper(),
             f"{self.base_url}{path}",
             headers=headers,
@@ -789,11 +818,11 @@ class BinancePredictionClient:
             payload = response.body
         if not 200 <= int(response.status_code) < 300:
             raise PredictionAPIError(
-                self._error_message(payload, response.status_code), status_code=int(response.status_code), payload=payload
+                self._error_message(payload, response.status_code), status_code=int(response.status_code), payload=payload, headers=response.headers
             )
         if isinstance(payload, Mapping) and ("code" in payload and payload.get("code") not in (0, "0", None)):
             raise PredictionAPIError(
-                self._error_message(payload, response.status_code), status_code=int(response.status_code), payload=payload
+                self._error_message(payload, response.status_code), status_code=int(response.status_code), payload=payload, headers=response.headers
             )
         return payload
 

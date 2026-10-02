@@ -5,6 +5,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .regime_t67_policy import PROFILE
+from .evidence_retention import EvidenceBudget, bounded_payload, require_free_space
 
 
 def selected_profile(prediction_db):
@@ -22,18 +23,21 @@ class EvidenceStore:
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        require_free_space(self.path)
         self.db = sqlite3.connect(self.path, timeout=1)
+        self.budget = EvidenceBudget(self.db, self.path)
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA synchronous=FULL')
+        self.budget.prepare()
         self.db.execute('CREATE TABLE IF NOT EXISTS spot(source TEXT,generation INTEGER,event_ms INTEGER,'
                         'received_ms INTEGER,price TEXT,PRIMARY KEY(source,generation,event_ms))')
         self.db.execute('CREATE INDEX IF NOT EXISTS spot_received ON spot(received_ms)')
         self.db.execute('CREATE TABLE IF NOT EXISTS books(start INTEGER,book_ms INTEGER,captured_ms INTEGER,'
                         'payload TEXT,PRIMARY KEY(start,book_ms))')
         self.db.execute('CREATE INDEX IF NOT EXISTS books_capture ON books(start,captured_ms)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS books_retention ON books(captured_ms)')
         self.db.commit()
         self.last_spot = {}
-        self.last_prune = 0
 
     def spot(self, event, generation):
         kind = event.get('kind')
@@ -49,21 +53,24 @@ class EvidenceStore:
             raise ValueError('spot clock/price invalid')
         if received-self.last_spot.get(source, 0) < 100:
             return
+        self.budget.prepare()
         with self.db:
             self.db.execute('INSERT OR IGNORE INTO spot VALUES(?,?,?,?,?)',
-                            (source, int(generation), stamp, received, str(price)))
-            # Only the latest 15-minute model horizon and the opening anchor
-            # are needed. Book/decision evidence remains independently durable.
-            if received-self.last_prune >= 60000:
-                self.db.execute('DELETE FROM spot WHERE received_ms<?', (received-1200000,))
-                self.last_prune = received
+                            (source, int(generation), stamp, received, bounded_payload(str(price))))
+            # Keep the model's 15-minute horizon plus opening-anchor margin.
+            self.budget.prune('spot', 'received_ms', received,
+                              age_ms=1200000, rows=30000)
         self.last_spot[source] = received
 
     def book(self, snapshot):
+        raw = bounded_payload(json.dumps(snapshot, sort_keys=True, allow_nan=False))
+        self.budget.prepare()
         with self.db:
             self.db.execute('INSERT OR IGNORE INTO books VALUES(?,?,?,?)',
                             (snapshot['market_start_ms'], snapshot['book_at_ms'], snapshot['captured_at_ms'],
-                             json.dumps(snapshot, sort_keys=True, allow_nan=False)))
+                             raw))
+            self.budget.prune('books', 'captured_ms', snapshot['captured_at_ms'],
+                              age_ms=3600000, rows=36000)
 
     def close(self):
         self.db.close()

@@ -415,7 +415,9 @@ class AdditionalSafetyTests(LedgerFixture):
         class Budget:
             def __init__(self, mutate):self.mutate=mutate
             def can_send_prepaid(self):self.mutate();return True
-            def note_response(self,*args):pass
+            def begin_request(self):return object()
+            def transport_failed(self, token):pass
+            def note_response(self,*args,**kwargs):pass
         async def call():
             return await PredictionWorker._call_api(worker,'place_order',
                 _trace_campaign_id='c1',_trace_intent_id='i1',_weight_pre_acquired=True,
