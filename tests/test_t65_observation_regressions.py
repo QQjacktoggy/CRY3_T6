@@ -137,7 +137,8 @@ async def test_signal_service_resolves_no_fill_shadow_after_loop_completion(tmp_
                 get_settlement=AsyncMock(return_value=None),
                 get_fills=AsyncMock(return_value=[]),load_unresolved_intents=AsyncMock(return_value=[])),
             _selected_strategy_profile=lane.PROFILE,_now_ms=lambda:S+600000,
-            _finalize_settlement_with_c180=AsyncMock())
+            _finalize_settlement_with_c180=AsyncMock(),
+            _recheck_cancelled_before_settlement=AsyncMock(return_value=True))
         settled = await PredictionWorker.settle_campaign(worker,campaign)
         assert settled['winner'] is None
         report_database(tmp_path)

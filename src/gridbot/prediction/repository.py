@@ -1433,6 +1433,7 @@ class PredictionRepository:
         payload: Mapping[str, Any],
         *,
         outcome: OutcomeSide | None = None,
+        _transaction_owned: bool = False,
     ) -> dict[str, Any]:
         """Apply one cumulative order snapshot in one SQLite transaction.
 
@@ -1474,7 +1475,11 @@ class PredictionRepository:
         terminal = status in {"FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED"}
         conn = self._require_conn()
         now = _now_ms()
-        await self._begin(conn)
+        if _transaction_owned:
+            if not conn.in_transaction:
+                raise RuntimeError("repair must own the transaction")
+        else:
+            await self._begin(conn)
         try:
             prior = await self._tx_fetchone(conn,
                 "SELECT filled_shares,cumulative_gross,cumulative_fee,payload_json FROM prediction_orders WHERE order_id=?",
@@ -1704,7 +1709,8 @@ class PredictionRepository:
                     (str(order_id), intent_status, int(not terminal and delta_shares > 0), str(intent_data["intent_id"])),
                 )
             self._maybe_fail("after_terminal")
-            await conn.commit()
+            if not _transaction_owned:
+                await conn.commit()
             return {
                 "order_id": str(order_id),
                 "status": status,
@@ -1716,10 +1722,25 @@ class PredictionRepository:
                 "campaign": candidate,
             }
         except Exception:
-            await conn.rollback()
+            if not _transaction_owned:
+                await conn.rollback()
             raise
 
     upsert_order = save_order
+
+    async def submitted_cancelled_orders(self, campaign_id: str) -> list[dict[str, Any]]:
+        """Known submitted orders need a final history read before NO_FILL."""
+        return await self._fetchall(
+            "SELECT o.order_id,o.payload_json AS order_payload_json,i.* FROM prediction_orders o "
+            "JOIN prediction_order_intents i ON i.intent_id=o.intent_id "
+            "WHERE o.campaign_id=? AND o.submitted_at_ms IS NOT NULL "
+            "AND UPPER(o.status) IN ('CANCELLED','CANCELED','EXPIRED','FAILED')",
+            (campaign_id,))
+
+    async def repair_cancelled_fill(self, evidence: Mapping[str, Any]) -> dict[str, Any]:
+        """Explicit operator repair; no signing, new orders, or progress increment."""
+        from .late_fill_repair import repair_transaction
+        return await repair_transaction(self, evidence)
 
     async def get_order(self, order_id: str) -> dict[str, Any] | None:
         return await self._fetchone("SELECT * FROM prediction_orders WHERE order_id = ?", (order_id,))

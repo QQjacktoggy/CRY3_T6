@@ -68,6 +68,7 @@ _REQUIRED_FIXED_RELEASE_PATHS = (
     'src/gridbot/prediction/jev_gate.py',
     'src/gridbot/prediction/http_bounds.py',
     'src/gridbot/prediction/live_report.py',
+    'src/gridbot/prediction/late_fill_repair.py',
     'src/gridbot/prediction/loss_cooldown_guard.py',
     'src/gridbot/prediction/migrations/001_initial.sql',
     'src/gridbot/prediction/migrations/002_loops.sql',
