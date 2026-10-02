@@ -36,7 +36,7 @@ from .client import (
     PredictionReadTimestampError,
     PredictionClientError,
     PredictionEntryNotSubmitted,
-    entry_http_guard_scope,
+    entry_http_guard_scope, request_admission_guard_scope,
     available_balance_display,
     normalize_amount_in,
 )
@@ -1672,7 +1672,9 @@ class PredictionWorker:
         # called from a tight management loop.  A single process-wide budget
         # prevents discovery/detail/quote storms across campaigns.
         weight = self._endpoint_weight(method_name)
-        if not weight_pre_acquired and not self._rate_limiter.acquire(weight, block=False, emergency=emergency, management=management):
+        allowed = (self._rate_limiter.can_send_prepaid() if weight_pre_acquired else
+                   self._rate_limiter.acquire(weight, block=False, emergency=emergency, management=management))
+        if not allowed:
             health = self._rate_limiter.health()
             self._rate_limiter.note_deferred(weight, error=f"{method_name} deferred by local weight budget")
             raise PredictionRateLimitDeferred(method_name, health.as_dict())
@@ -1697,13 +1699,18 @@ class PredictionWorker:
                     entry_guard()  # Recheck controls/deadline after the durable read.
             def http_guard():
                 admission_guard()
+                cooldown_guard()
                 if entry_buy:
                     # Capture the actual boundary time, not later telemetry flush.
                     at_ms, stamp = self._now_ms(), time.monotonic_ns()
                     loop.call_soon_threadsafe(lambda: self._entry_http_started(trace_cid, trace_iid, at_ms, stamp))
+            def cooldown_guard():
+                if not self._rate_limiter.can_send_prepaid():
+                    raise PredictionRateLimitDeferred(method_name, self._rate_limiter.health().as_dict())
             def invoke():
                 admission_guard()  # Also guards injected/custom clients before invocation.
-                with entry_http_guard_scope(http_guard if entry_buy else None):
+                cooldown_guard()
+                with request_admission_guard_scope(cooldown_guard), entry_http_guard_scope(http_guard if entry_buy else None):
                     return method(*args, **kwargs)
             with request_budget_scope("exit" if emergency else ("management" if management else "normal"), shared_prepaid):
                 result = await asyncio.to_thread(invoke)

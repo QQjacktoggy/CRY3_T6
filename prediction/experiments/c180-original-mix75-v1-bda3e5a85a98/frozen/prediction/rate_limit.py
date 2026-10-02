@@ -145,6 +145,11 @@ class PredictionRateLimiter:
             self.sleep(delay)
             waited = True
 
+    def can_send_prepaid(self) -> bool:
+        """Check only the live server ban; a reservation never exempts a request."""
+        with self._lock:
+            return int(self.clock_ms()) >= self._backoff_until_ms
+
     def try_acquire(self, weight: int = 1, *, emergency: bool = False) -> bool:
         return self.acquire(weight, block=False, emergency=emergency)
 

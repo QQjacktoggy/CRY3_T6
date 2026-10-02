@@ -387,3 +387,116 @@ def test_entry_guard_rechecked_after_journal_fsync(tmp_path):
     assert calls == []
     assert list(budget._cooldowns.path.iterdir()) == [budget._cooldowns.path / 'ready']
     assert budget.can_send_prepaid()
+
+
+def prepaid_worker(monkeypatch, transport):
+    from src.gridbot.prediction.worker import PredictionWorker
+    from src.gridbot.prediction.worker import RuntimeMode
+    monkeypatch.delenv('PREDICTION_SHARED_WEIGHT_DB', raising=False)
+    worker = object.__new__(PredictionWorker)
+    worker.client = client.BinancePredictionClient('offline', 'offline', transport=transport)
+    worker._rate_limiter = rate.PredictionRateLimiter(clock_ms=lambda: 1000)
+    worker._trace_event = lambda *a, **k: None
+    worker._now_ms = lambda: 1000
+    worker._effective_mode = RuntimeMode.LIVE
+    worker.heartbeat = SimpleNamespace(last_error=None)
+    # Keep actual native signing and HTTP transport paths. Order here represents
+    # SELL (no _entry_buy): server bans apply independently of BUY controls.
+    for method in ['query_order_book', 'get_quote', 'place_order', 'query_active_orders']:
+        path = client.PREDICTION_PREFIX + ('/trade/place-order-bundle' if method == 'place_order' else '/test')
+        verb = 'POST' if method in ('get_quote', 'place_order') else 'GET'
+        setattr(worker.client, method, lambda p=path, v=verb: worker.client._request(p, method=v))
+    return worker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', [418, 429])
+@pytest.mark.parametrize('method,flags', [
+    ('query_order_book', {}), ('get_quote', {}), ('place_order', {'_emergency': True}),
+    ('query_active_orders', {'_management': True}),
+])
+async def test_server_ban_also_blocks_prepaid_worker_calls(monkeypatch, status, method, flags):
+    from src.gridbot.prediction.worker import PredictionRateLimitDeferred
+    calls = []
+    def send(*args, **kwargs):
+        calls.append(1)
+        return client.TransportResponse(status, {'msg': 'limited'}, {'Retry-After': '3600'})
+    worker = prepaid_worker(monkeypatch, SimpleNamespace(request=send))
+    with pytest.raises(client.PredictionAPIError):
+        await worker._call_api('query_order_book')
+    used = worker._rate_limiter.health().used
+    with pytest.raises(PredictionRateLimitDeferred):
+        await worker._call_api(method, _weight_pre_acquired=True, **flags)
+    assert calls == [1]
+    assert worker._rate_limiter.health().used == used
+    assert worker._rate_limiter.health().backoff_until_ms == 3601000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('boundary', ['signing', 'journal'])
+@pytest.mark.parametrize('method', ['query_order_book', 'get_quote', 'place_order', 'query_active_orders'])
+async def test_ban_after_reservation_rechecked_before_actual_http(monkeypatch, tmp_path, boundary, method):
+    from src.gridbot.prediction.worker import PredictionRateLimitDeferred
+    calls = []
+    worker = prepaid_worker(monkeypatch, SimpleNamespace(request=lambda *a, **k: calls.append(1)))
+    assert worker._rate_limiter.acquire(1, block=False)
+    def ban():
+        worker._rate_limiter.note_response(418, {'Retry-After': '3600'})
+    budget = None
+    if boundary == 'signing':
+        original = client.hmac_sha256_signature
+        def sign(*args):
+            result = original(*args)
+            ban()
+            return result
+        monkeypatch.setattr(client, 'hmac_sha256_signature', sign)
+    else:
+        budget = rate.SharedRequestBudget(tmp_path / 'budget.db', clock_ms=lambda: 1000)
+        worker.client.request_budget = budget
+        original = budget.begin_request
+        def begin():
+            token = original()
+            ban()
+            return token
+        budget.begin_request = begin
+    with pytest.raises(PredictionRateLimitDeferred):
+        await worker._call_api(method, _weight_pre_acquired=True, _emergency=True)
+    assert calls == []
+    assert worker._rate_limiter.health().used == 1
+    if budget:
+        assert list(budget._cooldowns.path.iterdir()) == [budget._cooldowns.path / 'ready']
+
+
+@pytest.mark.asyncio
+async def test_valid_prepaid_call_debits_weight_only_once(monkeypatch):
+    calls = []
+    def send(*args, **kwargs):
+        calls.append(1)
+        return client.TransportResponse(200, {'ok': True}, {})
+    worker = prepaid_worker(monkeypatch, SimpleNamespace(request=send))
+    assert worker._rate_limiter.acquire(1, block=False)
+    assert await worker._call_api('get_quote', _weight_pre_acquired=True) == {'ok': True}
+    assert worker._rate_limiter.health().used == 1
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_ban_during_final_durable_buy_guard_blocks_http_and_start_telemetry(monkeypatch):
+    from src.gridbot.prediction.worker import PredictionRateLimitDeferred
+    calls, starts = [], []
+    worker = prepaid_worker(monkeypatch, SimpleNamespace(request=lambda *a, **k: calls.append(1)))
+    worker._allow_new_buys = True
+    worker._hard_stop_latched = False
+    worker._loop_id = 'loop'
+    worker._selected_strategy_profile = 'baseline'
+    worker._entry_http_started = lambda *args: starts.append(1)
+    guard_calls = []
+    def durable(*args):
+        guard_calls.append(1)
+        if len(guard_calls) == 2:
+            worker._rate_limiter.note_response(429, {'Retry-After': '3600'})
+    worker._entry_durable_http_guard = durable
+    with pytest.raises(PredictionRateLimitDeferred):
+        await worker._call_api('place_order', _entry_buy=True, _weight_pre_acquired=True)
+    assert len(guard_calls) == 2
+    assert calls == [] and starts == []

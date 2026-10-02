@@ -93,22 +93,26 @@ installer/service effects. The validation interpreter denies network socket
 connections, including subprocesses. Tests cover malicious staged code without
 side effects, path/copy-list attacks, Python optimization, retention convergence,
 WAL readers, low-space recovery, BUY races, durable backoff and compressed bodies.
-Integrated validation (Python 3.12.14): **1043 passed, 1 skipped, 6 subtests passed**.
-The 319 additional passing cases cover the new security boundaries. The existing
+Integrated validation (Python 3.12.14): **1061 passed, 1 skipped, 6 subtests passed**.
+The 337 additional passing cases cover the new security boundaries. The existing
 installer recovery fixtures now exercise real trusted verification instead of
 mocking the removed staged `runpy` loader. Full release build, normal frozen
 `live.verify_source()`, 131-file release/pin verification, `compileall`, and
 CRLF-aware `git diff --check` pass.
 
 Release fingerprint:
-`bd6be18bedf067547c6fa00739b5e31060d436221b00dd51dd11ff2df01d0581`.
+`a07cae1a10cfe2546055e767c6d41c63eca15ed45187721cb7ab8133f1650b76`.
 
 Reproduce the repository checks with the README's locked environment:
 `python -m pytest -q` and `python -m scripts.build_t6_release`.
 Independent review of the initial implementation found three P2 gaps: a stage-
 supplied trust anchor, loss of a ban across peers/restart after SQLite write
 failure, and missing rate-limit metadata on bounded-body errors. Follow-up
-regressions cover those complete attack/failure sequences. Final re-review and
+regressions cover those complete attack/failure sequences. Re-review also found
+that prepaid weight reservations bypassed a newly recorded local ban. Weight
+reservation and cooldown admission are now separate: every request checks the
+local ban again at actual transport, after signing/journal I/O and the durable
+BUY guard, without debiting prepaid weight twice. Final re-review and
 remote CI results are recorded in the PR.
 
 No VM connection, deployment, real exchange API, secret access, trading-ledger

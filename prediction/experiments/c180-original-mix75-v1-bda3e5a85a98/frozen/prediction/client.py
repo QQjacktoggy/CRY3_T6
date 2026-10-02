@@ -19,6 +19,8 @@ the indexed ``cancelInfoList[0].orderId`` keys are not rewritten to
 from __future__ import annotations
 
 import hashlib
+from contextvars import ContextVar
+from contextlib import contextmanager
 from .http_bounds import ERROR_BODY_BYTES, PREDICTION_BODY_BYTES, ResponseBodyError, read_bounded
 import os
 from .rate_limit import SharedRequestBudget, SharedBudgetDeferred, REQUEST_PRIORITY, REQUEST_PREPAID
@@ -41,6 +43,19 @@ USDT_WEI = Decimal("1000000000000000000")
 # are 1, 2 and 3 USDT; each client instance enforces its selected unit.
 ORDER_UNIT_USDT = Decimal("1")
 ALLOWED_ORDER_UNITS_USDT = frozenset({Decimal("1"), Decimal("2"), Decimal("3")})
+
+
+_REQUEST_ADMISSION_GUARD = ContextVar('prediction_request_admission_guard', default=None)
+
+
+@contextmanager
+def request_admission_guard_scope(guard):
+    """Recheck server cooldowns for every HTTP operation, including prepaid work."""
+    token = _REQUEST_ADMISSION_GUARD.set(guard)
+    try:
+        yield
+    finally:
+        _REQUEST_ADMISSION_GUARD.reset(token)
 
 
 class PredictionClientError(RuntimeError):
@@ -466,6 +481,9 @@ class BinancePredictionClient:
         if budget and token is None:
             raise SharedBudgetDeferred(budget.health())
         try:
+            admission = _REQUEST_ADMISSION_GUARD.get()
+            if admission is not None:
+                admission()
             response = self.transport.request(*args, **kwargs)
         except BaseException:
             if budget:

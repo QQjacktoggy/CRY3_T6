@@ -72,6 +72,19 @@ def entry_http_guard_scope(guard):
         _ENTRY_HTTP_GUARD.reset(token)
 
 
+_REQUEST_ADMISSION_GUARD = ContextVar('prediction_request_admission_guard', default=None)
+
+
+@contextmanager
+def request_admission_guard_scope(guard):
+    """Recheck server cooldowns for every HTTP operation, including prepaid work."""
+    token = _REQUEST_ADMISSION_GUARD.set(guard)
+    try:
+        yield
+    finally:
+        _REQUEST_ADMISSION_GUARD.reset(token)
+
+
 class PredictionClientError(RuntimeError):
     """Base class for client and transport failures."""
 
@@ -528,6 +541,9 @@ class BinancePredictionClient:
         if budget and token is None:
             raise SharedBudgetDeferred(budget.health())
         try:
+            admission = _REQUEST_ADMISSION_GUARD.get()
+            if admission is not None:
+                admission()
             if (str(args[0]).upper() == 'POST'
                     and urllib.parse.urlsplit(args[1]).path == PREDICTION_PREFIX + '/trade/place-order-bundle'):
                 guard = _ENTRY_HTTP_GUARD.get()
