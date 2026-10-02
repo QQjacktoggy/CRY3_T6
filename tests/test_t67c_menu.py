@@ -26,3 +26,24 @@ async def test_old_non_t6_callback_has_no_selection_or_arm_side_effect(profile):
     assert service._invoke.await_count==1
     assert service._invoke.await_args.args[0]==('status','predict_status')
     assert '策略選項無效' in service._reply.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_picker_text_and_buttons_only_describe_available_t6_lanes():
+    service = PredictionTelegramService(object(), 1)
+    service._deny_if_unauthorized = AsyncMock(return_value=False)
+    service._invoke = AsyncMock(return_value={
+        'strategy_profile': 'regime_target6_7c_v1',
+        'market_symbol': 'BTCUSDT', 'order_unit_usdt': '1',
+    })
+    service._reply = AsyncMock()
+    await service.cmd_predict_lane(None, None)
+    text = service._reply.await_args.args[1]
+    assert '目前提供 T6 系列策略' in text
+    assert 'P3' not in text and 'fav_p3' not in text and 'FAV' not in text
+    rows = service._reply.await_args.kwargs['reply_markup'].inline_keyboard
+    assert len(rows) == 11
+    assert rows[0][0].callback_data == 'predict_lane:regime_target6_7c_v1'
+    assert all(row[0].callback_data.startswith('predict_lane:regime_target6') for row in rows)
+    assert service._invoke.await_count == 1
+    assert service._invoke.await_args.args[0] == ('status', 'predict_status')

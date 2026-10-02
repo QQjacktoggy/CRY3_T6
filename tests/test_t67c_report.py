@@ -282,3 +282,18 @@ async def test_t67c_shadow_command_does_not_run_legacy_report():
     with patch('src.gridbot.prediction.live_report.t67_family_report_profile', return_value=T67C_PROFILE):
         await service.cmd_predict_shadow_report(None, None)
     service.cmd_predict_report.assert_awaited_once_with(None, None)
+
+
+@pytest.mark.parametrize('column', ['market_topic_id', 'market_id'])
+def test_unverified_market_identity_excluded_from_headline_fill_rate(tmp_path, column):
+    with main_database(tmp_path) as db, feature_database(tmp_path) as feature:
+        live_fill(db, feature)
+        db.execute(f"UPDATE prediction_campaigns SET {column}='wrong'")
+    text = render(tmp_path)
+    assert 'Live fill rate 0.0%（0/1' in text
+    assert '成交市場 0' in text
+    assert '本輪 WR —' in text
+    assert 'first DOWN｜成交 0' in text
+    assert '待結算/核對 1' in text
+    assert '成交市場登錄待核對1' in text
+    assert '本輪已知淨 PnL +1.0000' not in text

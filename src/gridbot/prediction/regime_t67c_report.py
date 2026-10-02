@@ -394,7 +394,7 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
             units = chosen+'（目前設定；待成交確認）'
     ended = {int(s['market_start_ms']) for s in slots
              if s['verified_at_ms'] is not None and int(s['market_start_ms'])+SLOT <= now}
-    filled = {int(campaigns[cid]['start_time_ms']) for cid in fill_ids & current_ids}
+    filled = {int(campaigns[cid]['start_time_ms']) for cid in verified_fills}
     closed_fills = len(filled & ended)
     fill_text = f'{closed_fills/len(ended):.1%}（{closed_fills}/{len(ended)} 已結束登錄市場）' if ended else '—（尚無已結束登錄市場）'
     pnl = _value(metric, events, pending) if events or pending else '—'

@@ -1440,16 +1440,12 @@ class PredictionTelegramService:
             (label for profile, label in lanes if profile == str(next_profile).lower()),
             str(next_profile or current_profile or "未設定"),
         )
-        p3_arm = str(current.get("fav_p3_arm") or "off").lower() if isinstance(current, Mapping) else "off"
-        p3_label = "ON（Live 1U）" if p3_arm == "live" else ("SHADOW" if p3_arm == "shadow" else "OFF")
         await self._reply(
             update,
             "【選擇策略】\n\n"
             f"目前 Loop：{current_label}\n"
             f"下一個 Loop：{next_label}\n"
-            f"P3 lane：{p3_label}\n"
-            "點「P3」：切到 fav_p3（只 FAV＋P3 閘，無 R3）並 arm=live。\n"
-            "點其他策略：離開 P3（arm=off），再切該策略。\n"
+            "目前提供 T6 系列策略；選定後依原流程確認 Live 與金額。\n"
             "執行中點選會排到下一個 Loop；先停止 Loop 再點選，會在安全同步後結束舊 Loop 並立即套用。\n" +
             ("T6.2／T6.3／T6.3a／T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c 每筆可選 1／2／3 USDT，不加倉；切換策略不會自動啟動 Loop。"
              if str(next_profile or current_profile).lower() in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE) else
