@@ -393,23 +393,39 @@ def test_installer_preflight_checks_run_even_when_asserts_are_optimized(tmp_path
     namespace = {'__name__': 'offline_installer_test', '__file__': str(installer)}
     exec(compile(installer.read_text(), str(installer), 'exec', optimize=optimized), namespace)
     root, stage = tmp_path/'root', tmp_path/'stage'
-    for base, fingerprint in ((root, 'old'), (stage, 'new')):
+    fingerprints = {}
+    for base in (root, stage):
+        release_path = 'src/gridbot/prediction/release.py'
+        contents = {'source.py': 'old' if base == root else 'new',
+                    release_path: f'_REQUIRED_FIXED_RELEASE_PATHS = ({release_path!r}, "source.py")\n'}
+        entries = []
+        for relative, content in sorted(contents.items()):
+            path = base/relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+            entries.append({'path': relative, 'sha256': hashlib.sha256(content.encode()).hexdigest()})
+        canonical = json.dumps(entries, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        fingerprints[base] = hashlib.sha256(canonical.encode()).hexdigest()
         (base/'prediction').mkdir(parents=True)
-        (base/'prediction/release-manifest.json').write_text(json.dumps({'release_fingerprint': fingerprint}))
-        (base/'source.py').write_text('old' if base == root else 'new')
+        (base/'prediction/release-manifest.json').write_text(json.dumps({
+            'schema': 'prediction-release-v1', 'files': entries,
+            'release_fingerprint': fingerprints[base]}))
+        (base/'prediction/release-pin.env').write_text(fingerprints[base])
     digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
-    (stage/'candidate.json').write_text(json.dumps({'parent': 'changed' if unsafe == 'parent' else 'old',
+    (stage/'candidate.json').write_text(json.dumps({'parent': 'changed' if unsafe == 'parent' else fingerprints[root],
         'files': [{'path': 'source.py', 'before': digest('old'), 'after': digest('new')}]}))
     (stage/'validation.json').write_text(json.dumps({'status': 'STAGED_VERIFIED_NOT_DEPLOYED',
-                                                  'parent': 'old', 'fingerprint': 'new'}))
+                                                  'parent': fingerprints[root], 'fingerprint': fingerprints[stage]}))
+    if unsafe == 'pin':
+        (stage/'prediction/release-pin.env').write_text('wrong pin')
     (root/'prediction/hs-recovery-startup.env').write_text(
         'PREDICTION_LIVE_ARM_ON_START='+('true' if unsafe == 'guard' else 'false')+'\nPREDICTION_AUTO_START_LOOP=false\n')
     if unsafe == 'source':
         (root/'source.py').write_text('unexpected source')
     snapshot, official_read, service = Mock(return_value={'stable': True}), Mock(), Mock(return_value='active')
     namespace.update(ROOT=root, STAGE=stage, snapshot=snapshot, official_clear=official_read, service=service)
-    verifier = Mock(return_value=('pin mismatch',) if unsafe == 'pin' else ())
-    monkeypatch.setattr(namespace['runpy'], 'run_path', lambda path: {'verify_release_manifest': verifier})
+    verifier = Mock(wraps=namespace['verify_release'])
+    namespace['verify_release'] = verifier
     monkeypatch.setattr(namespace['os'], 'getuid', lambda: 1000)
     monkeypatch.setattr(namespace['sys'], 'argv', ['installer'])
     if unsafe:

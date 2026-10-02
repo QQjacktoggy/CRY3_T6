@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Literal, Mapping
 
 import aiohttp
+from .http_bounds import JEV_BODY_BYTES, read_bounded_async
 
 from src.gridbot.prediction.c180_favorite import MODEL_ID, parse_original_jev_p_up
 
@@ -175,11 +176,12 @@ async def infer_original_jev_p_up(
                          "X-OpenRouter-Title": "cry3 C180 favorite hold live"},
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=remaining_ms / 1000),
+                auto_decompress=False,
             ) as response:
                 if response.status != 200:
                     return OriginalJEVResult("http_error", None, now_ms(),
                                              input_sha256, http_status=response.status)
-                body = await response.json()
+                body = json.loads(await read_bounded_async(response.content, response.headers, JEV_BODY_BYTES))
         completed = now_ms()
     except TimeoutError:
         return OriginalJEVResult("deadline_expired", None, now_ms(), input_sha256)

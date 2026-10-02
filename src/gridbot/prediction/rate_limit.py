@@ -8,9 +8,49 @@ process-wide gate while tests can inject a deterministic clock.
 from __future__ import annotations
 
 import time
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from threading import Lock
 from typing import Callable
+
+
+MAX_DEADLINE_MS = 2**63 - 1  # SQLite INTEGER; saturation remains fail-closed.
+DEFAULT_BACKOFF_MS = 60_000
+MAX_BLOCKING_WAIT_MS = 1_000
+
+
+def retry_after_deadline(value, now_ms, *, milliseconds=False):
+    """Never shorten a valid server ban; invalid hints get a safe fallback.
+
+    Huge bans defer requests immediately instead of sleeping a worker. Keep
+    their deadline durable, including across restart; do not cap a ban to a
+    shorter interval merely to make the client responsive.
+    """
+    fallback = min(MAX_DEADLINE_MS, now_ms + DEFAULT_BACKOFF_MS)
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    if len(text) > 128:
+        return MAX_DEADLINE_MS  # Unparseable oversized hints require fail-closed review.
+    try:
+        delay = Decimal(text)
+    except InvalidOperation:
+        if not milliseconds:
+            try:
+                date = parsedate_to_datetime(text)
+                if date.tzinfo is not None:
+                    return min(MAX_DEADLINE_MS, max(now_ms + 1000, int(date.timestamp() * 1000)))
+            except (ValueError, TypeError, OverflowError):
+                pass
+        return fallback
+    if not delay.is_finite() or delay < 0:
+        return fallback
+    multiplier = 1 if milliseconds else 1000
+    # Compare before multiplying/converting: Decimal exponents may be enormous.
+    if delay >= Decimal(MAX_DEADLINE_MS - now_ms) / multiplier:
+        return MAX_DEADLINE_MS
+    return min(MAX_DEADLINE_MS, now_ms + max(1000, int((delay * multiplier).to_integral_value(rounding=ROUND_CEILING))))
 
 
 @dataclass(frozen=True)
@@ -84,6 +124,8 @@ class PredictionRateLimiter:
         amount = max(1, int(weight))
         if amount > self.limit:
             raise ValueError("request weight exceeds global budget")
+        started = int(self.clock_ms())
+        waited = False
         while True:
             with self._lock:
                 now = int(self.clock_ms())
@@ -93,10 +135,14 @@ class PredictionRateLimiter:
                 if wait_until <= now:
                     self._used += amount
                     return True
-                if not block:
+                if not block or waited:
+                    return False
+                remaining_wait = MAX_BLOCKING_WAIT_MS - max(0, now - started)
+                if wait_until - now > remaining_wait or remaining_wait <= 0:
                     return False
                 delay = max(0.0, (wait_until - now) / 1000.0)
             self.sleep(delay)
+            waited = True
 
     def try_acquire(self, weight: int = 1, *, emergency: bool = False) -> bool:
         return self.acquire(weight, block=False, emergency=emergency)
@@ -125,8 +171,8 @@ class PredictionRateLimiter:
     def note_rate_limit(self, retry_after_ms: int | None = None, *, error: str | None = None) -> None:
         with self._lock:
             now = int(self.clock_ms())
-            delay = int(retry_after_ms) if retry_after_ms is not None else max(250, min(10_000, (self._backoff_until_ms - now) * 2 or 250))
-            self._backoff_until_ms = max(self._backoff_until_ms, now + max(0, delay))
+            deadline = retry_after_deadline(retry_after_ms, now, milliseconds=True)
+            self._backoff_until_ms = max(self._backoff_until_ms, deadline)
             self._last_error = error or "rate limited"
 
     def note_success(self) -> None:
@@ -189,6 +235,7 @@ class SharedRequestBudget:
     No keys, wallet identifiers, orders, or request bodies are stored here.
     """
     def __init__(self,path,*,clock_ms=None,limit=1200,reserve=300,management_reserve=200):
+        self._metadata_unavailable = False
         self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True)
         self.clock_ms=clock_ms or (lambda:int(time.time()*1000))
         self.limit=int(limit);self.reserve=int(reserve);self.management_reserve=int(management_reserve)
@@ -198,6 +245,8 @@ class SharedRequestBudget:
             c.execute('CREATE INDEX IF NOT EXISTS weight_events_time ON weight_events(at_ms)')
             c.execute('CREATE TABLE IF NOT EXISTS weight_meta(id INTEGER PRIMARY KEY CHECK(id=1),backoff_until_ms INTEGER NOT NULL,headers_json TEXT NOT NULL)')
             c.execute("INSERT OR IGNORE INTO weight_meta VALUES(1,0,'{}')")
+            # Old/corrupt non-integer deadlines cannot silently lift a ban.
+            c.execute("UPDATE weight_meta SET backoff_until_ms=? WHERE typeof(backoff_until_ms)!='integer' OR backoff_until_ms<0", (MAX_DEADLINE_MS,))
     @contextmanager
     def _connect(self):
         connection = sqlite3.connect(str(self.path),timeout=.5,isolation_level=None)
@@ -206,6 +255,8 @@ class SharedRequestBudget:
         finally:
             connection.close()
     def can_send_prepaid(self):
+        if self._metadata_unavailable:
+            return False
         try:
             with self._connect() as c:
                 backoff=c.execute('SELECT backoff_until_ms FROM weight_meta WHERE id=1').fetchone()[0]
@@ -213,6 +264,8 @@ class SharedRequestBudget:
         except sqlite3.Error:
             return False
     def acquire(self,weight=1,*,priority='normal',headroom=0):
+        if self._metadata_unavailable:
+            return False
         now=int(self.clock_ms());weight=max(1,int(weight));headroom=max(0,int(headroom))
         ceiling=self.limit if priority=='exit' else self.limit-(self.management_reserve if priority=='management' else self.reserve)
         try:
@@ -230,17 +283,17 @@ class SharedRequestBudget:
         now=int(self.clock_ms())
         allowed={str(k).lower():str(v) for k,v in (headers or {}).items()
                  if str(k).lower()=='retry-after' or str(k).lower().startswith(('x-mbx-used-weight','x-sapi-used-ip-weight','x-sapi-used-uid-weight'))}
-        delay=0
-        if int(status) in (418,429):
-            try:delay=max(1000,int(float(allowed.get('retry-after','60'))*1000))
-            except (ValueError,OverflowError):delay=60000
+        deadline = retry_after_deadline(allowed.get('retry-after'), now) if int(status) in (418,429) else 0
+        allowed = {key: value[:128] for key, value in allowed.items()}
         try:
             with self._connect() as c:
                 c.execute('UPDATE weight_meta SET backoff_until_ms=max(backoff_until_ms,?),headers_json=? WHERE id=1',
-                          (now+delay if delay else 0,json.dumps({'at_ms':now,'status':status,'headers':allowed})))
+                          (deadline,json.dumps({'at_ms':now,'status':status,'headers':allowed})))
         except sqlite3.Error:
-            pass  # Never mask a possibly executed POST with a metadata error.
+            self._metadata_unavailable = True  # Preserve POST outcome; deny subsequent requests.
     def health(self):
+        if self._metadata_unavailable:
+            return dict(limit=self.limit, remaining=0, error='shared_budget_unavailable')
         now=int(self.clock_ms())
         try:
             with self._connect() as c:

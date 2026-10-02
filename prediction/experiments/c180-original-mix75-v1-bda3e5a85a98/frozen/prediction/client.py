@@ -19,6 +19,7 @@ the indexed ``cancelInfoList[0].orderId`` keys are not rewritten to
 from __future__ import annotations
 
 import hashlib
+from .http_bounds import ERROR_BODY_BYTES, PREDICTION_BODY_BYTES, ResponseBodyError, read_bounded
 import os
 from .rate_limit import SharedRequestBudget, SharedBudgetDeferred, REQUEST_PRIORITY, REQUEST_PREPAID
 import hmac
@@ -66,6 +67,7 @@ class TransportResponse:
     status_code: int
     body: bytes | str | Mapping[str, Any] | Sequence[Any] | None = None
     headers: Mapping[str, str] | None = None
+    body_error: str | None = None
 
     def json(self) -> Any:
         if isinstance(self.body, (Mapping, list, tuple)):
@@ -94,71 +96,59 @@ class PredictionTransport(Protocol):
         ...
 
 
-class UrllibTransport:
-    """stdlib transport; no third-party HTTP package is required."""
+def _bounded_response(stream, status, headers):
+    # Retain status/headers even if a hostile error body exceeds its cap, so
+    # 418/429 cooldowns are still recorded before surfacing the body failure.
+    limit = PREDICTION_BODY_BYTES if 200 <= status < 300 else ERROR_BODY_BYTES
+    try:
+        body = read_bounded(stream, headers, limit)
+        return TransportResponse(status, body, headers)
+    except ResponseBodyError as exc:
+        return TransportResponse(status, None, headers, str(exc))
 
-    def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: Mapping[str, str],
-        body: bytes | None = None,
-        timeout: float = 10.0,
-    ) -> TransportResponse:
-        request = urllib.request.Request(url, data=body, headers=dict(headers), method=method.upper())
+
+class UrllibTransport:
+    """stdlib transport with bounded wire and decompressed response bodies."""
+    concurrent_reads = True
+
+    def request(self, method, url, *, headers, body=None, timeout=10.0):
+        headers = dict(headers)
+        headers["Accept-Encoding"] = "gzip, deflate"
+        request = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return TransportResponse(
-                    status_code=int(response.status),
-                    body=response.read(),
-                    headers=dict(response.headers.items()),
-                )
+                return _bounded_response(response, int(response.status), dict(response.headers.items()))
         except urllib.error.HTTPError as exc:
-            # Preserve the Binance JSON error envelope for useful diagnostics.
-            return TransportResponse(
-                status_code=int(exc.code),
-                body=exc.read(),
-                headers=dict(exc.headers.items()) if exc.headers else {},
-            )
+            with exc:
+                return _bounded_response(exc, int(exc.code), dict(exc.headers.items()) if exc.headers else {})
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise PredictionTransportError(f"Prediction HTTP request failed: {exc}") from exc
 
 
 class RequestsTransport:
-    """Optional requests-backed transport.
-
-    Importing ``requests`` is delayed until construction so importing this
-    client never adds a hard dependency to the project.
-    """
-
-    def __init__(self, session: Any = None) -> None:
+    """Optional requests transport; decompression is bounded explicitly."""
+    def __init__(self, session=None):
         if session is None:
             try:
                 import requests
-            except ImportError as exc:  # pragma: no cover - environment-specific
+            except ImportError as exc:
                 raise PredictionTransportError("requests is not installed") from exc
             session = requests.Session()
         self.session = session
 
-    def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: Mapping[str, str],
-        body: bytes | None = None,
-        timeout: float = 10.0,
-    ) -> TransportResponse:
+    def request(self, method, url, *, headers, body=None, timeout=10.0):
+        headers = dict(headers)
+        headers["Accept-Encoding"] = "gzip, deflate"
         try:
-            response = self.session.request(method.upper(), url, headers=dict(headers), data=body, timeout=timeout)
-        except Exception as exc:  # requests exposes several transport exception classes
+            response = self.session.request(method.upper(), url, headers=headers, data=body,
+                                            timeout=timeout, stream=True)
+            try:
+                response.raw.decode_content = False
+                return _bounded_response(response.raw, int(response.status_code), dict(response.headers))
+            finally:
+                response.close()
+        except Exception as exc:
             raise PredictionTransportError(f"Prediction HTTP request failed: {exc}") from exc
-        return TransportResponse(
-            status_code=int(response.status_code),
-            body=response.content,
-            headers=dict(response.headers),
-        )
 
 
 def _stringify(value: Any) -> str:
@@ -469,6 +459,8 @@ class BinancePredictionClient:
         }
         if self.request_budget:
             self.request_budget.note_response(response.status_code, response.headers)
+        if response.body_error:
+            raise PredictionTransportError(response.body_error)
 
     @staticmethod
     def _error_message(payload: Any, status_code: int | None) -> str:

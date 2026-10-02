@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .c180_evidence_collector import C180EvidenceCollector
+from .evidence_retention import EvidenceBudget, bounded_payload, require_free_space
 from .c180_favorite import (
     C180EntryDecision, C180ExecutionInput, PriceLevel, recheck_c180_execution,
 )
@@ -80,9 +81,12 @@ class C180SignalStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        require_free_space(self.path)
         self.db = sqlite3.connect(self.path, timeout=10)
+        self.budget = EvidenceBudget(self.db, self.path)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
+        self.budget.prepare()
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS c180_signals ("
             "market_start_ms INTEGER PRIMARY KEY, market_topic TEXT, market_id TEXT, "
@@ -106,12 +110,15 @@ class C180SignalStore:
             "market_start_ms INTEGER PRIMARY KEY, status TEXT NOT NULL, "
             "detail_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)"
         )
+        self.db.execute("CREATE INDEX IF NOT EXISTS c180_events_retention "
+                        "ON c180_book_events(captured_at_ms)")
         self.db.commit()
 
     async def persist(self, value: C180Signal) -> None:
         """Commit before exposing a signal; conflicting rewrites fail closed."""
 
-        raw = _signal_json(value)
+        raw = bounded_payload(_signal_json(value))
+        self.budget.prepare()
         with self.db:
             self.db.execute(
                 "INSERT INTO c180_signals VALUES(?,?,?,?,?,?,?) "
@@ -134,7 +141,7 @@ class C180SignalStore:
         return _from_signal_json(row[0]) if row else None
 
     def persist_book(self, snapshot: Mapping[str, Any]) -> None:
-        """Keep the latest book and an append-only execution-window trail."""
+        """Expire quotes at 24h or row cap; preserve immutable signal/outcome audit."""
 
         start = int(snapshot["market_start_ms"])
         topic = str(snapshot["market_topic"])
@@ -142,6 +149,8 @@ class C180SignalStore:
         book_at = int(snapshot["book_at_ms"])
         raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":"),
                          ensure_ascii=False, allow_nan=False)
+        bounded_payload(raw)
+        self.budget.prepare()
         with self.db:
             prior = self.db.execute(
                 "SELECT market_topic,market_id,book_at_ms FROM c180_books "
@@ -161,6 +170,15 @@ class C180SignalStore:
                 "INSERT OR IGNORE INTO c180_book_events VALUES(?,?,?,?)",
                 (start, book_at, int(snapshot["captured_at_ms"]), raw),
             )
+            # Recovery examines at most 20 five-minute markets. Keep 24h of
+            # raw books, independently of the durable signals and outcomes.
+            # Runtime captures at most 121 quotes in each 12-second entry
+            # window per five-minute market: 40k rows exceeds 24h of traffic.
+            at = int(snapshot["captured_at_ms"])
+            self.budget.prune('c180_book_events', 'captured_at_ms', at,
+                              age_ms=86400000, rows=40000)
+            self.budget.prune('c180_books', 'market_start_ms', at,
+                              age_ms=86400000, rows=300)
 
     def book_events(self, start: int) -> list[dict[str, Any]]:
         rows = self.db.execute(
@@ -176,7 +194,8 @@ class C180SignalStore:
         return json.loads(row[0]) if row else None
 
     def persist_recovery_outcome(self, value: Mapping[str, Any]) -> None:
-        raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        raw = bounded_payload(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False))
+        self.budget.prepare()
         with self.db:
             self.db.execute(
                 "INSERT INTO c180_recovery_outcomes VALUES(?,?,?,?) "

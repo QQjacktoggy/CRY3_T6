@@ -10,6 +10,7 @@ import urllib.request
 from pathlib import Path
 
 from .regime_lane import SLOT_MS, freeze_features
+from .http_bounds import KLINES_BODY_BYTES, read_bounded
 
 DEFAULT_DB = "prediction/data/regime-target6/features.sqlite3"
 
@@ -43,7 +44,7 @@ def collect_once(db, start, *, clock=lambda: time.time_ns()//1000000, fetch=None
     if fetch is None:
         def fetch():
             with urllib.request.urlopen("https://api.binance.com/api/v3/klines?"+params, timeout=1.5) as response:
-                return json.load(response)
+                return json.loads(read_bounded(response, response.headers, KLINES_BODY_BYTES))
     try:
         payload = freeze_features(start, fetch(), clock())
         with db:

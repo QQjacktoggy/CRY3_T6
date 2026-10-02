@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Iterable, Mapping
 
 
@@ -26,6 +26,7 @@ _REQUIRED_FIXED_RELEASE_PATHS = (
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/frozen/jev/market.py',
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/frozen/jev/models.py',
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/frozen/prediction/client.py',
+    'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/frozen/prediction/http_bounds.py',
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/frozen/prediction/loss_cooldown_guard.py',
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/frozen/prediction/models.py',
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/frozen/prediction/official_resolution.py',
@@ -63,7 +64,9 @@ _REQUIRED_FIXED_RELEASE_PATHS = (
     'src/gridbot/prediction/c180_worker_bridge.py',
     'src/gridbot/prediction/client.py',
     'src/gridbot/prediction/controller.py',
+    'src/gridbot/prediction/evidence_retention.py',
     'src/gridbot/prediction/jev_gate.py',
+    'src/gridbot/prediction/http_bounds.py',
     'src/gridbot/prediction/live_report.py',
     'src/gridbot/prediction/loss_cooldown_guard.py',
     'src/gridbot/prediction/migrations/001_initial.sql',
@@ -272,11 +275,16 @@ def verify_release_manifest(
         if not relative or not expected:
             reasons.append("release manifest file identity is incomplete")
             continue
-        normalized_relative = relative.replace("\\", "/")
-        if normalized_relative.startswith("/") or Path(normalized_relative).drive:
-            reasons.append(f"release file path is not relative: {relative}")
+        normalized_relative = relative
+        if ("\\" in relative or relative.startswith("/") or PureWindowsPath(relative).drive
+                or any(part in ("", ".", "..") for part in relative.split("/"))):
+            reasons.append(f"release file path is not canonical relative: {relative}")
             continue
-        path = (base / normalized_relative).resolve()
+        unresolved = base / relative
+        if any(path.is_symlink() for path in (unresolved, *unresolved.parents) if path != base):
+            reasons.append(f"release file path contains symlink: {relative}")
+            continue
+        path = unresolved.resolve()
         try:
             path.relative_to(base)
         except ValueError:

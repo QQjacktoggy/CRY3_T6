@@ -21,10 +21,12 @@ def main():
     baseline = json.loads((root/'docs/vm-source-baseline.json').read_text())
     old_release = Path(args.vm_release).read_bytes()
     release_path = 'src/gridbot/prediction/release.py'
-    assert hashlib.sha256(old_release).hexdigest() == baseline['vm_source_hashes'][release_path]
+    if not (hashlib.sha256(old_release).hexdigest() == baseline['vm_source_hashes'][release_path]):
+        raise RuntimeError('VM release hash differs from reviewed baseline')
     text = old_release.decode()
     marker = '    "src/gridbot/prediction/regime_t63b_risk.py",'
-    assert text.count(marker) == 1
+    if not (text.count(marker) == 1):
+        raise RuntimeError('VM release inventory marker must occur exactly once')
     newline = '\r\n' if '\r\n' in text else '\n'
     text = text.replace(marker, marker + newline + newline.join(
         f'    "src/gridbot/prediction/{file}",' for file in CHANGED if file.startswith('regime_t65')))
