@@ -21,6 +21,7 @@ def main_database(root):
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     db.executescript(SCHEMA)
+    db.execute('CREATE TABLE prediction_orders(order_id TEXT,campaign_id TEXT,status TEXT)')
     for table, column, kind in (
         ('prediction_campaigns', 'market_topic_id', 'TEXT'),
         ('prediction_campaigns', 'market_id', 'TEXT'),
