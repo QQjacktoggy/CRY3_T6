@@ -6,6 +6,10 @@ T6.7 候選新增外部先行、reference 校正價格、淺回撤與 C-UP 鏡�
 
 T6.7a 以舊 T6／C 為基底：五條舊核心與 C-UP／淺回撤共七組 Live，外部先行與參考價模型兩組 Shadow。核心先凍結、空缺才新增；TG 逐子策略列 WR／PnL。規則與驗證見 [T6.7a](docs/T6_7A.md)。
 
+T6.7c 承接 PR11／PR12 的恢復與報表修正，保留七條 Live、兩條 Shadow，
+新增獨立版本與固定每 20 run 摘要；TG lane 選單只提供 T6 系列。
+部署與啟動見 [T6.7c](docs/T6_7C.md)。
+
 ## 收錄範圍
 
 - `src/gridbot/prediction/regime_*`：T6 策略、特徵、執行與風控。

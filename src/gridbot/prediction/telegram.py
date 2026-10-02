@@ -45,13 +45,14 @@ REGIME_T65_PROFILE = "regime_target6_5_v1"
 REGIME_T67_PROFILE = "regime_target6_7_v1"
 REGIME_T67A_PROFILE = "regime_target6_7a_v1"
 REGIME_T67B_PROFILE = "regime_target6_7b_v1"
+REGIME_T67C_PROFILE = "regime_target6_7c_v1"
 REGIME_PROFILES = frozenset((REGIME_PROFILE, REGIME_T61_PROFILE, REGIME_T62_PROFILE,
-                             REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE))
+                             REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE))
 REGIME_RISK_TEXT = "固定1 USDT｜累計PnL ≤ -6 或固定20場MDD ≥ 3.5停單｜跨Loop保存、不自動解鎖"
 
 
 def _regime_risk_text(profile: str, unit: Any) -> str:
-    if profile not in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE):
+    if profile not in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE):
         return REGIME_RISK_TEXT
     try:
         stake = Decimal(str(unit))
@@ -62,8 +63,8 @@ def _regime_risk_text(profile: str, unit: Any) -> str:
     amount = int(stake)
     loop_note = (f"本輪MDD≥{Decimal('3.5') * stake} USDT（1U等值3.5）停新進場｜"
                  "跨Loop停單不自動解鎖；整輪回撤鎖僅限該輪"
-                 if profile in (REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE) else "停單跨Loop保存、不自動解鎖")
-    return (f"T6.2／T6.3／T6.3a／T6.3b／T6.5／T6.7／T6.7a／T6.7b 每筆{amount} USDT｜純{amount}U成交時：固定20場MDD≥{Decimal('3.5') * stake} USDT、"
+                 if profile in (REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE) else "停單跨Loop保存、不自動解鎖")
+    return (f"T6.2／T6.3／T6.3a／T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c 每筆{amount} USDT｜純{amount}U成交時：固定20場MDD≥{Decimal('3.5') * stake} USDT、"
             f"跨Loop累計PnL≤-{6 * amount} USDT 停新進場｜"
             "混合1/2/3U成交時按每筆實際投入折算1U等值（20場MDD≥3.5、累計PnL≤-6）；"
             + loop_note)
@@ -94,32 +95,26 @@ HARD_STOP_CALLBACK_PREFIX = "predict_hard_stop:"
 CANCEL_LOOP_CALLBACK_PREFIX = "predict_cancel:"
 MONITOR_CALLBACK_PREFIX = "predict_monitor:"
 SELECTABLE_LANES = (
-    ("regime_target6_7b_v1", "T6.7b 核心＋增量 Live（送單優化；1/2/3U）"),
-    ("regime_target6_7a_v1", "T6.7a 舊核心＋C-UP／淺回撤 Live（1/2/3U）"),
-    ("regime_target6_5_v1", "Regime T6.5 A／flat／M4／M6 Shadow（1/2/3U）"),
-    ("regime_target6_7_v1", "Regime T6.7 四策略 Live 驗證（1/2/3U）"),
-    ("regime_target6_3b_v1", "Regime T6.3b B／補位Shadow＋整輪回撤（1/2/3U）"),
-    ("regime_target6_3a_v1", "Regime T6.3a 補位Shadow（1/2/3U）"),
-    ("regime_target6_3_v1", "Regime T6.3 分歧／順勢／淨跌（1/2/3U）"),
-    ("s3s5_pair_v1", "R3＋FAV（目前組合）"),
-    ("fav_only_v1", "FAV（獨立）"),
-    ("fav_only_v2", "FAV only V2"),
-    ("fav_only_v3", "FAV V3（實驗版）"),
-    ("fav_only_v4", "FAV V4（ETH 專屬）"),
-    ("fav_p3", "P3（FAV＋閘｜無R3）"),
-    ("regime_target6_v1", "Regime T6 市況分流（固定1U）"),
-    ("regime_target6_1_v1", "Regime T6.1 補位（固定1U／研究版）"),
-    ("regime_target6_2_v1", "Regime T6.2 價格護欄（1/2/3U／研究版）"),
-    ("c180_favorite_hold_v1", "C180 Favorite Hold（20-run MDD）"),
+    ('regime_target6_7c_v1', 'T6.7c 核心＋增量 Live（每20 run報表；1/2/3U）'),
+    ('regime_target6_7b_v1', 'T6.7b 核心＋增量 Live（送單優化；1/2/3U）'),
+    ('regime_target6_7a_v1', 'T6.7a 舊核心＋C-UP／淺回撤 Live（1/2/3U）'),
+    ('regime_target6_5_v1', 'Regime T6.5 A／flat／M4／M6 Shadow（1/2/3U）'),
+    ('regime_target6_7_v1', 'Regime T6.7 四策略 Live 驗證（1/2/3U）'),
+    ('regime_target6_3b_v1', 'Regime T6.3b B／補位Shadow＋整輪回撤（1/2/3U）'),
+    ('regime_target6_3a_v1', 'Regime T6.3a 補位Shadow（1/2/3U）'),
+    ('regime_target6_3_v1', 'Regime T6.3 分歧／順勢／淨跌（1/2/3U）'),
+    ('regime_target6_v1', 'Regime T6 市況分流（固定1U）'),
+    ('regime_target6_1_v1', 'Regime T6.1 補位（固定1U／研究版）'),
+    ('regime_target6_2_v1', 'Regime T6.2 價格護欄（1/2/3U／研究版）'),
 )
 
 ETH_ONLY_LANE_PROFILES = frozenset({"fav_only_v4"})
 BTC_ONLY_LANE_PROFILES = frozenset({REGIME_T61_PROFILE, REGIME_T62_PROFILE,
-                                    REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE})
+                                    REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE})
 
 
 def selectable_lanes_for_market(market_symbol: str | None) -> tuple[tuple[str, str], ...]:
-    """FAV V4 is ETH-Telegram-only; hide from BTC menus."""
+    """Expose only T6 family lanes; reject retired callback selections too."""
     sym = str(market_symbol or "").strip().upper()
     is_eth = sym.startswith("ETH")
     lanes: list[tuple[str, str]] = []
@@ -133,6 +128,7 @@ def selectable_lanes_for_market(market_symbol: str | None) -> tuple[tuple[str, s
 
 
 WR_MONITOR_LANE_LABELS = {
+    "regime_target6_7c_v1": "T6.7c 核心＋增量 Live／每20 run總結",
     "regime_target6_7b_v1": "T6.7b 核心＋增量 Live／兩策略 Shadow",
     "regime_target6_7a_v1": "T6.7a 核心＋增量 Live／兩策略 Shadow",
     "regime_target6_5_v1": "Regime T6.5 篩選＋M4／M6 Shadow",
@@ -1444,19 +1440,15 @@ class PredictionTelegramService:
             (label for profile, label in lanes if profile == str(next_profile).lower()),
             str(next_profile or current_profile or "未設定"),
         )
-        p3_arm = str(current.get("fav_p3_arm") or "off").lower() if isinstance(current, Mapping) else "off"
-        p3_label = "ON（Live 1U）" if p3_arm == "live" else ("SHADOW" if p3_arm == "shadow" else "OFF")
         await self._reply(
             update,
             "【選擇策略】\n\n"
             f"目前 Loop：{current_label}\n"
             f"下一個 Loop：{next_label}\n"
-            f"P3 lane：{p3_label}\n"
-            "點「P3」：切到 fav_p3（只 FAV＋P3 閘，無 R3）並 arm=live。\n"
-            "點其他策略：離開 P3（arm=off），再切該策略。\n"
+            "目前提供 T6 系列策略；選定後依原流程確認 Live 與金額。\n"
             "執行中點選會排到下一個 Loop；先停止 Loop 再點選，會在安全同步後結束舊 Loop 並立即套用。\n" +
-            ("T6.2／T6.3／T6.3a／T6.3b／T6.5／T6.7／T6.7a／T6.7b 每筆可選 1／2／3 USDT，不加倉；切換策略不會自動啟動 Loop。"
-             if str(next_profile or current_profile).lower() in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE) else
+            ("T6.2／T6.3／T6.3a／T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c 每筆可選 1／2／3 USDT，不加倉；切換策略不會自動啟動 Loop。"
+             if str(next_profile or current_profile).lower() in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE) else
              "金額固定每筆 1 USDT，不加倉；切換策略不會自動啟動 Loop。"),
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -1474,7 +1466,7 @@ class PredictionTelegramService:
         next_amount = str(current.get("next_order_unit_usdt") or current_amount) if isinstance(current, Mapping) else current_amount
         profile = str(current.get("next_strategy_profile") or current.get("strategy_profile") or "").lower() if isinstance(current, Mapping) else ""
         c180 = profile == C180_PROFILE
-        t62 = profile in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE)
+        t62 = profile in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE)
         def displayed_mdd(amount):
             if c180:
                 return -(Decimal("4.49") * Decimal(str(amount)))
@@ -1494,7 +1486,7 @@ class PredictionTelegramService:
             f"下一個 Loop：{_human_scalar(next_amount)} USDT｜{mdd_label} {displayed_mdd(next_amount)}\n"
             + ("C180 每 20-run 區段超過 MDD 門檻後停新進場，下一段重設。\n" if c180 else
                "T6.2／T6.3／T6.3a／T6.3b 純1/2/3U成交：固定20場MDD≥3.5/7/10.5U，跨Loop累計PnL≤-6/-12/-18U 停新進場。混合金額按每筆實際投入折算1U等值；停單跨Loop保留。\n"
-               + ("T6.3b／T6.5／T6.7／T6.7a／T6.7b 額外整輪高點回撤：1U等值達3.5停新進場；純1/2/3U約為3.5/7/10.5U，僅鎖該輪。\n" if profile in (REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE) else "") if t62 else
+               + ("T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c 額外整輪高點回撤：1U等值達3.5停新進場；純1/2/3U約為3.5/7/10.5U，僅鎖該輪。\n" if profile in (REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE) else "") if t62 else
                "1/2/3 USDT 對應 Loop MDD -2.5/-5.0/-7.5。\n")
             + 
             "同市場最多一筆。進行中點選會排到下一個 Loop；金額變更後需重新確認 Live。",
@@ -2244,7 +2236,7 @@ class PredictionTelegramService:
                     _c180_risk_text(result.get("next_order_unit_usdt"))
                     if c180 else
                     _regime_risk_text(profile, result.get("next_order_unit_usdt"))
-                    if profile in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE) else
+                    if profile in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE) else
                     f"下一個 Loop 虧損上限：{_human_scalar(result.get('next_loop_loss_limit'))} USDT"
                 )
                 await self._reply(
@@ -2263,7 +2255,7 @@ class PredictionTelegramService:
                     _c180_risk_text(result.get("order_unit_usdt"))
                     if c180 else
                     _regime_risk_text(profile, result.get("order_unit_usdt"))
-                    if profile in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE) else
+                    if profile in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE) else
                     f"Loop 虧損上限：{_human_scalar(result.get('loop_loss_limit'))} USDT｜"
                     f"每日虧損上限：{_human_scalar(result.get('daily_loss_limit'))} USDT"
                 )
@@ -2322,8 +2314,8 @@ class PredictionTelegramService:
             import sys
             import pathlib
             root = str(pathlib.Path(__file__).resolve().parent.parent.parent.parent)
-            from .live_report import T67A_PROFILE, T67B_PROFILE, t67_family_report_profile
-            if await asyncio.to_thread(t67_family_report_profile, root) in (T67A_PROFILE, T67B_PROFILE):
+            from .live_report import T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, t67_family_report_profile
+            if await asyncio.to_thread(t67_family_report_profile, root) in (T67A_PROFILE, T67B_PROFILE, T67C_PROFILE):
                 await self.cmd_predict_report(update, context)
                 return
             if root not in sys.path:
