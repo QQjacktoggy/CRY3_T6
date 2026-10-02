@@ -226,18 +226,25 @@ def empty_report(now):
 
 def _shared_block_events(root, *, start, end, now):
     """Read fee-net Live observations across the existing shared risk lane."""
-    from .live_report import RISK_PROFILES, SLOT, _decimal
+    from .live_report import RISK_PROFILES, SLOT, TERMINAL, _decimal
     from collections import defaultdict
     path = root/'prediction/data/prediction.sqlite3'
     with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA query_only=ON')
         db.execute('BEGIN')
+        terminal = ','.join("'"+s+"'" for s in sorted(TERMINAL))
+        intent_exposure = ("EXISTS(SELECT 1 FROM prediction_order_intents i WHERE i.campaign_id=c.campaign_id "
+                           "AND (i.unknown=1 OR COALESCE(i.status,'') NOT IN ("+terminal+")))")
+        order_exposure = ("EXISTS(SELECT 1 FROM prediction_orders o WHERE o.campaign_id=c.campaign_id "
+                          "AND COALESCE(o.status,'') NOT IN ("+terminal+"))")
+        buy_fill = "EXISTS(SELECT 1 FROM prediction_fills f WHERE f.campaign_id=c.campaign_id AND f.order_side='BUY')"
         campaigns = [dict(r) for r in db.execute(
-            "SELECT c.* FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id "
+            "SELECT c.*,"+buy_fill+" AS has_buy_fill,"+intent_exposure+" AS unresolved_intent,"+
+            order_exposure+" AS unresolved_order FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id "
             "WHERE l.mode='LIVE' AND l.strategy_profile IN ("+','.join('?' for _ in RISK_PROFILES)+") "
-            "AND c.start_time_ms>=? AND c.start_time_ms<? AND EXISTS "
-            "(SELECT 1 FROM prediction_fills f WHERE f.campaign_id=c.campaign_id AND f.order_side='BUY')",
+            "AND c.start_time_ms>=? AND c.start_time_ms<? AND ("+buy_fill+" OR c.pending_unknown=1 OR "+
+            intent_exposure+" OR "+order_exposure+")",
             (*RISK_PROFILES, start, end))]
         claims, settlements = defaultdict(list), defaultdict(list)
         for c in campaigns:
@@ -253,6 +260,8 @@ def _shared_block_events(root, *, start, end, now):
         cid = c['campaign_id']
         q, s = claims[cid], settlements[cid]
         try:
+            if (c['pending_unknown'] or c['unresolved_intent'] or c['unresolved_order'] or not c['has_buy_fill']):
+                raise ValueError('unresolved shared order exposure')
             if (len(q) != 1 or q[0]['loop_id'] != c['loop_id']
                     or q[0]['market_start_ms'] != c['start_time_ms'] or not q[0]['intent_id']
                     or (c['start_time_ms']-start) % SLOT or len(s) > 1):
@@ -272,21 +281,47 @@ def _shared_block_events(root, *, start, end, now):
     return events, pending, unverified
 
 
+def _current_report_scope(*, now, slots, campaigns, current_ids, fill_ids, events):
+    """Unverified registrations and impossible settlement times are not results."""
+    from .live_report import SLOT
+    verified = {int(s['market_start_ms']): s for s in slots
+                if s['verified_at_ms'] is not None and int(s['verified_at_ms']) <= now
+                and int(s['market_start_ms']) <= now}
+    actual = fill_ids & current_ids
+    matched = set()
+    for cid in actual:
+        c = campaigns[cid]
+        s = verified.get(int(c['start_time_ms']))
+        if (s is not None and s['loop_id'] == c['loop_id']
+                and s.get('market_topic_id') == c.get('market_topic_id')
+                and s.get('market_id') and str(s['market_id']) == _campaign_up_id(c)
+                and int(c['end_time_ms']) == int(c['start_time_ms'])+SLOT):
+            matched.add(cid)
+    valid = [e for e in events if e['cid'] in matched
+             and e['start'] == int(campaigns[e['cid']]['start_time_ms'])
+             and e['start']+SLOT <= e['known'] <= now]
+    return valid, matched, actual-matched, {e['cid'] for e in events}-{e['cid'] for e in valid}
+
+
 def scheduled_run_summary(root, *, now, slots, campaigns, current_ids, fill_ids, events, gate):
     """Keep fixed risk boundaries while showing only this loop's performance."""
     from .live_report import SLOT, TZ, _metrics, _value
     from .regime_lane import FINGERPRINT as RISK_FP
     lines = ['', '固定每20 run總結（含跳過場；跨loop沿用風控起點）：']
     try:
+        events, filled, unmatched, _ = _current_report_scope(
+            now=now, slots=slots, campaigns=campaigns, current_ids=current_ids,
+            fill_ids=fill_ids, events=events)
         if not isinstance(gate, dict) or gate.get('fingerprint') != RISK_FP:
             raise ValueError('risk epoch unavailable')
         anchor = int(gate['first_market_start_ms'])
         if anchor <= 0 or anchor % SLOT:
             raise ValueError('invalid risk epoch')
         registered = {int(s['market_start_ms']) for s in slots
-                      if s['verified_at_ms'] is not None and int(s['market_start_ms']) <= now}
+                      if s['verified_at_ms'] is not None and int(s['verified_at_ms']) <= now
+                      and int(s['market_start_ms']) <= now}
         if not registered:
-            return lines+['尚無已登錄市場。']
+            return lines+[f'尚無已驗證登錄市場｜未驗證成交待核對{len(unmatched)}；不隱藏實際成交。']
         if any(s < anchor or (s-anchor) % SLOT for s in registered):
             raise ValueError('market off risk grid')
         first, last = min(registered), max(registered)
@@ -297,7 +332,6 @@ def scheduled_run_summary(root, *, now, slots, campaigns, current_ids, fill_ids,
         start, end = anchor+begin*20*SLOT, anchor+(last_block+1)*20*SLOT
         shared, shared_pending, unverified = _shared_block_events(root, start=start, end=end, now=now)
         known = {e['cid'] for e in events}
-        filled = fill_ids & current_ids
         def in_block(cid, a, b):
             return a <= int(campaigns[cid]['start_time_ms']) < b
         for block in range(begin, last_block+1):
@@ -308,6 +342,7 @@ def scheduled_run_summary(root, *, now, slots, campaigns, current_ids, fill_ids,
             lines.append(f'第{block*20+1}–{(block+1)*20} run｜{clock}｜{phase} {elapsed}/20')
             ended = {s for s in registered if a <= s < b and s+SLOT <= now}
             batch_fills = {cid for cid in filled if in_block(cid, a, b)}
+            batch_unmatched = sum(in_block(cid, a, b) for cid in unmatched)
             closed_fills = sum(int(campaigns[cid]['start_time_ms']) in ended for cid in batch_fills)
             fill_text = f'{closed_fills/len(ended):.1%}（{closed_fills}/{len(ended)}）' if ended else '—'
             batch = [e for e in events if a <= e['start'] < b]
@@ -316,6 +351,8 @@ def scheduled_run_summary(root, *, now, slots, campaigns, current_ids, fill_ids,
             pnl_text = _value(metric,batch,pending) if ended or batch_fills else '—（無本輪登錄）'
             mdd_text = _value(metric,batch,pending,'mdd') if ended or batch_fills else '—'
             lines.append(f'  本輪登錄已結{len(ended)}場｜成交{len(batch_fills)}｜Fill {fill_text}｜待結算/核對{pending}')
+            if batch_unmatched:
+                lines.append(f'  未驗證成交待核對{batch_unmatched}；不計入區段績效或成交率')
             lines.append(f'  WR {metric["wr"]}（{metric["wins"]}勝/{metric["losses"]}負）｜'
                          f'已知PnL {pnl_text} USDT｜MDD {mdd_text} USDT')
             risk_batch = [e for e in shared if a <= e['start'] < b]
@@ -340,6 +377,14 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
     from .live_report import SLOT, TZ, _metrics, _value
     from .regime_lane import FINGERPRINT as RISK_FP
     from .regime_t67b_policy import FINGERPRINT
+    events, verified_fills, unmatched, rejected_events = _current_report_scope(
+        now=now, slots=slots, campaigns=campaigns, current_ids=current_ids,
+        fill_ids=fill_ids, events=events)
+    if unmatched:
+        issues.add(f'成交市場登錄待核對{len(unmatched)}')
+    if rejected_events-unmatched:
+        issues.add(f'結算觀測時間待核對{len(rejected_events-unmatched)}')
+    pending = len((fill_ids & current_ids)-{e['cid'] for e in events})
     metric = _metrics(events)
     clock = datetime.fromtimestamp(now/1000, TZ).strftime('%m/%d %H:%M:%S')
     units = '/'.join(sorted({str(q['unit_usdt']) for q in claims})) or '待成交確認'
@@ -363,7 +408,7 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
              f'待結算/核對 {pending}｜未終結intent {inflight}｜UNKNOWN市場 {unknown}',
              '', 'Live 子策略（本輪）：']
     try:
-        branches = branch_metrics(root, campaigns, current_ids, fill_ids, events,
+        branches = branch_metrics(root, campaigns, current_ids, verified_fills, events,
                                   fingerprint=FINGERPRINT, slots=slots, loop_id=loop['loop_id'])
         for branch, title in LIVE_LABELS.items():
             m = branches[branch]

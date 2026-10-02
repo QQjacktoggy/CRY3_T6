@@ -16,15 +16,17 @@
 Shadow 不納入任何 Live／風控金額。
 
 待結算不補零；沒有本輪登錄的空檔顯示「—」。錯誤起點、重複結算、
-官方／觀測金額不一致、無效 claim、未來觀測或非有限數值會顯示待核對，
-不宣稱風控通過。最多顯示最近五段，若有截短則明示總段數。
+官方／觀測金額不一致、無效 claim、收盤前／未來觀測或非有限數值會顯示待核對，
+不宣稱風控通過。未經驗證登錄的成交保留待核對提示，不納入本輪或區段績效。
+其他 T6 尚未有成交紀錄的 UNKNOWN／未終結意圖與訂單，也會阻止區段呈現已驗證風控。
+最多顯示最近五段，若有截短則明示總段數。
 Telegram 原有分頁按 UTF-16 長度限制保留。
 
 ## 驗證
 
-14 項新測試覆蓋固定第 20/21 run 邊界、未成交市場與待結算、跨 loop／
+23 項新測試覆蓋固定第 20/21 run 邊界、未成交市場與待結算、跨 loop／
 跨 T6 共享風控但隔離本輪 PnL、3U 折算、觀測缺損及只讀／分頁。
-本地相關報表測試 57 passed；VM 隔離完整 inventory 測試 589 passed、
+本地相關報表測試 66 passed；VM 隔離完整 inventory 測試 598 passed、
 1 skipped、6 subtests passed。VM 正式資料另以獨立候選程序預覽新報表，
 不把正式程序 import cache 當成熱載入。
 
@@ -33,11 +35,11 @@ Telegram 原有分頁按 UTF-16 長度限制保留。
 目前 loop `loop:1790868923273` 尚為 RUNNING。依既有「本輪結束後再改報表」
 要求，候選暫存於 VM，不改正式報表來源、不停入場、不重啟正式程序。
 
-候選：`/home/jack_shih/cry3/prediction/t67b-20run-report-staged-v2-20261002/`。
+候選：`/home/jack_shih/cry3/prediction/t67b-20run-report-staged-v3-20261002/`。
 其中保存 `candidate.json`、`validation.json`、`tests.log`、`report-preview.txt`、
 `auto-install.py` 與 `installation-status.json`。
 
-短期、一次性延後部署工作：`cry3-t67b-report-20run-update-v2.service`。
+短期、一次性延後部署工作：`cry3-t67b-report-20run-update-v3.service`。
 只讀輪次狀態等待原 loop DONE 且 completed=target=100。必須沒有其他
 RUNNING loop、HS、UNKNOWN、未終結訂單、未結持倉，並由官方 API 再次證明
 零持倉及零掛單，才可部署。下一輪若先開始則繼續等待，不中斷。
@@ -53,7 +55,7 @@ RUNNING loop、HS、UNKNOWN、未終結訂單、未結持倉，並由官方 API 
 父 fingerprint（已含 REJECTED 結算修正）：
 `4c8f0158d7b5064f68f575e47e7d28fb0491067a77db25de1c059cdf53d143ca`。
 候選 fingerprint 以 `validation.json` 為準。
-本 PR 建立在 REJECTED 修正分支之上，需先保留該修正再合併報表變更。
+REJECTED 結算修正已經由 PR11 合併 main；本次報表變更保留該修正。
 
 以上是部署安排，不表示 TG 正式程序已載入新格式。即時生效狀態請查
 `installation-status.json`；只有 `DEPLOYED_VERIFIED` 才代表正式報表已驗證。

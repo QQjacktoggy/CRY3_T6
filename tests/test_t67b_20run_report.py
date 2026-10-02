@@ -130,3 +130,56 @@ def test_render_is_read_only_and_repeatable(tmp_path):
     before=main.read_bytes()
     assert render(tmp_path)==render(tmp_path)
     assert main.read_bytes()==before
+
+
+def test_preclose_observation_is_excluded_from_loop_and_block_results(tmp_path):
+    with main_database(tmp_path) as db, feature_database(tmp_path) as f:
+        gate(db)
+        live_fill(db, f, pnl='9')
+        db.execute('UPDATE prediction_regime_settlement_observations SET known_at_ms=?', (START+SLOT-1,))
+    text=render(tmp_path)
+    assert '本輪已知淨 PnL —（待核對／結算）' in text and '本輪 WR —' in text
+    assert '+9.0000' not in text and '結算觀測時間待核對1' in text
+    assert '共用風控MDD 待核對' in section(text)
+
+
+@pytest.mark.parametrize('valid_other_slot', [False, True])
+def test_unverified_fill_is_visible_for_reconciliation_not_performance(tmp_path, valid_other_slot):
+    with main_database(tmp_path) as db, feature_database(tmp_path) as f:
+        gate(db)
+        live_fill(db, f, pnl='9')
+        db.execute('UPDATE prediction_regime_slots SET verified_at_ms=NULL')
+        if valid_other_slot:admission(db, START+SLOT)
+    text=render(tmp_path, now=START+2*SLOT)
+    batch=section(text)
+    assert '+9.0000' not in text and '成交市場登錄待核對1' in text
+    assert '未驗證成交待核對1' in batch
+    if valid_other_slot:
+        assert '本輪登錄已結1場｜成交0｜Fill 0.0%（0/1）' in batch
+    else:
+        assert '尚無已驗證登錄市場' in batch
+
+
+@pytest.mark.parametrize('exposure', ['unknown_intent', 'open_intent', 'unknown_order', 'open_order', 'campaign'])
+def test_other_shared_lane_unresolved_order_without_fill_is_not_guard_pass(tmp_path, exposure):
+    with main_database(tmp_path) as db:
+        gate(db)
+        admission(db)
+        db.execute("INSERT INTO prediction_loops VALUES('prior','regime_target6_5_v1','LIVE','DONE',100,100,0,0,0)")
+        db.execute("INSERT INTO prediction_campaigns(campaign_id,loop_id,start_time_ms,pending_unknown) VALUES('exposure','prior',?,?)", (START, int(exposure=='campaign')))
+        if exposure in ('unknown_intent','open_intent'):
+            db.execute("INSERT INTO prediction_order_intents VALUES('unresolved','exposure',?,NULL,?,NULL)", ('REJECTED' if exposure=='unknown_intent' else 'SUBMITTING',int(exposure=='unknown_intent')))
+        elif exposure in ('unknown_order','open_order'):
+            db.execute("INSERT INTO prediction_orders VALUES('open','exposure',?)", ('UNKNOWN' if exposure=='unknown_order' else 'NEW',))
+    text=section(render(tmp_path))
+    assert '共用風控MDD 待核對 / 3.5U；不推定通過' in text and '待核對1' in text
+    assert '共用風控已知MDD 0.0000' not in text
+
+
+def test_terminal_rejection_without_unknown_is_not_new_exposure(tmp_path):
+    with main_database(tmp_path) as db:
+        gate(db)
+        admission(db)
+        db.execute("INSERT INTO prediction_campaigns(campaign_id,loop_id,start_time_ms) VALUES('rejected','current',?)", (START,))
+        db.execute("INSERT INTO prediction_order_intents VALUES('rejected','rejected','REJECTED',NULL,0,NULL)")
+    assert '共用風控已知MDD 0.0000 / 3.5U' in section(render(tmp_path))
