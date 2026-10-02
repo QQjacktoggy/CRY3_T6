@@ -212,3 +212,178 @@ def test_bounded_wait_with_stalled_clock():
     local.note_rate_limit(1000)
     assert not local.acquire()
     assert sleeps == [1.0]
+
+
+def test_sqlite_writer_failure_keeps_ban_visible_to_peer_and_restart(modules, tmp_path):
+    _, limiter = modules
+    path = tmp_path / 'budget.db'
+    clock = [1000]
+    owner = limiter.SharedRequestBudget(path, clock_ms=lambda: clock[0])
+    peer = limiter.SharedRequestBudget(path, clock_ms=lambda: clock[0])
+    with sqlite3.connect(path) as blocker:
+        blocker.execute('BEGIN IMMEDIATE')
+        owner.note_response(418, {'Retry-After': '3600'})
+        blocker.rollback()
+    restarted = limiter.SharedRequestBudget(path, clock_ms=lambda: clock[0])
+    for obj in [peer, restarted]:
+        assert obj.health()['backoff_until_ms'] == 3601000
+        assert not obj.acquire(priority='exit')
+        assert not obj.can_send_prepaid()
+    clock[0] = 3601000
+    assert peer.acquire(priority='exit')
+    assert restarted.can_send_prepaid()
+
+
+@pytest.mark.parametrize('failure', ['finish', 'begin_fsync'])
+def test_journal_write_failure_is_durable_fail_closed(modules, tmp_path, monkeypatch, failure):
+    _, limiter = modules
+    path = tmp_path / 'budget.db'
+    owner = limiter.SharedRequestBudget(path, clock_ms=lambda: 1000)
+    peer = limiter.SharedRequestBudget(path, clock_ms=lambda: 1000)
+    def fail(*args):
+        raise OSError('simulated storage failure')
+    if failure == 'finish':
+        token = owner.begin_request()
+        with monkeypatch.context() as patch:
+            patch.setattr(limiter.os, 'fsync', fail)
+            owner.note_response(429, {'Retry-After': '3600'}, token=token)
+    else:
+        with monkeypatch.context() as patch:
+            patch.setattr(limiter.os, 'fsync', fail)
+            assert owner.begin_request() is None
+    # Restore the filesystem then advance far past any short fallback. No
+    # orphan/failed journal record may silently reset a possible server ban.
+    # A completed checksum can retain the exact full ban even if fsync reports
+    # failure; an incomplete pending record has no automatic recovery deadline.
+    restart_time = 3600999 if failure == 'finish' else 100000000
+    restarted = limiter.SharedRequestBudget(path, clock_ms=lambda: restart_time)
+    for obj in [peer, restarted]:
+        assert not obj.acquire(priority='exit')
+        assert not obj.can_send_prepaid()
+
+
+@pytest.mark.parametrize('contents', [b'pending', b'v1:123:partial', b'', b'123'])
+def test_corrupt_or_crashed_request_record_never_auto_unblocks(modules, tmp_path, contents):
+    _, limiter = modules
+    path = tmp_path / 'budget.db'
+    owner = limiter.SharedRequestBudget(path, clock_ms=lambda: 1000)
+    token = owner.begin_request()
+    stream, record = token
+    stream.close()  # Simulate process death releasing its OS lock.
+    record.write_bytes(contents)
+    restarted = limiter.SharedRequestBudget(path, clock_ms=lambda: 100000000)
+    assert not restarted.acquire(priority='exit')
+    assert restarted.health()['backoff_until_ms'] == limiter.MAX_DEADLINE_MS
+
+
+@pytest.mark.parametrize('missing', [False, True])
+def test_required_journal_is_not_reinitialized_after_loss(modules, tmp_path, missing):
+    _, limiter = modules
+    path = tmp_path / 'budget.db'
+    owner = limiter.SharedRequestBudget(path, clock_ms=lambda: 1000)
+    ready = owner._cooldowns.path / 'ready'
+    if missing:
+        ready.unlink()
+    else:
+        ready.write_bytes(b'corrupt')
+    restarted = limiter.SharedRequestBudget(path, clock_ms=lambda: 100000000)
+    assert not owner.can_send_prepaid()
+    assert not restarted.acquire(priority='exit')
+    assert not restarted.can_send_prepaid()
+
+
+def test_parallel_requests_and_out_of_order_responses_never_shorten_ban(modules, tmp_path):
+    _, limiter = modules
+    path = tmp_path / 'budget.db'
+    owner = limiter.SharedRequestBudget(path, clock_ms=lambda: 1000)
+    peer = limiter.SharedRequestBudget(path, clock_ms=lambda: 1000)
+    first = owner.begin_request()
+    second = peer.begin_request()
+    assert first is not None and second is not None
+    owner.note_response(429, {'Retry-After': '3600'}, token=first)
+    peer.note_response(429, {'Retry-After': '1'}, token=second)
+    peer.note_response(200, {})
+    assert owner.health()['backoff_until_ms'] == 3601000
+    assert not peer.can_send_prepaid()
+
+
+def test_marker_cannot_be_created_means_no_http(modules, tmp_path, monkeypatch):
+    mod, limiter = modules
+    calls = []
+    sdk = mod.BinancePredictionClient('', '', transport=SimpleNamespace(request=lambda *a, **k: calls.append(1)))
+    sdk.request_budget = limiter.SharedRequestBudget(tmp_path / 'budget.db', clock_ms=lambda: 1000)
+    def fail(**kwargs):
+        raise OSError('marker cannot be created')
+    monkeypatch.setattr(limiter.tempfile, 'mkstemp', fail)
+    with pytest.raises(limiter.SharedBudgetDeferred):
+        sdk._request('/anything', signed=False)
+    assert not calls
+
+
+@pytest.mark.parametrize('status', [418, 429])
+@pytest.mark.parametrize('kind', ['ordinary', 'oversized', 'compression', 'read_failure', 'truncated'])
+@pytest.mark.asyncio
+async def test_worker_without_shared_budget_honors_full_ban(monkeypatch, status, kind):
+    from http.client import IncompleteRead
+    from src.gridbot.prediction.worker import PredictionWorker, PredictionRateLimitDeferred
+    monkeypatch.delenv('PREDICTION_SHARED_WEIGHT_DB', raising=False)
+    headers = {'Retry-After': '3600'}
+    if kind == 'ordinary':
+        result = client.TransportResponse(status, {'msg': 'limited'}, headers)
+    else:
+        if kind == 'oversized':
+            stream = io.BytesIO(b'x' * (bounds.ERROR_BODY_BYTES + 1))
+        elif kind == 'compression':
+            stream = io.BytesIO(b'not a gzip stream')
+            headers['Content-Encoding'] = 'gzip'
+        else:
+            class FailedRead:
+                def read(self, size):
+                    if kind == 'truncated':
+                        raise IncompleteRead(b'partial')
+                    raise OSError('failed reading response')
+            stream = FailedRead()
+        result = client._bounded_response(stream, status, headers)
+    calls = []
+    def send(*args, **kwargs):
+        calls.append(1)
+        return result
+    sdk = client.BinancePredictionClient('', '', transport=SimpleNamespace(request=send))
+    assert sdk.request_budget is None
+    sdk.query_order_book = lambda: sdk._request('/anything', signed=False)
+    worker = object.__new__(PredictionWorker)
+    worker.client = sdk
+    worker._rate_limiter = rate.PredictionRateLimiter(clock_ms=lambda: 1000)
+    worker._trace_event = lambda *a, **k: None
+    worker._now_ms = lambda: 1000
+    with pytest.raises((client.PredictionAPIError, client.PredictionTransportError)) as caught:
+        await worker._call_api('query_order_book', _emergency=True)
+    assert caught.value.status_code == status
+    assert caught.value.headers['Retry-After'] == '3600'
+    assert worker._rate_limiter.health().backoff_until_ms == 3601000
+    with pytest.raises(PredictionRateLimitDeferred):
+        await worker._call_api('query_order_book', _emergency=True)
+    assert calls == [1]
+
+
+def test_entry_guard_rechecked_after_journal_fsync(tmp_path):
+    calls = []
+    sdk = client.BinancePredictionClient('', '', transport=SimpleNamespace(request=lambda *a, **k: calls.append(1)))
+    budget = rate.SharedRequestBudget(tmp_path / 'budget.db', clock_ms=lambda: 1000)
+    sdk.request_budget = budget
+    stopped = [False]
+    original = budget.begin_request
+    def begin():
+        token = original()
+        stopped[0] = True
+        return token
+    budget.begin_request = begin
+    def guard():
+        if stopped[0]:
+            raise client.PredictionEntryNotSubmitted('stopped during journal write')
+    with client.entry_http_guard_scope(guard):
+        with pytest.raises(client.PredictionEntryNotSubmitted):
+            sdk._request(client.PREDICTION_PREFIX + '/trade/place-order-bundle', method='POST', signed=False)
+    assert calls == []
+    assert list(budget._cooldowns.path.iterdir()) == [budget._cooldowns.path / 'ready']
+    assert budget.can_send_prepaid()

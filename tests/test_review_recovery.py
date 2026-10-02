@@ -427,7 +427,7 @@ def test_installer_preflight_checks_run_even_when_asserts_are_optimized(tmp_path
     verifier = Mock(wraps=namespace['verify_release'])
     namespace['verify_release'] = verifier
     monkeypatch.setattr(namespace['os'], 'getuid', lambda: 1000)
-    monkeypatch.setattr(namespace['sys'], 'argv', ['installer'])
+    monkeypatch.setattr(namespace['sys'], 'argv', ['installer', '--expected-fingerprint', fingerprints[stage]])
     if unsafe:
         with pytest.raises(RuntimeError):
             namespace['main']()

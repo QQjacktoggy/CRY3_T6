@@ -7,6 +7,7 @@ operator must obtain the installer and release fingerprint through a trusted pat
 import ast
 import hashlib
 import json
+import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 RELEASE = 'src/gridbot/prediction/release.py'
@@ -38,10 +39,21 @@ def _pin(text):
         'PREDICTION_EXPECTED_RELEASE_FINGERPRINT', '').strip().strip('"').strip("'")
 
 
-def verify_release(root, manifest, *, pin_text):
+def approved_fingerprint(value):
+    """Parse an operator-supplied SHA-256 identity; never read staging here."""
+    if not isinstance(value, str) or re.fullmatch(r'[0-9a-fA-F]{64}', value) is None:
+        raise ValueError('expected fingerprint must be exactly 64 hexadecimal characters')
+    return value.lower()
+
+
+def verify_release(root, manifest, *, pin_text, expected_fingerprint=None):
     """Validate identity and inventory, returning the exact verified bytes."""
     if not isinstance(manifest, dict) or manifest.get('schema') != 'prediction-release-v1':
         raise RuntimeError('Release manifest schema is invalid')
+    if expected_fingerprint is not None:
+        expected_fingerprint = approved_fingerprint(expected_fingerprint)
+        if manifest.get('release_fingerprint') != expected_fingerprint:
+            raise RuntimeError('Release differs from operator-approved fingerprint')
     rows = manifest.get('files')
     if not isinstance(rows, list) or not rows:
         raise RuntimeError('Release manifest files are invalid')

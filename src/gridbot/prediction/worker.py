@@ -1711,7 +1711,10 @@ class PredictionWorker:
             raise PredictionRateLimitDeferred(method_name, exc.health) from exc
         except Exception as exc:
             self._trace_event('api_error',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,error_type=type(exc).__name__,**trace_fields)
-            if getattr(exc, "status_code", None) == 429 or "429" in str(exc) or "rate limit" in str(exc).lower():
+            status = getattr(exc, "status_code", None)
+            if status in (418, 429):
+                self._rate_limiter.note_response(status, getattr(exc, "headers", None), error=str(exc))
+            elif "429" in str(exc) or "rate limit" in str(exc).lower():
                 self._rate_limiter.note_rate_limit(error=str(exc))
             raise
         self._trace_event('api_ack',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,**trace_fields)

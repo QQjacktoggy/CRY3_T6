@@ -151,7 +151,9 @@ async def test_native_http_rechecks_controls_after_budget_and_signing(worker_env
         def can_send_prepaid(self):
             if boundary == 'budget': mutate()
             return True
-        def note_response(self, *args): pass
+        def begin_request(self): return object()
+        def transport_failed(self, token): pass
+        def note_response(self, *args, **kwargs): pass
     worker.client.request_budget = Budget()
     from src.gridbot.prediction.client import hmac_sha256_signature
     def sign(*args):

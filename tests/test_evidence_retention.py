@@ -183,3 +183,49 @@ def test_c180_row_caps_preserve_recent_recovery(tmp_path):
         store.persist_book(book(1000000))
         assert store.db.execute('SELECT count(*) FROM c180_book_events').fetchone()[0] == 40000
         assert store.db.execute('SELECT count(*) FROM c180_books').fetchone()[0] == 300
+
+
+@pytest.mark.parametrize('store_type,horizon_ms', [
+    (EvidenceStore, 3600000), (C180SignalStore, 86400000),
+])
+def test_production_store_files_converge_without_manual_checkpoint(tmp_path, store_type, horizon_ms):
+    """Exercise real store writes, expiration, WAL reuse and ordinary reopen.
+
+    Forty retention windows use 10Hz bursts and 4KiB snapshots. Timestamp gaps
+    accelerate expiration without changing retention policy or SQLite settings.
+    No VACUUM/checkpoint, direct INSERT/DELETE, or budget counter resets occur.
+    Measure database + WAL + SHM while the writer is still open, so closing the
+    connection cannot mask ongoing WAL growth.
+    """
+    path = tmp_path/'evidence'
+    phase_peaks = []
+    for phase in range(2):
+        with closing(store_type(path)) as store:
+            write = store.book if store_type is EvidenceStore else store.persist_book
+            sizes, pages = [], []
+            for cycle in range(20):
+                for market in range(3):
+                    start = (1000000 + (phase*20+cycle)*(horizon_ms+900000)
+                             + market*300000)
+                    # Match the full C180 entry window: 121 observations at
+                    # 10Hz per five-minute market; T67 also records both feeds.
+                    for offset in range(124000, 136001, 100):
+                        at = start+offset
+                        write(book(at, start=start, padding='x'*4096))
+                        if store_type is EvidenceStore:
+                            for kind in ('binance_spot_aggTrade', 'binance_futures_aggTrade'):
+                                store.spot(dict(kind=kind, received_at=at,
+                                                body={'T': at, 'p': '100'}), 1)
+                table = 'books' if store_type is EvidenceStore else 'c180_book_events'
+                assert store.db.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 363
+                sizes.append(size(path))
+                pages.append(store.db.execute('PRAGMA page_count').fetchone()[0])
+            # Allow checkpoint/page-allocation granularity, but not retention
+            # windows accumulating on disk. Every post-warmup window is tested.
+            assert max(sizes[8:])-min(sizes[8:]) <= 512*1024
+            assert max(pages[8:])-min(pages[8:]) <= 32
+            phase_peaks.append(max(sizes[8:]))
+            assert store.db.execute('PRAGMA max_page_count').fetchone()[0] * store.db.execute(
+                'PRAGMA page_size').fetchone()[0] <= limits.MAX_DATABASE_BYTES
+    # Reopening and another twenty windows must reuse the existing allocation.
+    assert phase_peaks[1] <= phase_peaks[0]+512*1024

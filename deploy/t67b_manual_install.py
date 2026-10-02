@@ -13,7 +13,7 @@ from pathlib import Path
 
 # The reviewed installer and verifier must be shipped together outside STAGE.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from release_verifier import safe_path, verify_release, validate_candidate
+from release_verifier import approved_fingerprint, safe_path, verify_release, validate_candidate
 
 ROOT = Path('/home/jack_shih/cry3')
 STAGE = ROOT/'prediction/t67b-entry-staged-v1-20261001'
@@ -101,6 +101,8 @@ def official_clear():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--expected-fingerprint', required=True, type=approved_fingerprint,
+                        help='SHA-256 approved out of band; never obtain this value from STAGE')
     parser.add_argument('--loop-id',default='loop:1790839356188')
     parser.add_argument('--apply',action='store_true',help='Operator explicitly installs code/reloads services; no Live activation')
     parser.add_argument('--allow-cancelled-loop',action='store_true',help='Explicit user-authorized cancellation boundary; all exposure checks still required')
@@ -118,10 +120,12 @@ def main():
         raise RuntimeError('Parent changed; inspect before installing')
     if not (new['release_fingerprint']==validation['fingerprint']):
         raise RuntimeError('Installer safety check failed')
+    if new['release_fingerprint'] != args.expected_fingerprint:
+        raise RuntimeError('Release differs from operator-approved fingerprint')
     old_pin = safe_path(ROOT, PIN).read_text()
     new_pin = safe_path(STAGE, PIN).read_text()
     old_bytes = verify_release(ROOT, old, pin_text=old_pin)
-    new_bytes = verify_release(STAGE, new, pin_text=new_pin)
+    new_bytes = verify_release(STAGE, new, pin_text=new_pin, expected_fingerprint=args.expected_fingerprint)
     validate_candidate(ROOT, STAGE, candidate, old_bytes, new_bytes)
     source_modes = {row['path']: safe_path(STAGE, row['path']).stat().st_mode & 0o777
                     for row in candidate['files']}
@@ -162,7 +166,7 @@ def main():
                 output.write(new_bytes[row['path']])
             temp.chmod(source_modes[row['path']])
             os.replace(temp,dest)
-        verify_release(ROOT, new, pin_text=new_pin)
+        verify_release(ROOT, new, pin_text=new_pin, expected_fingerprint=args.expected_fingerprint)
         safe_path(ROOT, MANIFEST).write_text(json.dumps(new, indent=2)+'\n')
         safe_path(ROOT, PIN).write_text(new_pin)
         if not (guard_path.read_bytes()==guard and snapshot(args.loop_id,allow_cancelled=args.allow_cancelled_loop,allow_historical_closed=args.allow_historical_closed_ledger)==before):

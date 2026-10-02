@@ -58,7 +58,9 @@ def installer(name, optimize, candidate, monkeypatch, apply=False):
     namespace.update(ROOT=root, STAGE=stage, snapshot=Mock(return_value={'fixed': True}),
                      official_clear=Mock(), service=Mock(return_value='active'))
     monkeypatch.setattr(namespace['os'], 'getuid', lambda: 1000)
-    monkeypatch.setattr(sys, 'argv', [str(path)] + (['--apply'] if apply else []))
+    expected = json.loads((stage / 'prediction/release-manifest.json').read_text())['release_fingerprint']
+    monkeypatch.setattr(sys, 'argv', [str(path), '--expected-fingerprint', expected]
+                        + (['--apply'] if apply else []))
     return namespace
 
 
@@ -215,3 +217,71 @@ def test_runtime_release_manifest_rejects_unsafe_paths(candidate, tmp_path, monk
         (root / 'source.py').symlink_to(outside)
     reasons = release.verify_release_manifest(root, current, expected_fingerprint=current['release_fingerprint'])
     assert any('duplicate' in reason or 'path' in reason for reason in reasons)
+
+
+@pytest.mark.parametrize('name', INSTALLERS)
+@pytest.mark.parametrize('optimize', [0, 2])
+@pytest.mark.parametrize('apply', [False, True])
+def test_self_consistent_malicious_stage_cannot_replace_operator_approval(candidate, tmp_path, monkeypatch,
+                                                                        name, optimize, apply):
+    root, stage, plan = candidate
+    # Capture the approved release identity before the attacker rewrites staging.
+    ns = installer(name, optimize, candidate, monkeypatch, apply)
+    approved = sys.argv[sys.argv.index('--expected-fingerprint') + 1]
+    marker = tmp_path / 'malicious-release-executed'
+    malicious_release = (f'_REQUIRED_FIXED_RELEASE_PATHS = ({RELEASE!r}, "source.py")\n'
+                         f'from pathlib import Path\nPath({str(marker)!r}).touch()\n').encode()
+    malicious = manifest(stage, {RELEASE: malicious_release, 'source.py': b'malicious replacement'})
+    for relative in (RELEASE, 'source.py'):
+        before = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+        after = hashlib.sha256((stage / relative).read_bytes()).hexdigest()
+        if relative == 'source.py':
+            plan['files'][0].update(before=before, after=after)
+        else:
+            plan['files'].append({'path': relative, 'before': before, 'after': after})
+    (stage / 'candidate.json').write_text(json.dumps(plan))
+    (stage / 'validation.json').write_text(json.dumps({
+        'status': 'STAGED_VERIFIED_NOT_DEPLOYED', 'parent': plan['parent'],
+        'fingerprint': malicious['release_fingerprint']}))
+    # All attacker-controlled hashes and metadata agree, so local pin checking
+    # alone accepts the tree. The independently supplied identity must reject it.
+    verify_release(stage, malicious, pin_text=(stage / 'prediction/release-pin.env').read_text())
+    assert malicious['release_fingerprint'] != approved
+    with pytest.raises(RuntimeError, match='operator-approved fingerprint'):
+        ns['main']()
+    ns['official_clear'].assert_not_called()
+    ns['service'].assert_not_called()
+    ns['snapshot'].assert_not_called()
+    assert not marker.exists()
+    assert (root / 'source.py').read_bytes() == b'old'
+    assert not list((root / 'prediction').glob('*rollback*'))
+
+
+@pytest.mark.parametrize('name', INSTALLERS)
+@pytest.mark.parametrize('optimize', [0, 2])
+@pytest.mark.parametrize('apply', [False, True])
+@pytest.mark.parametrize('invalid', [None, '', 'a' * 63, 'a' * 65, 'g' * 64])
+def test_operator_fingerprint_is_required_and_strict(candidate, monkeypatch, name, optimize, apply, invalid):
+    root, _, _ = candidate
+    ns = installer(name, optimize, candidate, monkeypatch, apply)
+    arguments = [sys.argv[0]] + (['--apply'] if apply else [])
+    if invalid is not None:
+        arguments.extend(['--expected-fingerprint', invalid])
+    monkeypatch.setattr(sys, 'argv', arguments)
+    with pytest.raises(SystemExit) as exc:
+        ns['main']()
+    assert exc.value.code == 2
+    ns['official_clear'].assert_not_called()
+    ns['service'].assert_not_called()
+    ns['snapshot'].assert_not_called()
+    assert (root / 'source.py').read_bytes() == b'old'
+
+
+def test_trusted_verifier_enforces_supplied_approval(candidate):
+    _, stage, _ = candidate
+    release = json.loads((stage / 'prediction/release-manifest.json').read_text())
+    pin = (stage / 'prediction/release-pin.env').read_text()
+    with pytest.raises(RuntimeError, match='operator-approved fingerprint'):
+        verify_release(stage, release, pin_text=pin, expected_fingerprint='0' * 64)
+    assert verify_release(stage, release, pin_text=pin,
+                          expected_fingerprint=release['release_fingerprint'].upper())

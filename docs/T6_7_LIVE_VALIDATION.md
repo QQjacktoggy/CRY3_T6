@@ -82,13 +82,17 @@ Spot 最多 1.5 秒、book 最多 1 秒。來源／接收時間均不得晚於�
    `release.py` 驗證全部 inventory 後，在此安全空檔重新載入 main、feature、
    signal 三個服務。不可把 import cache 當成熱載入。
 
-   已提供預設唯讀的人工安裝工具；在 VM 以 `jack_shih` 操作：
+   人工安裝工具與 `release_verifier.py` 必須來自已審核的可信來源，放在 STAGE 外。
+   `REVIEWED_INSTALLER_DIR` 指向該目錄；`APPROVED_RELEASE_FINGERPRINT` 必須由獨立
+   核准建置取得，不能讀取候選自帶的 pin 來填入。以下操作仍需另行部署授權：
 
    ```sh
    cd /home/jack_shih/cry3
-   testnet/.venv/bin/python prediction/t67-live-staged-v5-20261001/deploy/t67_manual_install.py
+   : "${REVIEWED_INSTALLER_DIR:?需設定可信 installer 目錄}"
+   : "${APPROVED_RELEASE_FINGERPRINT:?需設定獨立核准 fingerprint}"
+   testnet/.venv/bin/python "$REVIEWED_INSTALLER_DIR/t67_manual_install.py" --expected-fingerprint "$APPROVED_RELEASE_FINGERPRINT"
    # 前置檢查通過後，由使用者明確執行安裝；不會選策略、arm 或開 loop。
-   testnet/.venv/bin/python prediction/t67-live-staged-v5-20261001/deploy/t67_manual_install.py --apply
+   testnet/.venv/bin/python "$REVIEWED_INSTALLER_DIR/t67_manual_install.py" --expected-fingerprint "$APPROVED_RELEASE_FINGERPRINT" --apply
    ```
 
    預設要求 `loop:1790817223795` DONE 100/100。使用者於 10/01 明確取消本輪並授權部署後，

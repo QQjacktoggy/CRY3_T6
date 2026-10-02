@@ -16,12 +16,12 @@ def test_installer_does_not_stop_services_or_write_source_without_explicit_apply
     root, stage = tmp_path/'root', tmp_path/'stage'
     for base in (root,stage):
         (base/'prediction').mkdir(parents=True)
-        (base/'prediction/release-manifest.json').write_text(json.dumps({'release_fingerprint':'old' if base==root else 'new'}))
+        (base/'prediction/release-manifest.json').write_text(json.dumps({'release_fingerprint':'old' if base==root else '1'*64}))
         (base/'prediction/release-pin.env').write_text('fake-test-pin')
         (base/'source.py').write_text('old' if base==root else 'new')
     sha = lambda value: hashlib.sha256(value.encode()).hexdigest()
     (stage/'candidate.json').write_text(json.dumps({'parent':'old','files':[{'path':'source.py','before':sha('old'),'after':sha('new')}]}))
-    (stage/'validation.json').write_text(json.dumps({'status':'STAGED_VERIFIED_NOT_DEPLOYED','parent':'old','fingerprint':'new'}))
+    (stage/'validation.json').write_text(json.dumps({'status':'STAGED_VERIFIED_NOT_DEPLOYED','parent':'old','fingerprint':'1'*64}))
     (root/'prediction/hs-recovery-startup.env').write_text('PREDICTION_LIVE_ARM_ON_START=false\nPREDICTION_AUTO_START_LOOP=false\n')
     snapshot = Mock(side_effect=RuntimeError('Another loop is RUNNING') if unsafe else None,return_value={'fixed':True})
     official, service = Mock(), Mock(return_value='active')
@@ -29,7 +29,7 @@ def test_installer_does_not_stop_services_or_write_source_without_explicit_apply
         monkeypatch.setitem(namespace,key,value)
     monkeypatch.setitem(namespace, 'verify_release', lambda base, *a, **k: {'source.py': b'old' if base == root else b'new'})
     monkeypatch.setattr(namespace['os'],'getuid',lambda:1000)
-    monkeypatch.setattr(namespace['sys'],'argv',['t67_manual_install.py'])
+    monkeypatch.setattr(namespace['sys'],'argv',['t67_manual_install.py', '--expected-fingerprint', '1'*64])
     if unsafe:
         with pytest.raises(RuntimeError,match='RUNNING'):
             main()

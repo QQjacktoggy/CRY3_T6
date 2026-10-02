@@ -49,7 +49,13 @@ class Budget:
         self.prepaid_checks += 1
         return True
 
-    def note_response(self, status, headers):
+    def begin_request(self):
+        return object()
+
+    def transport_failed(self, token):
+        pass
+
+    def note_response(self, status, headers, *, token=None):
         pass
 
     def health(self):
