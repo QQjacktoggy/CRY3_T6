@@ -224,6 +224,116 @@ def empty_report(now):
     return '\n'.join(lines)
 
 
+def _shared_block_events(root, *, start, end, now):
+    """Read fee-net Live observations across the existing shared risk lane."""
+    from .live_report import RISK_PROFILES, SLOT, _decimal
+    from collections import defaultdict
+    path = root/'prediction/data/prediction.sqlite3'
+    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
+        db.row_factory = sqlite3.Row
+        db.execute('PRAGMA query_only=ON')
+        db.execute('BEGIN')
+        campaigns = [dict(r) for r in db.execute(
+            "SELECT c.* FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id "
+            "WHERE l.mode='LIVE' AND l.strategy_profile IN ("+','.join('?' for _ in RISK_PROFILES)+") "
+            "AND c.start_time_ms>=? AND c.start_time_ms<? AND EXISTS "
+            "(SELECT 1 FROM prediction_fills f WHERE f.campaign_id=c.campaign_id AND f.order_side='BUY')",
+            (*RISK_PROFILES, start, end))]
+        claims, settlements = defaultdict(list), defaultdict(list)
+        for c in campaigns:
+            claims[c['campaign_id']] = [dict(r) for r in db.execute(
+                'SELECT * FROM prediction_regime_entry_claims WHERE campaign_id=?', (c['campaign_id'],))]
+            settlements[c['campaign_id']] = [dict(r) for r in db.execute(
+                "SELECT s.*,o.net_pnl AS observed_net,o.known_at_ms FROM prediction_settlements s "
+                "LEFT JOIN prediction_regime_settlement_observations o ON o.settlement_id=s.settlement_id "
+                "AND o.campaign_id=s.campaign_id WHERE s.campaign_id=? AND s.status='SETTLED'",
+                (c['campaign_id'],))]
+    events, pending, unverified = [], {}, {}
+    for c in campaigns:
+        cid = c['campaign_id']
+        q, s = claims[cid], settlements[cid]
+        try:
+            if (len(q) != 1 or q[0]['loop_id'] != c['loop_id']
+                    or q[0]['market_start_ms'] != c['start_time_ms'] or not q[0]['intent_id']
+                    or (c['start_time_ms']-start) % SLOT or len(s) > 1):
+                raise ValueError('invalid shared risk provenance')
+            if not s:
+                pending[cid] = c['start_time_ms']
+                continue
+            row = s[0]
+            pnl, unit = _decimal(row['net_pnl']), _decimal(q[0]['unit_usdt'])
+            if (pnl != _decimal(row['observed_net']) or unit not in (1, 2, 3)
+                    or row['known_at_ms'] is None or not c['start_time_ms']+SLOT <= int(row['known_at_ms']) <= now):
+                raise ValueError('unconfirmed shared risk observation')
+            events.append(dict(cid=cid, start=c['start_time_ms'], id=row['settlement_id'],
+                               known=int(row['known_at_ms']), pnl=pnl/unit))
+        except (ValueError, TypeError, KeyError, ArithmeticError):
+            unverified[cid] = c['start_time_ms']
+    return events, pending, unverified
+
+
+def scheduled_run_summary(root, *, now, slots, campaigns, current_ids, fill_ids, events, gate):
+    """Keep fixed risk boundaries while showing only this loop's performance."""
+    from .live_report import SLOT, TZ, _metrics, _value
+    from .regime_lane import FINGERPRINT as RISK_FP
+    lines = ['', '固定每20 run總結（含跳過場；跨loop沿用風控起點）：']
+    try:
+        if not isinstance(gate, dict) or gate.get('fingerprint') != RISK_FP:
+            raise ValueError('risk epoch unavailable')
+        anchor = int(gate['first_market_start_ms'])
+        if anchor <= 0 or anchor % SLOT:
+            raise ValueError('invalid risk epoch')
+        registered = {int(s['market_start_ms']) for s in slots
+                      if s['verified_at_ms'] is not None and int(s['market_start_ms']) <= now}
+        if not registered:
+            return lines+['尚無已登錄市場。']
+        if any(s < anchor or (s-anchor) % SLOT for s in registered):
+            raise ValueError('market off risk grid')
+        first, last = min(registered), max(registered)
+        first_block, last_block = (first-anchor)//SLOT//20, (last-anchor)//SLOT//20
+        begin = max(first_block, last_block-4)
+        if begin > first_block:
+            lines.append(f'共{last_block-first_block+1}段；顯示最近5段。')
+        start, end = anchor+begin*20*SLOT, anchor+(last_block+1)*20*SLOT
+        shared, shared_pending, unverified = _shared_block_events(root, start=start, end=end, now=now)
+        known = {e['cid'] for e in events}
+        filled = fill_ids & current_ids
+        def in_block(cid, a, b):
+            return a <= int(campaigns[cid]['start_time_ms']) < b
+        for block in range(begin, last_block+1):
+            a, b = anchor+block*20*SLOT, anchor+(block+1)*20*SLOT
+            clock = '–'.join(datetime.fromtimestamp(t/1000, TZ).strftime('%m/%d %H:%M') for t in (a, b))
+            elapsed = min(20, max(0, (now-a)//SLOT))
+            phase = '時段已結束' if now >= b else '進行中'
+            lines.append(f'第{block*20+1}–{(block+1)*20} run｜{clock}｜{phase} {elapsed}/20')
+            ended = {s for s in registered if a <= s < b and s+SLOT <= now}
+            batch_fills = {cid for cid in filled if in_block(cid, a, b)}
+            closed_fills = sum(int(campaigns[cid]['start_time_ms']) in ended for cid in batch_fills)
+            fill_text = f'{closed_fills/len(ended):.1%}（{closed_fills}/{len(ended)}）' if ended else '—'
+            batch = [e for e in events if a <= e['start'] < b]
+            pending = len(batch_fills-known)
+            metric = _metrics(batch)
+            pnl_text = _value(metric,batch,pending) if ended or batch_fills else '—（無本輪登錄）'
+            mdd_text = _value(metric,batch,pending,'mdd') if ended or batch_fills else '—'
+            lines.append(f'  本輪登錄已結{len(ended)}場｜成交{len(batch_fills)}｜Fill {fill_text}｜待結算/核對{pending}')
+            lines.append(f'  WR {metric["wr"]}（{metric["wins"]}勝/{metric["losses"]}負）｜'
+                         f'已知PnL {pnl_text} USDT｜MDD {mdd_text} USDT')
+            risk_batch = [e for e in shared if a <= e['start'] < b]
+            bad = sum(a <= t < b for t in unverified.values())
+            risk_pending = sum(a <= t < b for t in shared_pending.values())
+            if bad:
+                lines.append('  共用風控MDD 待核對 / 3.5U；不推定通過')
+            else:
+                rm = _metrics(risk_batch)
+                lines.append(f'  共用風控已知MDD {_value(rm,risk_batch,risk_pending,"mdd")} / 3.5U（1U等值）')
+        lines.append('本輪績效僅含T6.7b此loop；共用風控MDD含同區段其他T6 Live，Shadow不計入。')
+        if shared_pending or unverified:
+            lines.append(f'區段共用風控待結算{len(shared_pending)}｜待核對{len(unverified)}；未知結果不補零。')
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError):
+        lines.append('20 run區段待核對；不推定為已通過。')
+    return lines
+
+
 def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
                    events, claims, pending, inflight, unknown, gate, loop_guard, hs, issues,
                    selected_unit=None):
@@ -264,6 +374,8 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError):
         lines += [f'{title}｜成交待核對｜已知WR —｜已知PnL —' for title in LIVE_LABELS.values()]
         lines.append('T6.7b 子策略歸因待核對；保留官方Live總PnL。')
+    lines += scheduled_run_summary(root, now=now, slots=slots, campaigns=campaigns,
+                                   current_ids=current_ids, fill_ids=fill_ids, events=events, gate=gate)
     lines += ['', 'Shadow（本輪報價研究）：']
     try:
         shadows = shadow_metrics(root, now=now, loop_id=loop['loop_id'], slots=slots, fingerprint=FINGERPRINT)
