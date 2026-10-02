@@ -31,6 +31,7 @@ from .regime_t67a_policy import PROFILE as T67A_PROFILE, FINGERPRINT as T67A_FIN
 from .regime_t67b_policy import PROFILE as T67B_PROFILE, FINGERPRINT as T67B_FINGERPRINT
 
 from .regime_t67c_policy import PROFILE as T67C_PROFILE, FINGERPRINT as T67C_FINGERPRINT
+from .regime_t68_policy import PROFILE as T68_PROFILE, FINGERPRINT as T68_FINGERPRINT
 
 class RegimeWorkerBridge:
     def __init__(self, repository, signal_db, exposure_checker=None, feature_db=DEFAULT_DB,
@@ -39,7 +40,7 @@ class RegimeWorkerBridge:
         self.signal_db = Path(signal_db)
         self.feature_db = Path(feature_db)
         self.profile = profile
-        self.decision_fingerprint = (T67C_FINGERPRINT if profile == T67C_PROFILE else T67B_FINGERPRINT if profile == T67B_PROFILE else T67A_FINGERPRINT if profile == T67A_PROFILE else T67_FINGERPRINT if profile == T67_PROFILE else T65_FINGERPRINT if profile == T65_PROFILE else
+        self.decision_fingerprint = (T68_FINGERPRINT if profile == T68_PROFILE else T67C_FINGERPRINT if profile == T67C_PROFILE else T67B_FINGERPRINT if profile == T67B_PROFILE else T67A_FINGERPRINT if profile == T67A_PROFILE else T67_FINGERPRINT if profile == T67_PROFILE else T65_FINGERPRINT if profile == T65_PROFILE else
                                      T63B_FINGERPRINT if profile == T63B_PROFILE else
                                      T63A_FINGERPRINT if profile == T63A_PROFILE else
                                      T63_FINGERPRINT if profile == T63_PROFILE else T62_FINGERPRINT if profile == T62_PROFILE else
@@ -49,7 +50,7 @@ class RegimeWorkerBridge:
 
     async def register_market(self, *, loop_id, market, now_ms, unit_usdt):
         if (unit_usdt not in (Decimal(1), Decimal(2), Decimal(3))
-                or (self.profile not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE) and unit_usdt != Decimal(1))):
+                or (self.profile not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE) and unit_usdt != Decimal(1))):
             return C180Ready(False, "regime_requires_fixed_1_usdt")
         try:
             if await self.ledger.market_is_registered(loop_id=loop_id, market=market):
@@ -130,6 +131,10 @@ class RegimeWorkerBridge:
         return walk(snapshot["quote"][side]["ask_levels"], snapshot["fee_bps"], cap, amount)
 
     def check_signal(self, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
+        if self.profile == T68_PROFILE:
+            from .regime_t68_bridge import check_signal
+            return check_signal(self, market=market, unit_usdt=unit_usdt, at_ms=at_ms,
+                                last_seen_book_at_ms=last_seen_book_at_ms)
         if self.profile == T67C_PROFILE:
             from .regime_t67c_bridge import check_signal
             return check_signal(self, market=market, unit_usdt=unit_usdt, at_ms=at_ms,
