@@ -21,7 +21,8 @@ T67_PROFILE = "regime_target6_7_v1"
 T67A_PROFILE = "regime_target6_7a_v1"
 T67B_PROFILE = "regime_target6_7b_v1"
 T67C_PROFILE = "regime_target6_7c_v1"
-RISK_PROFILES = (PROFILE, T61_PROFILE, T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE)
+T68_PROFILE = "regime_target6_8_v1"
+RISK_PROFILES = (PROFILE, T61_PROFILE, T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE)
 SLOT = 300000
 TZ = timezone(timedelta(hours=8))
 TERMINAL = {"FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED"}
@@ -237,6 +238,9 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
                             "CASE WHEN state='RUNNING' THEN 0 ELSE 1 END,created_at_ms DESC,loop_id DESC LIMIT 1",
                             (profile_filter,) if profile_filter else ()).fetchone()
         if loop is None:
+            if profile_filter == T68_PROFILE:
+                from .regime_t68_report import empty_report
+                return empty_report(now)
             if profile_filter == T67C_PROFILE:
                 from .regime_t67c_report import empty_report
                 return empty_report(now)
@@ -271,7 +275,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
 
         rows = lambda sql, args=(): [dict(r) for r in conn.execute(sql,args)]
         slots = rows("SELECT * FROM prediction_regime_slots WHERE loop_id=? ORDER BY market_start_ms",(loop_id,))
-        scope = (profile,) if profile in (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE) else RISK_PROFILES
+        scope = (profile,) if profile in (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE) else RISK_PROFILES
         placeholders = ",".join("?" for _ in scope)
         campaigns = rows("SELECT c.*,l.strategy_profile AS lane_profile FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id "
                          "WHERE l.strategy_profile IN (" + placeholders + ") AND l.mode='LIVE'",scope)
@@ -291,7 +295,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
         gate = json.loads(gate_row[0]) if gate_row else None
         loop_guard_row = conn.execute(
             "SELECT config_value_json FROM prediction_runtime_config WHERE config_key=?",
-            (profile.removesuffix("_v1") + "_loop_risk:" + loop_id,)).fetchone() if profile in (T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE) else None
+            (profile.removesuffix("_v1") + "_loop_risk:" + loop_id,)).fetchone() if profile in (T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE) else None
         loop_guard = json.loads(loop_guard_row[0]) if loop_guard_row else None
         selected_rows = conn.execute(
             "SELECT config_key,config_value_json FROM prediction_runtime_config "
@@ -300,7 +304,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
         selected = {row[0]: json.loads(row[1]) for row in selected_rows}
         conn.commit()
 
-    if profile in (T67A_PROFILE, T67B_PROFILE, T67C_PROFILE):
+    if profile in (T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE):
         # A malformed historical T6.7a row must not contaminate this loop's
         # performance or reconciliation warnings.
         campaigns = [c for c in campaigns if c['loop_id'] == loop_id]
@@ -338,7 +342,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
             unit = _decimal(q[0]["unit_usdt"])
             if (pnl != _decimal(row["observed_net"]) or row["known_at_ms"] is None
                     or int(row["known_at_ms"]) > now or unit not in (1,2,3)
-                    or (campaign["lane_profile"] not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE) and unit != 1)):
+                    or (campaign["lane_profile"] not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE) and unit != 1)):
                 raise ValueError("unconfirmed observation")
         except (ValueError, TypeError, ArithmeticError):
             issues.add("官方與風控結算觀測待核對")
@@ -355,6 +359,15 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
     inflight = sum(q["status"] is None or str(q["status"]).upper() not in TERMINAL or q["unknown"] for q in own_claims)
     current_pending = len(pending & current_ids)
     empty = sum(s["empty_attested_at_ms"] is not None for s in slots)
+    if profile == T68_PROFILE:
+        from .regime_t68_report import format_summary
+        return format_summary(root, now=now, loop=loop, slots=slots, campaigns=cmap,
+                              current_ids=current_ids, fill_ids=fill_ids, events=current,
+                              claims=own_claims, pending=current_pending, inflight=inflight,
+                              unknown=len(unknown_ids & current_ids), gate=gate,
+                              loop_guard=loop_guard, hs=_reported_hard_stop(selected, now),
+                              selected_unit=selected.get('prediction_selected_order_unit'),
+                              issues=issues)
     if profile == T67C_PROFILE:
         from .regime_t67c_report import format_summary
         return format_summary(root, now=now, loop=loop, slots=slots, campaigns=cmap,
@@ -550,7 +563,7 @@ def _format_live_report(root, *, now_ms=None, c180_formatter=None, context=None,
 def format_live_report(root, *, now_ms=None, c180_formatter=None, profile_filter=None):
     context = {}
     report = _format_live_report(root, now_ms=now_ms, c180_formatter=c180_formatter, context=context, profile_filter=profile_filter)
-    if profile_filter in (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE) or context.get('profile') in (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE):
+    if profile_filter in (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE) or context.get('profile') in (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE):
         return report
     try:
         from .regime_t66_report import format_observation_report
@@ -561,7 +574,7 @@ def format_live_report(root, *, now_ms=None, c180_formatter=None, profile_filter
 
 
 def t67_family_report_profile(root):
-    """Choose the selected T6.7 family without falling back to old lanes."""
+    """Choose the selected T6.7/T6.8 family without falling back to old lanes."""
     path = Path(root)/'prediction/data/prediction.sqlite3'
     if not path.is_file():
         return T67_PROFILE
@@ -572,12 +585,12 @@ def t67_family_report_profile(root):
                               "WHERE config_key='prediction_selected_strategy'").fetchone()
         if selected:
             profile = json.loads(selected[0]).get('profile')
-            if profile in (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE):
+            if profile in (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE):
                 return profile
         loop = db.execute("SELECT strategy_profile FROM prediction_loops WHERE mode='LIVE' "
-                          "AND strategy_profile IN (?,?,?,?) ORDER BY CASE WHEN state='RUNNING' "
+                          "AND strategy_profile IN (?,?,?,?,?) ORDER BY CASE WHEN state='RUNNING' "
                           "THEN 0 ELSE 1 END,created_at_ms DESC,loop_id DESC LIMIT 1",
-                          (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE)).fetchone()
+                          (T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T68_PROFILE)).fetchone()
         return loop[0] if loop else T67_PROFILE
 
 
