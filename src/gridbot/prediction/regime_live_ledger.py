@@ -26,7 +26,7 @@ from .regime_lane import STATE_KEY, FINGERPRINT, risk_result
 PROFILE = "regime_target6_v1"
 TIER = "REGIME_T6"
 RISK_PROFILES = (PROFILE, "regime_target6_1_v1", "regime_target6_2_v1",
-                 "regime_target6_3_v1", "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1", "regime_target6_7_v1", 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1')
+                 "regime_target6_3_v1", "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1", "regime_target6_7_v1", 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1')
 TERMINAL_INTENTS = ("FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED")
 TERMINAL_ORDERS = ("FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED")
 NO_FILL_TERMINAL = frozenset(("CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED"))
@@ -138,12 +138,12 @@ class RegimeLiveLedger:
         self.repository = repository
         self.state_key = state_key
         self.profile = profile
-        self.tier = ("REGIME_T68A" if profile == "regime_target6_8a_v1" else "REGIME_T68" if profile == "regime_target6_8_v1" else "REGIME_T67C" if profile == "regime_target6_7c_v1" else "REGIME_T67B" if profile == "regime_target6_7b_v1" else "REGIME_T67A" if profile == "regime_target6_7a_v1" else "REGIME_T67" if profile == "regime_target6_7_v1" else "REGIME_T65" if profile == "regime_target6_5_v1" else
+        self.tier = ("REGIME_T68A" if profile == "regime_target6_8a_v1" else "REGIME_T68" if profile == "regime_target6_8_v1" else "REGIME_T67C" if profile == "regime_target6_7c_v1" else "REGIME_T67D" if profile == "regime_target6_7d_v1" else "REGIME_T67B" if profile == "regime_target6_7b_v1" else "REGIME_T67A" if profile == "regime_target6_7a_v1" else "REGIME_T67" if profile == "regime_target6_7_v1" else "REGIME_T65" if profile == "regime_target6_5_v1" else
                      "REGIME_T63B" if profile == "regime_target6_3b_v1" else
                      "REGIME_T63A" if profile == "regime_target6_3a_v1" else
                      "REGIME_T63" if profile == "regime_target6_3_v1" else TIER if profile == PROFILE else
                      "REGIME_T62" if profile in ("regime_target6_2_v1", 'regime_target6_3_v1') else "REGIME_T61")
-        self.max_price = Decimal("0.65") if profile == PROFILE else Decimal("0.75")
+        self.max_price = Decimal("0.80") if profile == "regime_target6_7d_v1" else Decimal("0.65") if profile == PROFILE else Decimal("0.75")
 
     async def _risk_conn(self, conn, loop_id, start, now):
         row = await self._row(conn,
@@ -160,11 +160,11 @@ class RegimeLiveLedger:
                      "first_market_start_ms": start, "unit_usdt": "1",
                      "halt_reason": None}
         loops = await self._rows(conn,
-            "SELECT * FROM prediction_loops WHERE strategy_profile IN (?,?,?,?,?,?,?,?,?,?,?,?,?) AND mode='LIVE'",
+            "SELECT * FROM prediction_loops WHERE strategy_profile IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?) AND mode='LIVE'",
             RISK_PROFILES)
         unknown = await self._row(conn,
             """SELECT 1 FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id
-               WHERE l.strategy_profile IN (?,?,?,?,?,?,?,?,?,?,?,?,?) AND l.mode='LIVE' AND
+               WHERE l.strategy_profile IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?) AND l.mode='LIVE' AND
                (c.pending_unknown=1 OR EXISTS(SELECT 1 FROM prediction_order_intents i
                  WHERE i.campaign_id=c.campaign_id AND i.unknown=1)) LIMIT 1""", RISK_PROFILES)
         if unknown:
@@ -183,7 +183,7 @@ class RegimeLiveLedger:
                                       unresolved=unresolved, unknown=bool(unknown))
         if not complete:
             allowed, reason = False, state.get("halt_reason") or "lane_ledger_incomplete"
-        if self.profile in ("regime_target6_3b_v1", "regime_target6_5_v1", "regime_target6_7_v1", 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1') and complete:
+        if self.profile in ("regime_target6_3b_v1", "regime_target6_5_v1", "regime_target6_7_v1", 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1') and complete:
             from .regime_t63b_risk import loop_drawdown
             from .regime_t63b_lane import FINGERPRINT as guard_fingerprint
             prefix = "t63b"
@@ -202,6 +202,10 @@ class RegimeLiveLedger:
             if self.profile == "regime_target6_7b_v1":
                 from .regime_t67b_policy import FINGERPRINT as guard_fingerprint
                 prefix = "t67b"
+
+            if self.profile == "regime_target6_7d_v1":
+                from .regime_t67d_policy import FINGERPRINT as guard_fingerprint
+                prefix = "t67d"
 
             if self.profile == "regime_target6_7c_v1":
                 from .regime_t67c_policy import FINGERPRINT as guard_fingerprint
@@ -727,7 +731,7 @@ class RegimeLiveLedger:
                 return C180ClaimResult(False, "wrong_c180_intent")
             unit = _unit(values[5])
             if self.profile not in ("regime_target6_2_v1", "regime_target6_3_v1",
-                                    "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1", "regime_target6_7_v1", 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1') and unit != 1:
+                                    "regime_target6_3a_v1", "regime_target6_3b_v1", "regime_target6_5_v1", "regime_target6_7_v1", 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1') and unit != 1:
                 return C180ClaimResult(False, "regime_requires_fixed_1_usdt")
             if values[1] != str(campaign_id) or values[0] in ("", "None"):
                 return C180ClaimResult(False, "intent_identity_mismatch")

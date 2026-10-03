@@ -1,4 +1,4 @@
-"""T6.7a execution boundaries and inherited durable risk regressions."""
+"""T6.7d execution boundaries and inherited durable risk regressions."""
 import sqlite3
 from decimal import Decimal as D
 from types import SimpleNamespace
@@ -11,13 +11,13 @@ from src.gridbot.prediction.c180_signal_runtime import C180SignalRuntime
 from src.gridbot.prediction.models import Campaign, MarketInfo
 from src.gridbot.prediction.regime_lane import FINGERPRINT as RISK_FP
 from src.gridbot.prediction.regime_live_ledger import RISK_PROFILES, RegimeLiveLedger
-from src.gridbot.prediction.regime_t67a_policy import FINGERPRINT, PROFILE, TIER
+from src.gridbot.prediction.regime_t67d_policy import FINGERPRINT, PROFILE, TIER
 from src.gridbot.prediction.repository import PredictionRepository
 from src.gridbot.prediction.strategy import StrategyConfig
 from src.gridbot.prediction.telegram import _regime_risk_text, selectable_lanes_for_market
 from src.gridbot.prediction.worker import PredictionWorker
 from test_t63 import S, book, feature
-from test_t67a import setup, state
+from test_t67d import setup, state
 
 
 @pytest.mark.parametrize('first,last,prior,initial_up,next_up,branch', [
@@ -65,7 +65,7 @@ def test_same_book_requests_worker_retry_but_stale_book_does_not(tmp_path):
     same = check(at=S+124100, seen=ready.book_at_ms)
     assert not same.allowed and same.reason == 'quote_not_new_after_ready'
     stale = check(at=S+125100, seen=ready.book_at_ms)
-    assert not stale.allowed and stale.reason == 't67a_fresh_book_required'
+    assert not stale.allowed and stale.reason == 't67d_fresh_book_required'
     assert check(book('.29', '.71', 125200), seen=ready.book_at_ms).allowed
 
 
@@ -126,17 +126,17 @@ def test_existing_selection_requires_valid_stored_signal_without_rebuilding(tmp_
             signal['frozen_fee_bps'] = '300'
         d['signal'] = json.dumps(signal)
     with sqlite3.connect(bridge.feature_db) as db:
-        db.execute('UPDATE t67a_decisions SET payload=? WHERE start=?', (json.dumps(d), S))
+        db.execute('UPDATE t67d_decisions SET payload=? WHERE start=?', (json.dumps(d), S))
     rejected = check(book('.29', '.71', 124400), seen=ready.book_at_ms)
     assert not rejected.allowed
-    assert rejected.reason == ('t67a_frozen_signal_missing' if failure == 'missing'
-                               else 't67a_frozen_signal_identity_unit_fee_mismatch')
+    assert rejected.reason == ('t67d_frozen_signal_missing' if failure == 'missing'
+                               else 't67d_frozen_signal_identity_unit_fee_mismatch')
     persisted = state(bridge)
     assert persisted['selected'] and persisted['selected_at_ms'] == S+124000
     assert persisted.get('signal') == d.get('signal')
 
 
-def test_t67a_profile_keeps_fixed_units_risk_and_suppresses_sibling_lanes():
+def test_t67d_profile_keeps_fixed_units_risk_and_suppresses_sibling_lanes():
     assert PROFILE in PredictionWorker._selectable_strategy_profiles()
     assert PROFILE in dict(selectable_lanes_for_market('BTCUSDT'))
     assert PROFILE not in dict(selectable_lanes_for_market('ETHUSDT'))
@@ -146,7 +146,7 @@ def test_t67a_profile_keeps_fixed_units_risk_and_suppresses_sibling_lanes():
     assert cfg.max_initial_attempts == 1
     assert cfg.max_scale_in_attempts == cfg.max_hedge_attempts == 0
     assert not cfg.protective_exit_enabled and not cfg.profit_lock_enabled
-    assert RegimeLiveLedger(None, profile=PROFILE).tier == TIER == 'REGIME_T67A'
+    assert RegimeLiveLedger(None, profile=PROFILE).tier == TIER == 'REGIME_T67D'
     worker = object.__new__(PredictionWorker)
     worker._selected_strategy_profile = PROFILE
     worker._fav_p3_arm_override = 'live'
@@ -160,7 +160,7 @@ def test_t67a_profile_keeps_fixed_units_risk_and_suppresses_sibling_lanes():
 
 
 @pytest.mark.parametrize('profile,called', [(PROFILE, True), ('regime_target6_7_v1', False)])
-def test_original_cutoff_signal_restored_only_for_t67a(tmp_path, profile, called):
+def test_original_cutoff_signal_restored_only_for_t67d(tmp_path, profile, called):
     path = tmp_path/'prediction.sqlite3'
     with sqlite3.connect(path) as db:
         db.execute('CREATE TABLE prediction_runtime_config(config_key TEXT PRIMARY KEY,config_value_json TEXT)')
@@ -178,7 +178,7 @@ def test_original_cutoff_signal_restored_only_for_t67a(tmp_path, profile, called
     assert runtime.signals.on_frozen.called is called
 
 
-def test_unknown_selection_does_not_reuse_cached_t67a_for_paid_original():
+def test_unknown_selection_does_not_reuse_cached_t67d_for_paid_original():
     runtime = object.__new__(C180SignalRuntime)
     runtime.prediction_db = 'unused'
     runtime.signals = SimpleNamespace(on_frozen=Mock())
@@ -200,7 +200,7 @@ def test_unknown_selection_does_not_reuse_cached_t67a_for_paid_original():
 def test_structural_core_retains_old_initial_age_and_ignores_opposite_thin_depth_and_late_original(
         first, last, prior, up, down, branch):
     from src.gridbot.prediction.c180_signal_service import C180Signal
-    from src.gridbot.prediction.regime_t67a_bridge import freeze_core
+    from src.gridbot.prediction.regime_t67d_bridge import freeze_core
     from src.gridbot.prediction.regime_worker_bridge import RegimeWorkerBridge
     initial = book(up, down, 124000)
     initial['book_at_ms'] -= 1500  # Valid original initial-book age; current execution stays <=1s.
@@ -225,9 +225,9 @@ def test_structural_core_retains_old_initial_age_and_ignores_opposite_thin_depth
     (136000, False, '.40', False),
     (240000, False, '.40', False),
     (124000, True, '.40', False),
-    (124000, False, '.7501', False),
+    (124000, False, '.8001', False),
 ])
-async def test_t67a_atomic_window_hs_cap_and_duplicate_buy(tmp_path, offset, halt, price, allowed):
+async def test_t67d_atomic_window_hs_cap_and_duplicate_buy(tmp_path, offset, halt, price, allowed):
     repo = PredictionRepository(tmp_path/'db')
     await repo.initialize()
     try:
@@ -266,7 +266,7 @@ async def test_t67a_atomic_window_hs_cap_and_duplicate_buy(tmp_path, offset, hal
 
 
 @pytest.mark.asyncio
-async def test_t67a_risk_includes_every_old_profile_and_preserves_epoch(tmp_path):
+async def test_t67d_risk_includes_every_old_profile_and_preserves_epoch(tmp_path):
     repo = PredictionRepository(tmp_path/'db')
     await repo.initialize()
     try:
@@ -305,7 +305,7 @@ async def test_t67a_risk_includes_every_old_profile_and_preserves_epoch(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('old_profile', ['regime_target6_5_v1', 'regime_target6_7_v1', PROFILE])
-async def test_old_unknown_exposure_blocks_t67a_without_reset(tmp_path, old_profile):
+async def test_old_unknown_exposure_blocks_t67d_without_reset(tmp_path, old_profile):
     repo = PredictionRepository(tmp_path/'db')
     await repo.initialize()
     try:
@@ -326,7 +326,7 @@ async def test_old_unknown_exposure_blocks_t67a_without_reset(tmp_path, old_prof
 
 
 @pytest.mark.asyncio
-async def test_t67a_loop_mdd_latch_survives_restart_and_tampered_fingerprint(tmp_path):
+async def test_t67d_loop_mdd_latch_survives_restart_and_tampered_fingerprint(tmp_path):
     repo = PredictionRepository(tmp_path/'db')
     await repo.initialize()
     try:
@@ -338,15 +338,15 @@ async def test_t67a_loop_mdd_latch_survives_restart_and_tampered_fingerprint(tmp
                 LiveSettlement('loss', S+300000, D('-3.5'), S+600000, D(1)))
         value = LoopLedgerSnapshot('current', True, (), (), rows, ())
         with patch.object(ledger, '_snapshot_conn', AsyncMock(return_value=value)):
-            assert await ledger.check_risk('current', S+600000, S+724000) == (False, 't67a_loop_mdd_3.5')
-        key = 'regime_target6_7a_loop_risk:current'
+            assert await ledger.check_risk('current', S+600000, S+724000) == (False, 't67d_loop_mdd_3.5')
+        key = 'regime_target6_7d_loop_risk:current'
         guard = await repo.get_runtime_config(key)
         assert guard['fingerprint'] == FINGERPRINT and D(guard['mdd_1u']) == D('3.5')
         restarted = RegimeLiveLedger(repo, profile=PROFILE)
         empty = LoopLedgerSnapshot('current', True, (), (), (), ())
         with patch.object(restarted, '_snapshot_conn', AsyncMock(return_value=empty)):
-            assert await restarted.check_risk('current', S+900000, S+1024000) == (False, 't67a_loop_mdd_3.5')
+            assert await restarted.check_risk('current', S+900000, S+1024000) == (False, 't67d_loop_mdd_3.5')
             await repo.set_runtime_config(key, {**guard, 'fingerprint':'wrong'})
-            assert await restarted.check_risk('current', S+900000, S+1024000) == (False, 't67a_loop_risk_state_invalid')
+            assert await restarted.check_risk('current', S+900000, S+1024000) == (False, 't67d_loop_risk_state_invalid')
     finally:
         await repo.close()
