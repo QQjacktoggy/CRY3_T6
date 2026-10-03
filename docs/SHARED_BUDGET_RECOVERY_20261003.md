@@ -11,3 +11,13 @@ T6.8a loop:1790957685357 在74/100時停止登錄新市場，最後成功API約2
 修正繼承PR17的取消後成交對帳。已補回的order26100200001934825334 +0.5335875U不再次補帳。部署前後保護金融帳本，回復只涉及源碼/manifest/pin，不整庫回復交易DB。策略、C0.65、FirstUP5bp與所有既有風控不變。
 
 驗證：相關140項通過；全套1689 passed、1 skipped、6 subtests passed。涵蓋SQLite鎖後200及418/429跨重啟、journal刪除競爭、未知/損壞journal阻擋、恢復錯誤loop/策略/目標/已停止拒絕、原loop74/100不新建/延長。
+
+## VM部署與恢復
+
+PR18 runtime commit `66bb6fd8174369d34b1d7532e5956911ce7fa1e0`，GitHub CI成功；VM隔離候選40項測試通過。核對本地及官方零曝險後部署，完整141檔fingerprint `efec6d48a10691d05c9cef29c018c5a8814b4e83a16c7f1429a0bc233a47761a`。保留deployed release.py全inventory，僅增加late_fill_repair.py及操作員啟動script；沒有覆蓋VM既有控制模組。
+
+source/manifest/pin備份：VM `/home/jack_shih/cry3/prediction/shared-budget-rollback-1790986888683`。部署前後金融帳本雜湊一致。正式記錄位於 `prediction/shared-budget-fix-staged-20261003/deployment.json`、`resume-completed.json`。
+
+一次性授權必須放在服務允許寫入的 `prediction/data/operators/` 下；直接使用資料碟的其他目錄會被systemd寫入限制阻擋。最初授權未消耗且未啟動Live，已撤銷。有效授權已消耗，暫時ExecStart覆寫已刪除且daemon-reload，常態autoarm/autoloop仍false。
+
+2026-10-03 08:30台灣時間，原loop從74前進到75/100，08:25市場已DONE、08:30市場已登錄OBSERVE；主worker PID2530673的API/行情心跳正常，無HS。feature PID2515081及signal PID2515078未重啟。漏記+0.5335875U仍在，尚未成交新單時PnL仍+2.80226525U。剩餘場次仍須通過原風控，另有完成追蹤，不自動建立下一輪。
