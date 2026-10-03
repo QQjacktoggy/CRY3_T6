@@ -2297,6 +2297,25 @@ class PredictionTelegramService:
         await self._reply(update, "找不到這個操作，請使用選單。")
 
 
+    async def cmd_firstreport(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Read the independent First observer snapshot; no runtime operations."""
+        if await self._deny_if_unauthorized(update):
+            return
+        args = list(getattr(context, "args", None) or [])
+        if len(args) > 1 or (args and args[0] not in ("20", "40", "100")):
+            await self._reply(update, "用法：/firstreport [20|40|100]；預設最近20場。")
+            return
+        window = int(args[0]) if args else 20
+        try:
+            from pathlib import Path
+            root = Path(__file__).resolve().parents[3]
+            text = await asyncio.to_thread(_format_first_observer_report, root, window, now_ms=self._now_ms())
+            await self._reply(update, text, parse_mode=None)
+        except Exception:
+            # Do not expose files, signed URLs or credentials to chat.
+            LOGGER.warning("first_observer_report_unavailable")
+            await self._reply(update, "【First三市場觀測】暫時無法讀取；這不代表沒有訊號或零損益。")
+
     async def cmd_predict_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show the selected T6.7 family; historical lanes stay out of it."""
         if await self._deny_if_unauthorized(update):
@@ -2356,6 +2375,7 @@ def build_prediction_handlers(service: PredictionTelegramService) -> tuple[Any, 
     """Build handlers without constructing an Application or reading config."""
 
     return (
+        CommandHandler("firstreport", service.cmd_firstreport),
         CommandHandler("report", service.cmd_predict_report),
         CommandHandler("predict_report", service.cmd_predict_report),
         CommandHandler("shadow_report", service.cmd_predict_shadow_report),
@@ -2903,3 +2923,55 @@ def _format_guard_shadow_supplements(root, *, now_ms=None):
         except Exception:
             messages.append(f'<b>{title}</b>\n⚠️ 暫時無法讀取；其他 lane 報告不受影響。')
     return messages
+
+
+def _format_first_observer_report(root, window=20, *, now_ms=None):
+    """Bounded atomic JSON snapshot from independent observer, no DB writes."""
+    import json
+    from pathlib import Path
+    from datetime import datetime
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+    if window not in (20, 40, 100):
+        raise ValueError("first_report_window")
+    path = Path(root) / "prediction/data/first-multimarket-v1/latest.json"
+    with path.open("rb") as stream:
+        raw = stream.read(2 * 1024 * 1024 + 1)
+    if len(raw) > 2 * 1024 * 1024:
+        raise ValueError("first_report_size")
+    p = json.loads(raw)
+    expected = "5c521aaf03e2f4ec23914a96fe8f643aaa20747be7b85f3147be02b04a234a7f"
+    if p.get("mode") != "QUOTE_SIMULATION_NO_REAL_ORDERS" or p.get("policy") != expected:
+        raise ValueError("first_report_provenance")
+    at = int(p["at_ms"])
+    current = _now_ms() if now_ms is None else now_ms
+    if at > current + 1000:
+        raise ValueError("first_report_future")
+    stamp = datetime.fromtimestamp(at/1000, ZoneInfo("Asia/Taipei")).strftime("%m/%d %H:%M:%S")
+    lines = [f"First 三市場觀測｜最近{window}場", f"更新：{stamp}（台灣）", "1U報價模擬，非真實成交；未套Live風控。", ""]
+    health = p.get("health") or {}
+    if current-at > 120000 or current-int(health.get("at_ms", 0)) > 120000:
+        lines.extend(["⚠ 觀測資料已過期，以下為舊快照，不能視為目前市況。", ""])
+    group = p["rolling"][str(window)]
+    for symbol in ("BTCUSDT", "ETHUSDT", "BNBUSDT"):
+        m = group[symbol]["ALL"]
+        lines.append(f"【{symbol[:-4]}】實際{m['scheduled_windows']}/{window}場｜K線{m['feature_complete']}｜雙向盤口{m['initial_books_complete']}")
+        lines.append(f"訊號{m['signal']} → 趨勢{m['trend_pass']} → 初始{m['initial_quote_eligible']} → 重檢{m['quote_candidates']}")
+        rate = "—" if m["quote_candidate_rate"] is None else f"{m['quote_candidate_rate']*100:.1f}%"
+        lines.append(f"報價候選率 {rate}（非fill率）")
+        for side, label in (("ALL", "合計"), ("UP", "First UP"), ("DOWN", "First DOWN")):
+            row = group[symbol][side]
+            wr = "—" if row["wr"] is None else f"{row['wr']*100:.1f}%"
+            net = "—" if not row["settled"] else f"{Decimal(row['net_pnl']):+.4f}U"
+            mdd = "—" if not row["settled"] else f"{Decimal(row['mdd']):.4f}U"
+            suffix = "（待結，尚未完整）" if row["pending"] else ""
+            lines.append(f"{label}：{row['wins']}勝{row['losses']}負{row['draws']}平｜待結{row['pending']}")
+            lines.append(f"WR {wr}｜PnL {net}｜MDD {mdd}{suffix}")
+        if m["missing_features"]:
+            lines.append(f"⚠ 缺K線{m['missing_features']}場，保留分母。")
+        lines.append("")
+    lines.extend(["官方胜方結算；WR排除平局、PnL包含平局。", "ETH/BNB沿用BTC First條件，尚未驗證Live適用性。", "不自動選幣或開單。"])
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        raise ValueError("first_report_length")
+    return text
