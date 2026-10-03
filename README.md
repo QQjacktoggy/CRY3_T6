@@ -25,6 +25,10 @@ T6.8 保留原七路 Live 與風控，新增第八路核心後 180 秒 Reference
 
 ## 安裝與離線驗證
 
+ETH T6.7c 的獨立實驗性 Shadow 入口、官方規格 gate、資料隔離與 20–50 窗口工程驗收見
+[ETH T6.7c Shadow](docs/ETH_T6_7C_SHADOW.md)。此 profile 沒有 Live、intent 或下單能力；
+不使用舊 ETH FAV 選項，也不表示已部署或啟動 ETH。
+
 ```sh
 python -m venv .venv
 . .venv/bin/activate
