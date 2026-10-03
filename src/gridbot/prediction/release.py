@@ -45,6 +45,7 @@ _REQUIRED_FIXED_RELEASE_PATHS = (
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/train.py',
     'scripts/__init__.py',
     'scripts/build_t6_release.py',
+    'scripts/resume_prediction_existing_loop.py',
     'scripts/prediction_paired8_ledger.py',
     'scripts/prediction_paired8_policy.py',
     'scripts/prediction_value9_parent_frozen.py',

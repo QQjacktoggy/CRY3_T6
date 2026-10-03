@@ -288,7 +288,13 @@ class _CooldownJournal:
                 continue
             if not path.name.startswith('request-'):
                 return MAX_DEADLINE_MS
-            fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+            try:
+                fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                # A peer completed/removed this record after enumeration.
+                # Missing files carry no unknown response; existing pending
+                # or malformed records below still deny all admission.
+                continue
             try:
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     return MAX_DEADLINE_MS
@@ -306,7 +312,7 @@ class _CooldownJournal:
                     return MAX_DEADLINE_MS
                 deadline = max(deadline, value)
                 if value <= now:
-                    path.unlink()
+                    path.unlink(missing_ok=True)
             finally:
                 os.close(fd)
         return deadline
@@ -357,6 +363,7 @@ class SharedRequestBudget:
     """
     def __init__(self,path,*,clock_ms=None,limit=1200,reserve=300,management_reserve=200):
         self._metadata_unavailable = False
+        self._last_metadata_fault = None
         self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True)
         self.clock_ms=clock_ms or (lambda:int(time.time()*1000))
         self.limit=int(limit);self.reserve=int(reserve);self.management_reserve=int(management_reserve)
@@ -454,7 +461,11 @@ class SharedRequestBudget:
                 c.execute('UPDATE weight_meta SET backoff_until_ms=max(backoff_until_ms,?),headers_json=? WHERE id=1',
                           (deadline,json.dumps({'at_ms':now,'status':status,'headers':allowed})))
         except sqlite3.Error:
-            self._metadata_unavailable = True  # Preserve POST outcome; deny subsequent requests.
+            # The fsynced journal above already preserves the exact response
+            # cooldown (or an unknown/corrupt record). Re-read SQLite on the
+            # next admission rather than permanently latching a temporary lock.
+            # A failed journal write still sets _metadata_unavailable above.
+            self._last_metadata_fault = dict(code='response_metadata_db_unavailable', at_ms=now)
     def health(self):
         if self._metadata_unavailable:
             return dict(limit=self.limit, remaining=0, error='shared_budget_unavailable')
@@ -468,5 +479,6 @@ class SharedRequestBudget:
             backoff = max(backoff, self._cooldowns.deadline(now))
             return dict(limit=self.limit,used=used,remaining=max(0,self.limit-used),reserve=self.reserve,
                         management_reserve=self.management_reserve,backoff_until_ms=backoff,
-                        by_priority=by_priority,by_process=by_process,last_response=json.loads(headers),scope='shared_prediction_clients')
+                        by_priority=by_priority,by_process=by_process,last_response=json.loads(headers),scope='shared_prediction_clients',
+                        last_metadata_fault=self._last_metadata_fault)
         except (sqlite3.Error, OSError, ValueError):return dict(limit=self.limit,remaining=0,error='shared_budget_unavailable')
