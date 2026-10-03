@@ -1739,6 +1739,9 @@ class PredictionWorker:
             with request_budget_scope("exit" if emergency else ("management" if management else "normal"), shared_prepaid):
                 result = await asyncio.to_thread(invoke)
         except SharedBudgetDeferred as exc:
+            self._trace_event('api_deferred', campaign_id=trace_cid, method=method_name,
+                              intent_id=trace_iid, duration_ns=time.monotonic_ns()-trace_start,
+                              error_type='SharedBudgetDeferred', **trace_fields)
             raise PredictionRateLimitDeferred(method_name, exc.health) from exc
         except Exception as exc:
             self._trace_event('api_error',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,error_type=type(exc).__name__,**trace_fields)
@@ -2468,7 +2471,7 @@ class PredictionWorker:
             "live_rearm_required": live_rearm_required,
         }
 
-    async def start_loop(self, count: int = 10) -> dict[str, Any]:
+    async def start_loop(self, count: int = 10, *, expected_loop_id: str | None = None) -> dict[str, Any]:
         maximum = max(1, int(getattr(self.settings, "max_loop_limit", 50)))
         count = int(count)
         if count < 1 or count > maximum:
@@ -2492,6 +2495,17 @@ class PredictionWorker:
                 await self._ensure_shadow_window()
             await self.reconcile()
             existing = await self.repository.get_active_loop()
+            if expected_loop_id is not None and (
+                not existing or str(existing.get('loop_id')) != expected_loop_id
+                or existing.get('state') != 'RUNNING'
+                or str(existing.get('mode') or '').upper() != self.mode.upper()
+                or existing.get('strategy_profile') != self._selected_strategy_profile
+                or bool(existing.get('new_entries_stopped'))
+                or int(existing.get('target', 0)) != count
+                or int(existing.get('completed', 0)) >= count
+            ):
+                return {**self._status(), 'action_denied': True,
+                        'reason': 'authorized existing loop identity/state/target changed'}
             active_metadata = getattr(self.repository, "get_active_campaign_metadata", None)
             if callable(active_metadata):
                 records = await active_metadata()
@@ -7677,6 +7691,21 @@ class PredictionWorker:
             pass
         return True
 
+    async def _record_discovery_deferred(self, exc: PredictionRateLimitDeferred) -> None:
+        now = self._now_ms()
+        if now - getattr(self, '_discovery_deferred_logged_at_ms', 0) < 60_000:
+            return
+        self._discovery_deferred_logged_at_ms = now
+        health = exc.health if isinstance(exc.health, Mapping) else {}
+        payload = {'at_ms': now, 'loop_id': self._loop_id,
+                   'reason': 'discovery_request_deferred',
+                   'budget_error': health.get('error'),
+                   'used': health.get('used'), 'remaining': health.get('remaining'),
+                   'backoff_until_ms': health.get('backoff_until_ms')}
+        await self.repository.record_risk_event('DISCOVERY_REQUEST_DEFERRED', 'WARNING',
+            'Market discovery deferred by request protection', payload=payload)
+        await self.repository.set_runtime_config('prediction_discovery_deferred', payload)
+
     async def _run_market_once(self) -> bool:
         if await self._check_loop_loss_guard():
             return False
@@ -7706,7 +7735,8 @@ class PredictionWorker:
                     l2_category=self.settings.market_l2_category,
                     limit=self.settings.discovery_limit,
                 )
-            except PredictionRateLimitDeferred:
+            except PredictionRateLimitDeferred as exc:
+                await self._record_discovery_deferred(exc)
                 return False
             self._discovery_cache = (now, markets_payload)
         data = _data(markets_payload)

@@ -317,6 +317,13 @@ class PredictionController:
             return {**(await self.status()), **blocked}
         return await self._invoke("start_loop", count)
 
+    async def resume_existing_loop(self, loop_id: str, target: int) -> Any:
+        """Explicit operator recovery; never create or extend a loop."""
+        blocked = await self._prepare_live_start()
+        if blocked is not None:
+            return blocked
+        return await self._invoke('start_loop', int(target), expected_loop_id=str(loop_id))
+
     async def one_run(self) -> Any:
         """Start one guarded market cycle through the worker."""
 
