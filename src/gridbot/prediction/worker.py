@@ -3666,6 +3666,45 @@ class PredictionWorker:
                 wallet_reconciled_at_ms=self._now_ms(), now_ms=self._now_ms())
         return row
 
+    async def _recheck_cancelled_before_settlement(self, campaign: Campaign) -> bool:
+        """A cancel snapshot is provisional until rechecked at market end.
+
+        This read runs only for submitted terminal cancellations, never for
+        locally rejected/unsubmitted intents, and never authorizes another BUY.
+        """
+        orders = await self.repository.submitted_cancelled_orders(campaign.campaign_id)
+        if not orders:
+            return True
+        if self._now_ms() < campaign.market.end_time_ms:
+            return False
+        for item in orders:
+            intent = OrderIntent(
+                intent_id=item['intent_id'], campaign_id=campaign.campaign_id,
+                action=ActionType(item['action']), outcome=OutcomeSide(item['outcome']),
+                order_side=OrderSide(item['order_side']), amount=Decimal(item['amount']),
+                limit_price=Decimal(item['limit_price']), created_at_ms=item['created_at_ms'],
+                ttl_ms=item['ttl_ms'], order_id=item['order_id'], tier=item.get('tier'))
+            try:
+                rows = await self._history_rows(intent, statuses=('CLOSED',),
+                                                target_order_id=item['order_id'])
+            except (PredictionClientError, PredictionRateLimitDeferred):
+                return False
+            matches = [r for r in rows if str(r.get('orderId') or r.get('order_id') or '') == item['order_id']]
+            if not matches:
+                return False
+            row = max(matches, key=lambda r: (
+                Decimal(str(r.get('filledShareQty') or r.get('filledShares') or '0')),
+                int(r.get('modifyTime') or r.get('terminalTime') or 0)))
+            old = json.loads(item['order_payload_json'])
+            if any(str(row.get(k) or '') != str(old.get(k) or '')
+                   for k in ('marketId', 'marketTopicId', 'side', 'outcome')):
+                return False
+            if str(row.get('status') or '').upper() not in {
+                    'FILLED', 'CLOSED', 'CANCELLED', 'CANCELED', 'EXPIRED', 'FAILED'}:
+                return False
+            await self.apply_order_snapshot(campaign, row, outcome=intent.outcome, intent=intent)
+        return True
+
     async def settle_campaign(self, campaign: Campaign) -> dict[str, Any]:
         """Persist settlement/PnL and redeem only after a confirmed close."""
 
@@ -3681,6 +3720,12 @@ class PredictionWorker:
         if not self.settings.wallet_address:
             return {"campaign_id": campaign.campaign_id, "status": "SHADOW_PENDING"}
         prior = await self.repository.get_settlement(campaign.campaign_id)
+        # Already-finalized history is changed only by the explicit atomic
+        # repair tool; applying a late fill here would leave stale zero PnL.
+        if not (isinstance(prior, Mapping) and str(prior.get('status', '')).upper() == 'SETTLED'):
+            if not await self._recheck_cancelled_before_settlement(campaign):
+                return {"campaign_id": campaign.campaign_id,
+                        "status": "CANCELLED_FILL_RECHECK_PENDING"}
         if isinstance(prior, Mapping) and str(prior.get("status", "")).upper() == "SETTLED":
             # Rebuild any C180 gate observation left incomplete by a crash
             # after the atomic finalizer committed and before the next line.
