@@ -17,6 +17,8 @@ T6.8 的原七路 Live 保留、Reference 180 秒 Live 補位與安全驗證見 
 
 T6.8a 的 First UP 前15分鐘5bp篩選與核心占位見 [T6.8a](T6_8A.md)；已安裝版本與資料碟整理紀錄見 [2026-10-02 部署](T6_8A_DEPLOYMENT_20261002.md)。安裝不等於啟動 Live，仍須重新核對 profile／loop。
 
+T6.7d 的原七路保留、Flat 補位與安全部署規則見 [T6.7d](T6_7D.md)。安裝不等於啟動 Live。
+
 ## 目標
 
 - VM：`cry3jack`

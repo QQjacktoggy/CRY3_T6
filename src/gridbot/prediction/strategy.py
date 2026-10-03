@@ -843,7 +843,7 @@ class StrategyConfig:
                 pair_cost_min_floor=Decimal("0.05"),
                 pair_cost_total_cost_bps=Decimal("150"),
             )
-        if selected in {C180_FAVORITE_HOLD_PROFILE, "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1'}:
+        if selected in {C180_FAVORITE_HOLD_PROFILE, "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1'}:
             return replace(
                 cls.for_profile("fav_only_v1"),
                 profile=selected,
@@ -1111,6 +1111,10 @@ class StrategyConfig:
             from .regime_t68_policy import FINGERPRINT, POLICY
             payload["regime_policy_fingerprint"] = FINGERPRINT
             payload["t68_policy"] = POLICY
+        if self.profile == "regime_target6_7d_v1":
+            from .regime_t67d_policy import FINGERPRINT, POLICY
+            payload["regime_policy_fingerprint"] = FINGERPRINT
+            payload["t67d_policy"] = POLICY
         if self.profile == "regime_target6_7c_v1":
             from .regime_t67c_policy import FINGERPRINT, POLICY
             payload["regime_policy_fingerprint"] = FINGERPRINT
@@ -3024,7 +3028,7 @@ class PredictionStateMachine:
             return StrategyDecision(ActionType.HOLD,campaign.state,'Reversal5 requires Shadow worker')
         if self.config.profile in DIVERSE5_LANES:
             return StrategyDecision(ActionType.HOLD, campaign.state, "Diverse5 requires Shadow worker history")
-        if self.config.profile in {C180_FAVORITE_HOLD_PROFILE, "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1'}:
+        if self.config.profile in {C180_FAVORITE_HOLD_PROFILE, "regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1'}:
             return StrategyDecision(ActionType.HOLD, campaign.state,
                                     "C180 requires durable worker signal")
         if self.config.profile in {S3S5_PAIR_V1_PROFILE, "fav_only_v1", "fav_only_v2", "fav_only_v3", "fav_only_v4", "fav_p3"}:

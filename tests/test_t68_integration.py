@@ -29,7 +29,7 @@ def test_t68_is_selectable_btc_only_with_original_units_and_no_sibling_trades():
     assert PROFILE in dict(selectable_lanes_for_market('BTCUSDT'))
     assert PROFILE not in dict(selectable_lanes_for_market('ETHUSDT'))
     assert tuple(RISK_PROFILES) == tuple(live_report.RISK_PROFILES)
-    assert len(RISK_PROFILES) == len(set(RISK_PROFILES)) == 13
+    assert len(RISK_PROFILES) == len(set(RISK_PROFILES)) == 14
     cfg = StrategyConfig.for_profile(PROFILE)
     assert cfg.provenance_payload['regime_policy_fingerprint'] == FINGERPRINT
     assert cfg.provenance_payload['t68_policy']['profile'] == PROFILE
