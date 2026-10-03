@@ -32,9 +32,10 @@ def credential_config(values):
     return token,chats
 
 
-def render(block,bootstrap=False):
-    n=block['completed_windows'];start=block['start'];end=start+n*SLOT
-    title='First 三市場觀測｜啟用快照' if bootstrap else f"First 三市場觀測｜第{block['block']}批"
+def render(block,bootstrap=False,*,rolling=False):
+    n=block['completed_windows'];start=block['start'];end=block.get('end',start+n*SLOT)
+    title=('First 三市場觀測｜最近20場（自動更新）' if rolling else
+           'First 三市場觀測｜啟用快照' if bootstrap else f"First 三市場觀測｜第{block['block']}批")
     lines=[title,f'{timestamp(start)}–{timestamp(end)}（台灣）｜{n}/20場',
            '1U報價模擬，非真實成交；未套Live風控。','']
     for symbol in SYMBOLS:
@@ -60,6 +61,7 @@ def render(block,bootstrap=False):
         reasons=m.get('reasons',{})
         if reasons:lines.append('原因：'+'、'.join(f"{reason_names.get(k,'其他資料/條件阻擋')} {v}" for k,v in sorted(reasons.items(),key=lambda kv:(-kv[1],kv[0]))[:3]))
         lines.append('')
+    if rolling:lines.append('每有新場次或結算更新此訊息；每分鐘檢查。')
     lines += ['初始124–126秒凍結價/數量；128秒單次重檢。',
               '官方勝方結算；扣費一次。WR排除平局，PnL包含平局。',
               'ETH/BNB沿用BTC First條件，尚未驗證Live適用性。',
@@ -67,6 +69,26 @@ def render(block,bootstrap=False):
     text='\n'.join(lines)
     if len(text)>3900:raise ValueError('telegram_report_too_long')
     return text
+
+
+def render_rolling(p):
+    """Use the actual rolling membership, never the latest fixed block."""
+    span=p['rolling20_range']
+    group=p['rolling']['20']
+    n=span['count']
+    if any(group[s]['ALL']['scheduled_windows']!=n for s in SYMBOLS):
+        raise ValueError('rolling_report_membership')
+    return render(dict(start=span['start'],end=span['end'],completed_windows=n,
+                       markets=group),rolling=True)
+
+
+def report_jobs(p):
+    # Reuse the already-acknowledged bootstrap message as the rolling dashboard.
+    # Keeping the outbox key also preserves UNKNOWN/SENDING duplicate protection.
+    jobs=[('bootstrap',render_rolling(p))]
+    jobs += [('block:'+str(b['start']),render(b)) for b in p['blocks20']
+             if b['completed_windows']==20]
+    return jobs
 
 
 class TelegramError(Exception):
@@ -132,7 +154,11 @@ async def deliver(db,sender,chat,key,text,at):
 def load_snapshot(directory,at):
     db=sqlite3.connect((Path(directory)/'first-observer.sqlite3').resolve().as_uri()+'?mode=ro',uri=True,timeout=1)
     try:
-        db.execute('PRAGMA query_only=ON');db.execute('BEGIN');return snapshot(db,at)
+        db.execute('PRAGMA query_only=ON');db.execute('BEGIN');p=snapshot(db,at)
+        starts=[r[0] for r in db.execute('SELECT DISTINCT start FROM windows WHERE start+?<=? ORDER BY start DESC LIMIT 20',(SLOT,at))]
+        p['rolling20_range']=dict(count=len(starts),start=min(starts) if starts else p['epoch'],
+                                 end=max(starts)+SLOT if starts else p['epoch'])
+        return p
     finally:db.close()
 
 
@@ -143,10 +169,9 @@ async def run(args):
     at=time.time_ns()//1000000;p=load_snapshot(directory,at)
     health=p.get('health')
     if not health or at-health['at_ms']>120000:raise RuntimeError('observer_heartbeat_stale')
-    blocks=p['blocks20']
     if args.preview:
-        b=blocks[-1] if blocks else dict(block=1,start=p['epoch'],completed_windows=0,markets={s:{k:v for k,v in p['rolling']['20'][s].items() if k!='INITIAL_ONLY'} for s in SYMBOLS})
-        print(render(b,True));return
+        print(render_rolling(p));return
+    jobs=report_jobs(p)
     values=dotenv_values(args.credential_file,interpolate=False)
     # Explicit environment selectors override the corresponding file, matching Live convention.
     for k in ('PREDICTION_TELEGRAM_BOT_TOKEN','PREDICTION_TELEGRAM_CHAT_IDS','PREDICTION_TELEGRAM_ALLOW_LEGACY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID'):
@@ -158,15 +183,11 @@ async def run(args):
         async with aiohttp.ClientSession(timeout=timeout,auto_decompress=False,headers={'Accept-Encoding':'identity'},trust_env=True) as session:
             sender=Sender(session,token,chats)
             for chat in chats:
-                has_initial=db.execute("SELECT status FROM messages WHERE chat=? AND report_key='bootstrap'",(chat,)).fetchone()
-                if not has_initial or has_initial[0]=='FAILED':
-                    b=blocks[-1] if blocks else dict(block=1,start=p['epoch'],completed_windows=0,markets={s:{k:v for k,v in p['rolling']['20'][s].items() if k!='INITIAL_ONLY'} for s in SYMBOLS})
-                    statuses.append(await deliver(db,sender,chat,'bootstrap',render(b,True),at))
-                complete=[b for b in blocks if b['completed_windows']==20]
+                key,text=jobs[0]
+                statuses.append(await deliver(db,sender,chat,key,text,at))
                 # At most three summaries per destination per minute after downtime.
                 changes=0
-                for b in complete:
-                    key='block:'+str(b['start']);text=render(b)
+                for key,text in jobs[1:]:
                     result=await deliver(db,sender,chat,key,text,at);statuses.append(result)
                     if result!='unchanged':changes+=1
                     if changes>=3:break

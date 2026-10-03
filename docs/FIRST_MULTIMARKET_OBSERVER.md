@@ -18,6 +18,10 @@ VM user unit：`cry3-first-multimarket-observer.service`（jack_shih）；服務
 
 collector與三個Live服務均不重啟，正式release/pin不改。TG發送狀態另存telegram-outbox.sqlite3，未知送達保留UNKNOWN不盲重送，具體處理/停用方式見source README。此授權僅發報表，不啟用跨幣交易或selector。
 
+2026-10-04依使用者回報修正自動快照不更新：原啟用快照改為「最近20場（自動更新）」，每分鐘讀取已結束的最近20個共同觀測槽，有新場次或结算才edit同一訊息。使用原bootstrap outbox key/message ID，不重置SENDING/UNKNOWN；固定20場批次摘要保留。只更新獨立sender，不重新載入Live或collector，不改正式release/pin。手動 `/firstreport` 舊回覆仍是當時快照。
+
+本地／VM各32項觀測器與TG測試通過；00:39部署後，00:40排程已自動edit，窗口從22:55–00:35前移至23:00–00:40，TG內容雜湊與新窗口一致，已發訊息數維持2、UNKNOWN／FAILED為0。Live／feature／signal／collector服務PID、正式release/pin、交易及風控帳本均未改。VM記錄在operator目錄`rolling20-staged-20261004/`；源碼及manifest備份在`rolling20-backups/1791045539586/`，回復只限sender檔案及manifest，不能回復交易DB。
+
 ## TG 手動呼叫
 
 在同一個已授權的 bot/chat 輸入 `/firstreport`，預設最近20個共同觀測槽；可用 `/firstreport 40`、`/firstreport 100`。`/report` 仍是 Live 報表。手動呼叫只讀 observer 原子 JSON 快照，不存取交易帳本、不選幣或開单。資料超過120秒標示過期；來源、policy、檔案大小或參數錯誤不顯示假零損益。

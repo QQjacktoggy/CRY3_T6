@@ -23,7 +23,9 @@ systemd用獨立user unit，Nice=10、CPUQuota=10%、MemoryMax=96M、NoNewPrivil
 
 ## 獨立 Telegram 觀測報表
 
-2026-10-03使用者明確授權連接TG。`telegram_report.py`由獨立user oneshot `cry3-first-observer-telegram.service`執行，timer每分鐘檢查已完成20槽批次，不重啟collector或Live。先發一份啟用快照，此後每20槽發摘要，晚到結算只更新該批同一message。包含BTC/ETH/BNB各自ALL/UP/DOWN、K線/盤口完整度、訊號→趨勢→初始→重檢、候選率、W/L/D、pending、WR/PnL/MDD及阻擋原因。
+2026-10-03使用者明確授權連接TG。`telegram_report.py`由獨立user oneshot `cry3-first-observer-telegram.service`執行，timer每分鐘檢查，不重啟collector或Live。2026-10-04修正啟用快照不滾動：原快照訊息改為「最近20場（自動更新）」，每有新已結束場次或晚到結算，用edit更新同一message。窗口取實際最近20個已結束共同觀測槽，不使用尚未完成的固定批次，不用當下時鐘製造無內容變化的更新。
+
+原固定每20槽摘要另保留，晚到結算只更新該批同一message。兩種報表均包含BTC/ETH/BNB各自ALL/UP/DOWN、K線/盤口完整度、訊號→趨勢→初始→重檢、候選率、W/L/D、pending、WR/PnL/MDD及阻擋原因。`/firstreport`的手動回覆是呼叫當下的快照；持續更新的是自動觀測訊息。
 
 使用`/home/jack_shih/cry3/prediction/telegram.env`既有專用token與chat allow-list；部署時已核對與正在執行的Live TG目的地相同。不得改用root `.env`中的佔位專用token，也不得自動fallback到其他bot或chat。沒有getUpdates、webhook、command或Live report變動；僅sendMessage/editMessageText，不支持其他Telegram method。
 
