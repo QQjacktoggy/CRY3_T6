@@ -330,6 +330,9 @@ class PredictionRepository:
         return await self._fetchone("SELECT * FROM prediction_loop_market_bindings WHERE loop_id=?", (loop_id,))
 
     async def loop_market_local_clear(self):
+        # Pre-migration DONE snapshots from an older closed loop are historical.
+        # Current/post-migration exposure remains blocking. The worker MUST also
+        # require official zero orders/positions before selecting/starting Live.
         if await self.get_active_campaign_metadata() or await self.load_unresolved_intents():
             return False
         orders = await self._fetchone("SELECT 1 FROM prediction_orders WHERE status NOT IN ('FILLED','CLOSED','CANCELED','CANCELLED','EXPIRED','FAILED','REJECTED') LIMIT 1")
@@ -337,7 +340,15 @@ class PredictionRepository:
         positions = await self._fetchone("""SELECT 1 FROM prediction_position_snapshots p
             WHERE p.snapshot_id=(SELECT MAX(q.snapshot_id) FROM prediction_position_snapshots q WHERE q.campaign_id=p.campaign_id)
             AND (CAST(p.up_shares AS REAL)>0 OR CAST(p.down_shares AS REAL)>0)
-            AND NOT EXISTS(SELECT 1 FROM prediction_settlements s WHERE s.campaign_id=p.campaign_id AND s.status='SETTLED') LIMIT 1""")
+            AND NOT EXISTS(SELECT 1 FROM prediction_settlements s WHERE s.campaign_id=p.campaign_id AND s.status='SETTLED')
+            AND NOT EXISTS(
+                SELECT 1 FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id
+                WHERE c.campaign_id=p.campaign_id AND c.state='DONE'
+                AND l.state IN ('DONE','CANCELLED','STOPPED') AND c.end_time_ms>0
+                AND c.end_time_ms<(SELECT applied_at_ms FROM prediction_migrations WHERE filename='026_loop_market.sql')
+                AND c.end_time_ms<(SELECT created_at_ms FROM prediction_loops ORDER BY created_at_ms DESC,rowid DESC LIMIT 1)
+                AND c.loop_id<>(SELECT loop_id FROM prediction_loops ORDER BY created_at_ms DESC,rowid DESC LIMIT 1)
+            ) LIMIT 1""")
         return not (orders or pending or positions)
 
     async def start_bound_loop(self, loop_id, target, *, mode, strategy_profile, market_symbol, market_unit):

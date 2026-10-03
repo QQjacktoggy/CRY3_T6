@@ -344,3 +344,39 @@ def test_tg_market_result_never_hides_pending_asset_after_large_status():
     text=format_runtime_result('T6.7c 整輪市場',payload)
     assert 'BTCUSDT' in text and 'BNBUSDT' in text and '已排下一輪' in text
     assert 'old_status_' not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case,clear', [
+    ('historical',True),('latest',False),('post_migration',False),
+    ('running_parent',False),('not_done',False),('missing_parent',False),
+])
+async def test_legacy_closed_snapshot_boundary(repo, case, clear):
+    from src.gridbot.prediction.models import Campaign, MarketInfo, CampaignState
+    await repo._execute("INSERT INTO prediction_loops(loop_id,target,state,created_at_ms,updated_at_ms) VALUES('old',20,'CANCELLED',1,1)")
+    if case!='latest':
+        await repo._execute("INSERT INTO prediction_loops(loop_id,target,state,created_at_ms,updated_at_ms) VALUES('recent',20,'CANCELLED',1000,1000)")
+    await repo._execute("UPDATE prediction_migrations SET applied_at_ms=500 WHERE filename='026_loop_market.sql'")
+    c=Campaign('legacy',MarketInfo('topic','up','legacy',100,200))
+    c.state=CampaignState.DONE
+    await repo.save_campaign(c,loop_id='old')
+    await repo.save_position_snapshot('legacy',{'up_shares':'2','down_shares':'0'})
+    if case=='post_migration':
+        await repo._execute("UPDATE prediction_campaigns SET end_time_ms=600")
+    elif case=='running_parent':
+        await repo._execute("UPDATE prediction_loops SET state='RUNNING' WHERE loop_id='old'")
+    elif case=='not_done':
+        await repo._execute("UPDATE prediction_campaigns SET state='CANCELLED'")
+    elif case=='missing_parent':
+        await repo._execute("UPDATE prediction_campaigns SET loop_id='missing'")
+    assert await repo.loop_market_local_clear() is clear
+    if clear:
+        w=Harness(repo)
+        w._c180_recovery_exposure_clear.return_value=False
+        assert not await w._market_boundary_clear()
+        w._c180_recovery_exposure_clear.assert_awaited_once()
+        w._c180_recovery_exposure_clear.return_value=True
+        assert await w._market_boundary_clear()
+        # Admission never rewrites an old position or fabricates settlement.
+        assert len(await repo._fetchall('SELECT * FROM prediction_position_snapshots'))==1
+        assert not await repo._fetchall('SELECT * FROM prediction_settlements')

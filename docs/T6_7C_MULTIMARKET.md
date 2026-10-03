@@ -41,3 +41,5 @@ scripts/run_t67c_asset.sh signal BNBUSDT
 T6.7c Report顯示本輪綁定幣種，七路成交／WR／PnL及Shadow從該輪幣種來源讀取，與帳戶共用20run風控分開歸因。舊輪未有symbol binding時標記「歷史未綁定」，不批次改寫交易歷史。既有 `/firstreport` 仍是三幣First子集的研究觀測，並非整套T6.7c的排名或Live績效。
 
 首版手動選幣；完整七路三幣觀測排名、自動selector與預期盈利驗證為後續工作。不將近期First模擬PnL當成整套T6.7c的預期收益。
+
+部署前以正式帳本預檢發現三筆九月舊策略已DONE、但尚留非零持倉快照且無新式settlement行。選幣檢查只對 migration026之前已結束、父loop已終止、且早於最新loop的DONE campaign視為歷史快照；最新輪、migration後的持倉及UNKNOWN仍阻擋。切換與Live開輪仍需即時官方零持倉／零未結訂單，歷史資料不改寫、不補造結算。此相容性有邊界與官方非零拒絕測試。
