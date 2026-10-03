@@ -37,7 +37,8 @@ from .regime_t68a_policy import PROFILE as T68A_PROFILE, FINGERPRINT as T68A_FIN
 
 class RegimeWorkerBridge:
     def __init__(self, repository, signal_db, exposure_checker=None, feature_db=DEFAULT_DB,
-                 profile="regime_target6_v1"):
+                 profile="regime_target6_v1", symbol=None):
+        self.symbol = symbol
         self.repository = repository
         self.signal_db = Path(signal_db)
         self.feature_db = Path(feature_db)
@@ -55,6 +56,15 @@ class RegimeWorkerBridge:
                 or (self.profile not in (T62_PROFILE, T63_PROFILE, T63A_PROFILE, T63B_PROFILE, T65_PROFILE, T67_PROFILE, T67A_PROFILE, T67B_PROFILE, T67C_PROFILE, T67D_PROFILE, T68_PROFILE, T68A_PROFILE) and unit_usdt != Decimal(1))):
             return C180Ready(False, "regime_requires_fixed_1_usdt")
         try:
+            if self.symbol is not None:
+                from .loop_market import market_matches
+                if not market_matches(market, self.symbol):
+                    return C180Ready(False, "loop_market_identity_mismatch")
+                binding = await self.repository.get_loop_market_binding(loop_id)
+                if binding and binding["symbol"] != self.symbol:
+                    return C180Ready(False, "loop_market_binding_mismatch")
+                if self.symbol != "BTCUSDT" and not binding:
+                    return C180Ready(False, "loop_market_binding_missing")
             if await self.ledger.market_is_registered(loop_id=loop_id, market=market):
                 self._registered_loop_id = str(loop_id)
                 return C180Ready(True, "regime_market_registered")
@@ -133,6 +143,16 @@ class RegimeWorkerBridge:
         return walk(snapshot["quote"][side]["ask_levels"], snapshot["fee_bps"], cap, amount)
 
     def check_signal(self, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
+        if self.symbol is not None:
+            from .loop_market import market_matches, verify_data_db
+            try:
+                if not market_matches(market, self.symbol):
+                    raise ValueError("market identity mismatch")
+                if self.symbol != "BTCUSDT":
+                    verify_data_db(self.feature_db, self.symbol)
+                    verify_data_db(self.signal_db, self.symbol)
+            except (ValueError, OSError, sqlite3.Error, AttributeError):
+                return C180Ready(False, "loop_market_data_identity_mismatch")
         if self.profile == T68A_PROFILE:
             from .regime_t68a_bridge import check_signal
             return check_signal(self, market=market, unit_usdt=unit_usdt, at_ms=at_ms,

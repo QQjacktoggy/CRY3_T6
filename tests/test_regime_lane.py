@@ -197,6 +197,7 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
             db.commit()
         await self.repo.initialize()
         await self.repo._require_conn().executescript((HERE.parent/"src/gridbot/prediction/migrations/025_regime_lane.sql").read_text())
+        await self.repo._require_conn().executescript((HERE.parent/"src/gridbot/prediction/migrations/026_loop_market.sql").read_text())
         self.ledger=RegimeLiveLedger(self.repo)
         self.market=MarketInfo("topic","up","test",START,START+SLOT_MS,up_market_id="up",down_market_id="down")
         await self.repo.start_loop("loop1",20,mode="LIVE",strategy_profile=PROFILE)

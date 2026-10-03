@@ -296,6 +296,9 @@ class PredictionController:
         except Exception as exc:  # noqa: BLE001 - status must remain readable
             return {"wallet_balances": [], "wallet_balances_error": type(exc).__name__}
 
+    async def select_market(self, symbol: str) -> Any:
+        return await self._invoke("select_market", symbol)
+
     async def select_strategy(self, profile: str) -> Any:
         """Select a strategy only while no market loop is active."""
 
@@ -760,6 +763,9 @@ class PredictionController:
                 activated = activate()
                 if inspect.isawaitable(activated):
                     await activated
+        restore_market = getattr(self.worker, "restore_loop_market", None)
+        if callable(restore_market):
+            await restore_market()
         settings = self.worker.settings
         config_hash = getattr(self.worker, "effective_config_hash", None)
         if callable(config_hash):

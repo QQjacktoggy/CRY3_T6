@@ -38,8 +38,10 @@ def state_of(first, last):
         "late_move" if b else "stall" if a else "flat")
 
 
-def freeze_features(start, candles, received_at_ms):
+def freeze_features(start, candles, received_at_ms, *, symbol="BTCUSDT"):
     """Require all 17 contiguous closed candles received before T+123."""
+    from .loop_market import symbol as valid_symbol
+    symbol = valid_symbol(symbol)
     if start <= 0 or start % SLOT_MS or not start + 120000 <= received_at_ms <= start + 123000:
         raise ValueError("feature cutoff missed")
     if len(candles) != 17:
@@ -57,7 +59,7 @@ def freeze_features(start, candles, received_at_ms):
             "last_bp": bp(candles[16][1], candles[16][4]),
             "net_bp": bp(candles[15][1], candles[16][4]),
             "prior_bp": bp(candles[0][1], candles[14][4]),
-            "source": "Binance Spot BTCUSDT 1m", "fingerprint": FINGERPRINT}
+            "source": f"Binance Spot {symbol} 1m", "symbol": symbol, "fingerprint": FINGERPRINT}
 
 
 def select_side(features, original):

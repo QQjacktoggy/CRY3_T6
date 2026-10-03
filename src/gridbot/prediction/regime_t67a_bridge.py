@@ -29,6 +29,9 @@ def freeze_core(bridge, market, features, at_ms, unit):
             or features.get('market_start_ms') != start or features.get('cutoff_ms') != start+120000
             or not start+120000 <= int(features['received_at_ms']) <= min(at_ms, start+123000)):
         raise ValueError('feature_provenance')
+    asset = getattr(bridge, 'symbol', None)
+    if asset and features.get('symbol', 'BTCUSDT') != asset:
+        raise ValueError('feature_asset_mismatch')
     initial = bridge._first_book(market, at_ms)
     if initial is None:
         raise ValueError('initial_book_missing')

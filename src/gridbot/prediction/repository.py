@@ -289,7 +289,21 @@ class PredictionRepository:
         *,
         mode: str | None = None,
         strategy_profile: str | None = None,
+        market_symbol: str | None = None,
+        market_unit: str | None = None,
     ) -> dict[str, Any]:
+        if market_symbol is not None:
+            return await self.start_bound_loop(loop_id, target, mode=mode, strategy_profile=strategy_profile,
+                                               market_symbol=market_symbol, market_unit=market_unit)
+        binding = await self.get_loop_market_binding(loop_id)
+        if binding:
+            return await self.start_bound_loop(loop_id, target, mode=mode, strategy_profile=strategy_profile,
+                market_symbol=binding["symbol"], market_unit=binding["unit"])
+        conn = self._require_conn()
+        await self._begin(conn)
+        bound_active = await self._tx_fetchone(conn, "SELECT 1 FROM prediction_loops l JOIN prediction_loop_market_bindings b ON l.loop_id=b.loop_id WHERE l.state='RUNNING' LIMIT 1")
+        if bound_active:
+            raise ValueError("another bound loop is running")
         now = _now_ms()
         normalized_mode = str(mode or "SHADOW").strip().upper() or "SHADOW"
         normalized_profile = str(strategy_profile or "").strip().lower()
@@ -311,6 +325,54 @@ class PredictionRepository:
             (loop_id, int(target), normalized_mode, normalized_profile, now, now),
         )
         return await self._fetchone("SELECT * FROM prediction_loops WHERE loop_id=?", (loop_id,)) or {}
+
+    async def get_loop_market_binding(self, loop_id):
+        return await self._fetchone("SELECT * FROM prediction_loop_market_bindings WHERE loop_id=?", (loop_id,))
+
+    async def loop_market_local_clear(self):
+        if await self.get_active_campaign_metadata() or await self.load_unresolved_intents():
+            return False
+        orders = await self._fetchone("SELECT 1 FROM prediction_orders WHERE status NOT IN ('FILLED','CLOSED','CANCELED','CANCELLED','EXPIRED','FAILED','REJECTED') LIMIT 1")
+        pending = await self._fetchone("SELECT 1 FROM prediction_campaigns WHERE pending_unknown=1 OR pending_intent_id IS NOT NULL LIMIT 1")
+        positions = await self._fetchone("""SELECT 1 FROM prediction_position_snapshots p
+            WHERE p.snapshot_id=(SELECT MAX(q.snapshot_id) FROM prediction_position_snapshots q WHERE q.campaign_id=p.campaign_id)
+            AND (CAST(p.up_shares AS REAL)>0 OR CAST(p.down_shares AS REAL)>0)
+            AND NOT EXISTS(SELECT 1 FROM prediction_settlements s WHERE s.campaign_id=p.campaign_id AND s.status='SETTLED') LIMIT 1""")
+        return not (orders or pending or positions)
+
+    async def start_bound_loop(self, loop_id, target, *, mode, strategy_profile, market_symbol, market_unit):
+        from .loop_market import PROFILE, symbol, execution_fingerprint
+        asset = symbol(market_symbol)
+        if strategy_profile != PROFILE or str(market_unit) not in ('1','2','3') or int(target) < 1:
+            raise ValueError("invalid bound loop configuration")
+        conn = self._require_conn()
+        await self._begin(conn)
+        active = await self._tx_fetchone(conn, "SELECT loop_id FROM prediction_loops WHERE state='RUNNING' AND loop_id!=? LIMIT 1", (loop_id,))
+        if active:
+            raise ValueError("another loop is already running")
+        old = await self._tx_fetchone(conn, "SELECT * FROM prediction_loops WHERE loop_id=?", (loop_id,))
+        binding = await self.get_loop_market_binding(loop_id)
+        if old:
+            if old['state'] != 'RUNNING' or old['strategy_profile'] != strategy_profile or old['mode'] != str(mode).upper():
+                raise ValueError("bound loop state/profile/mode changed")
+            if binding:
+                if (binding['symbol'] != asset or binding['unit'] != str(market_unit)
+                        or binding['target'] != int(target) or binding['execution_fingerprint'] != execution_fingerprint(asset)):
+                    raise ValueError("bound loop identity immutable")
+            elif asset != 'BTCUSDT':
+                raise ValueError("legacy loop has no asset binding")
+            await conn.commit()
+            return dict(old)
+        if not await self.loop_market_local_clear():
+            raise ValueError("unresolved local exposure")
+        now = _now_ms()
+        await conn.execute("""INSERT INTO prediction_loops
+            (loop_id,target,completed,state,mode,strategy_profile,created_at_ms,updated_at_ms)
+            VALUES(?,?,0,'RUNNING',?,?,?,?)""", (loop_id,int(target),str(mode).upper(),strategy_profile,now,now))
+        await conn.execute("INSERT INTO prediction_loop_market_bindings VALUES(?,?,?,?,?,?,?)",
+            (loop_id,asset,strategy_profile,execution_fingerprint(asset),str(market_unit),int(target),now))
+        await conn.commit()
+        return await self._fetchone("SELECT * FROM prediction_loops WHERE loop_id=?", (loop_id,))
 
     async def get_active_loop(self) -> dict[str, Any] | None:
         return await self._fetchone("SELECT * FROM prediction_loops WHERE state='RUNNING' ORDER BY updated_at_ms DESC LIMIT 1")

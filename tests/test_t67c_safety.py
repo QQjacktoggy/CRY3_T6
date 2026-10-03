@@ -139,7 +139,7 @@ def test_existing_selection_requires_valid_stored_signal_without_rebuilding(tmp_
 def test_t67c_profile_keeps_fixed_units_risk_and_suppresses_sibling_lanes():
     assert PROFILE in PredictionWorker._selectable_strategy_profiles()
     assert PROFILE in dict(selectable_lanes_for_market('BTCUSDT'))
-    assert PROFILE not in dict(selectable_lanes_for_market('ETHUSDT'))
+    assert PROFILE in dict(selectable_lanes_for_market('ETHUSDT'))
     cfg = StrategyConfig.for_profile(PROFILE)
     assert cfg.provenance_payload['regime_policy_fingerprint'] == FINGERPRINT
     assert cfg.entry_start_seconds >= 120 and cfg.entry_end_seconds == 136
