@@ -80,11 +80,18 @@ def validate_market(raw, spec, start):
 
 def identity(raw, spec, start):
     market = validate_market(raw, spec, start)
+    # Canonicalize exactly, without Decimal context rounding or exponent expansion.
+    reference = dec(market.reference_price).as_tuple()
+    digits, exponent = list(reference.digits), reference.exponent
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    canonical_reference = ''.join(str(d) for d in digits)+'e'+str(exponent)
     return dict(symbol=SYMBOL, fingerprint=FINGERPRINT, spec_sha256=digest(spec),
                 market_start_ms=start, market_end_ms=start+SLOT_MS,
                 market_topic=market.market_topic_id, market_id=market.up_market_id,
                 down_market_id=market.down_market_id, up_token_id=market.up_token_id,
-                down_token_id=market.down_token_id, reference=str(market.reference_price),
+                down_token_id=market.down_token_id, reference=canonical_reference,
                 oracle_provider=spec['oracle_provider'], oracle_feed_id=spec['oracle_feed_id'],
                 fee_bps=str(dec(spec['fee_bps'])))
 

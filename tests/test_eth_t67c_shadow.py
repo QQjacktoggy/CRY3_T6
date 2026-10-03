@@ -470,3 +470,185 @@ def test_frozen_btc_source_and_strategy_are_unchanged():
         frozen.update(path.relative_to(root).as_posix().encode()+b'\0'+path.read_bytes()+b'\0')
     # SHA of the 30 protected files at baseline a3cd398; works with shallow CI checkouts.
     assert frozen.hexdigest() == 'e7d9777798ce4f1644a6687a4d43374246043457f699f6c03320dd9a596664e4'
+
+
+@pytest.mark.parametrize('signum', ['SIGTERM', 'SIGINT', 'CANCEL', 'NATURAL'])
+@pytest.mark.parametrize('response', ['success', 'transport', 'timeout', 'ban'])
+def test_cli_signal_drains_armed_read_before_exit_without_poisoning_btc_budget(tmp_path, signum, response):
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+    from src.gridbot.prediction.rate_limit import SharedRequestBudget
+    script = r'''
+import asyncio, json, os, sys, time
+from pathlib import Path
+from src.gridbot.prediction import eth_t67c_data as data, eth_t67c_service as svc
+from src.gridbot.prediction.rate_limit import SharedRequestBudget
+base, response, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+SharedRequestBudget(base/'request-weight.sqlite3')  # Existing shared budget is fixture setup, not the ETH CLI.
+db_stat = (base/'request-weight.sqlite3').stat()
+journal_stat = (base/'request-weight.sqlite3.cooldown').stat()
+budget_identity = f'{db_stat.st_dev}:{db_stat.st_ino}:{journal_stat.st_dev}:{journal_stat.st_ino}'
+original = data.EthCatalog
+def transport(url, headers):
+    with (base/'calls').open('a') as stream: stream.write('GET\n')
+    (base/'ready').touch()  # The real shared journal is already armed.
+    deadline = time.monotonic()+10
+    while not (base/'release').exists():
+        if time.monotonic() > deadline: raise RuntimeError('fixture timeout')
+        time.sleep(.01)
+    if response == 'transport': raise OSError('fixture transport failure')
+    if response == 'timeout': raise TimeoutError('fixture socket timeout')
+    if response == 'ban': return 429, {'Retry-After':'60'}, b'{}'
+    return 200, {}, json.dumps({'data':{'marketTopics':[{'symbol':'ETHUSDT','marketTopicId':'fixture'}]}}).encode()
+data.EthCatalog = lambda key, secret, budget: original(key, secret, budget, transport=transport)
+class NoNetwork:
+    def __init__(self, *args, **kwargs): pass
+    async def start(self): pass
+    async def close(self): pass
+data.PublicTape, data.book_feed = NoNetwork, NoNetwork
+svc.now_ms = lambda: 1790532600000+50000
+if mode == 'NATURAL':
+    svc.now_ms = lambda: 1790532600000+(600000 if (base/'ready').exists() else 50000)
+elif mode == 'CANCEL':
+    original_collect = svc.collect
+    async def cancelled_collect(engine, budget_path, grace_seconds, *, stop=None, budget_identity=None):
+        task = asyncio.create_task(original_collect(engine, budget_path, grace_seconds, stop=stop,
+                                                  budget_identity=budget_identity))
+        while not (base/'ready').exists(): await asyncio.sleep(.01)
+        task.cancel()
+        try: await task
+        except asyncio.CancelledError: pass
+    svc.collect = cancelled_collect
+os.environ['PREDICTION_BINANCE_API_KEY'] = 'fixture'
+os.environ['PREDICTION_BINANCE_API_SECRET'] = 'fixture'
+svc.main(['--collect','--root',str(base/'eth-t67c-shadow'),
+          '--shared-weight-db',str(base/'request-weight.sqlite3'),'--windows','1',
+          '--expected-shared-budget-identity',budget_identity,
+          '--resolution-grace-seconds','0'])
+'''
+    proc = subprocess.Popen([sys.executable, '-c', script, str(tmp_path), response, signum],
+                            cwd=Path(__file__).resolve().parents[1], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic()+5
+        while not (tmp_path/'ready').exists():
+            assert proc.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        if signum.startswith('SIG'):
+            os.kill(proc.pid, getattr(signal, signum))
+        if signum == 'SIGKILL':
+            proc.communicate(timeout=5)
+            assert proc.returncode == -signal.SIGKILL
+            budget = SharedRequestBudget(tmp_path/'request-weight.sqlite3')
+            assert not budget.can_send_prepaid()  # Retain the unknown pending safety gate.
+            assert list((tmp_path/'request-weight.sqlite3.cooldown').glob('request-*'))
+            return
+        time.sleep(.2)
+        assert proc.poll() is None  # Must wait for the armed HTTP completion.
+        if signum.startswith('SIG'):
+            os.kill(proc.pid, getattr(signal, signum))  # Repeated signals still request graceful stop.
+        (tmp_path/'release').touch()
+        stdout, stderr = proc.communicate(timeout=5)
+        assert proc.returncode == 0, stderr.decode()
+        assert (tmp_path/'calls').read_text() == 'GET\n'  # Never start detail after stop.
+        budget = SharedRequestBudget(tmp_path/'request-weight.sqlite3')
+        assert budget.can_send_prepaid() == (response != 'ban')
+        if response != 'ban':
+            assert not list((tmp_path/'request-weight.sqlite3.cooldown').glob('request-*'))
+        assert json.loads(stdout)['mode'] == 'SHADOW'
+    finally:
+        if proc.poll() is None:
+            (tmp_path/'release').touch()
+            proc.communicate(timeout=5)
+
+
+def test_forced_kill_remains_a_shared_budget_coexistence_blocker(tmp_path):
+    test_cli_signal_drains_armed_read_before_exit_without_poisoning_btc_budget(tmp_path, 'SIGKILL', 'success')
+
+
+def test_shared_budget_requires_existing_complete_database_and_journal(tmp_path):
+    from src.gridbot.prediction.rate_limit import SharedRequestBudget
+    path = tmp_path/'request-weight.sqlite3'
+    with pytest.raises(ValueError, match='missing_database'): shared_budget(path)
+    assert not path.exists() and not Path(str(path)+'.cooldown').exists()
+    path.touch()
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match='foreign_database'): shared_budget(path)
+    assert path.read_bytes() == before
+    path.unlink()
+    SharedRequestBudget(path)
+    assert shared_budget(path).can_send_prepaid()
+    db_stat, journal_stat = path.stat(), Path(str(path)+'.cooldown').stat()
+    expected = {'database': [db_stat.st_dev, db_stat.st_ino], 'journal': [journal_stat.st_dev, journal_stat.st_ino]}
+    assert shared_budget(path, expected_identity=expected).can_send_prepaid()
+    wrong = dict(expected, database=[db_stat.st_dev, db_stat.st_ino+1])
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match='identity_mismatch'): shared_budget(path, expected_identity=wrong)
+    assert path.read_bytes() == before
+    (Path(str(path)+'.cooldown')/'ready').unlink()
+    with pytest.raises(ValueError, match='journal_unverified'): shared_budget(path)
+    assert not (Path(str(path)+'.cooldown')/'ready').exists()
+
+
+@pytest.mark.parametrize('reference', [1000, '1000.0', '1.00000E3'])
+def test_equal_numeric_reference_reconciles_but_changed_value_fails(engine, reference):
+    terminal = market()
+    terminal['variantData']['startPrice'] = reference
+    terminal['markets'][0]['status'] = 'RESOLVED'
+    terminal['markets'][0]['outcomes'][0]['winner'] = True
+    engine.resolve(S, terminal, S+301000)
+    assert engine.store.get('outcomes', S)['winner'] == 'UP'
+    terminal['variantData']['startPrice'] = '1000.01'
+    with pytest.raises(ValueError, match='identity_mismatch'): engine.resolve(S, terminal, S+302000)
+
+
+@pytest.mark.asyncio
+async def test_final_resolution_sweep_records_late_result_and_respects_shutdown(engine, monkeypatch):
+    from src.gridbot.prediction import eth_t67c_service as svc
+    monkeypatch.setattr(svc, 'now_ms', lambda: S+910000)
+    terminal = market()
+    terminal['markets'][0]['status'] = 'SETTLED'
+    terminal['markets'][0]['outcomes'][0]['isWinner'] = True
+    read_detail = AsyncMock(return_value=terminal)
+    stop = svc.StopFlag()
+    stop.set()
+    await svc.final_resolution_pass(engine, read_detail, stop)
+    read_detail.assert_not_awaited()
+    await svc.final_resolution_pass(engine, read_detail, svc.StopFlag())
+    assert engine.store.get('outcomes', S)['winner'] == 'UP'
+    assert engine.store.get('outcomes', S)['known_at_ms'] == S+910000
+    await svc.final_resolution_pass(engine, read_detail, svc.StopFlag())
+    assert read_detail.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_finite_collector_runs_final_reconciliation_after_schedulers_stop(tmp_path, monkeypatch):
+    from src.gridbot.prediction import eth_t67c_service as svc, eth_t67c_data as data
+    from src.gridbot.prediction.rate_limit import SharedRequestBudget
+    store = ShadowStore(tmp_path/'eth-t67c-shadow', spec=spec(), windows=1, input_mode='collect')
+    engine = EthShadow(store, spec())
+    engine.observe(S, S+50000, raw=market())
+    terminal = market()
+    terminal['variantData']['startPrice'] = '1000.0'
+    terminal['markets'][0]['status'] = 'RESOLVED'
+    terminal['markets'][0]['outcomes'][0]['winner'] = True
+    catalog = SimpleNamespace(markets=Mock(side_effect=AssertionError('discovery must stop')),
+                              detail=Mock(return_value=terminal))
+    monkeypatch.setattr(data, 'EthCatalog', lambda *args: catalog)
+    offline_feed = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+    monkeypatch.setattr(data, 'PublicTape', lambda *args: offline_feed)
+    monkeypatch.setattr(data, 'book_feed', lambda *args: offline_feed)
+    monkeypatch.setattr(svc, 'now_ms', lambda: S+910000)
+    budget_path = tmp_path/'request-weight.sqlite3'
+    SharedRequestBudget(budget_path)
+    db_stat, journal_stat = budget_path.stat(), Path(str(budget_path)+'.cooldown').stat()
+    expected = {'database': [db_stat.st_dev, db_stat.st_ino], 'journal': [journal_stat.st_dev, journal_stat.st_ino]}
+    try:
+        await svc.collect(engine, budget_path, 0, budget_identity=expected)
+        catalog.detail.assert_called_once_with('eth-topic')
+        assert store.get('outcomes', S)['winner'] == 'UP'
+    finally:
+        store.close()

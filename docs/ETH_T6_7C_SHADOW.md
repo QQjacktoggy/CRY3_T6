@@ -97,6 +97,7 @@ load `.env`, fall back to legacy Binance credentials, or acquire new credentials
   --collect --market-spec /absolute/path/reviewed-eth-spec.json \
   --root /absolute/path/engineering-01/eth-t67c-shadow --windows 20 \
   --shared-weight-db /absolute/path/existing-shared/request-weight.sqlite3 \
+  --expected-shared-budget-identity DBDEV:DBINODE:JOURNALDEV:JOURNALINODE \
   --resolution-grace-seconds 600
 ```
 
@@ -108,6 +109,15 @@ be the existing account/IP budget, not a second private full quota; it preserves
 BTC reserves and stops/defer reads when unavailable. Foreign trading DBs cannot
 be used as a budget file. Catalog and public K-line requests both use that same
 budget and durable response journal.
+The explicit budget DB must already exist with the complete shared schema,
+security marker and valid existing cooldown journal; ETH will not create a
+private quota on a missing/typo path. Verify the supplied canonical path is the
+one currently used by BTC. A valid unrelated existing DB cannot prove that link:
+the collector additionally requires independently read BTC DB and journal
+device/inode values via `--expected-shared-budget-identity`; mismatches fail
+before constructing the shared client. Recheck these values on the actual VM
+and BTC process filesystem view; never obtain them solely from the supplied ETH
+path and assume it is BTC's. File identity is checked again after construction.
 K-line weight is 2 per the [official Spot API documentation](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints).
 Catalog/refetch/resolution tasks run separately from
 the 100 ms decision loop and feature timer; the feature receipt timestamp is
@@ -120,7 +130,24 @@ specs and broken opening anchors produce diagnostics, never late selection.
 Parent last selection T+134.5, expiry T+136 and additive 2-second TTL remain
 unchanged. Disconnect/reconnect invalidates anchors; a new generation cannot
 reuse the pre-disconnect opening price. Official results rotate fairly across
-pending windows until bounded grace expires; unresolved outcomes remain pending.
+pending windows until bounded grace expires. On finite completion the schedulers
+stop, inflight reads drain, and one final sweep checks each eligible pending
+window once using the shared budget. Its actual response receipt time is stored;
+there is no guarantee the result was already available before the grace boundary.
+Deferred/unresolved outcomes remain pending. An operator stop starts no final
+sweep or new REST work. Decimal-equivalent official reference prices share the
+same canonical identity; a changed value is still rejected. Use a fresh run
+namespace for this corrected release; do not migrate earlier evidence in place.
+
+CLI SIGTERM/SIGINT requests stop new REST work, cancel scheduling/WS tasks and
+drain already-started HTTP threads through their response journal completion
+before releasing the namespace lock or closing the store. Signal handlers remain
+installed throughout executor drain. HTTP socket timeouts do not provide a total
+DNS/body deadline. Forced SIGKILL, OOM or power loss can still leave the existing
+shared journal pending and defer BTC API work; do not delete it or bypass its
+fail-closed policy. Validate shutdown and resource headroom before coexistence,
+and allow the service sufficient stopping time to drain; investigate a slow
+stop instead of forcing termination while BTC is using the shared budget.
 
 Telegram is optional. Only an already-existing separate ETH Shadow bot may use
 `--poll-telegram`, configured by `ETH_SHADOW_TELEGRAM_BOT_TOKEN` and

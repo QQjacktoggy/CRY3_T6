@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import signal
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -242,17 +243,50 @@ def process_lock(root):
             fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def shared_budget(path):
+def parse_budget_identity(value):
+    try:
+        db_dev, db_inode, journal_dev, journal_inode = [int(v) for v in value.split(':')]
+        if min(db_dev, journal_dev) < 0 or min(db_inode, journal_inode) <= 0:
+            raise ValueError
+        return {'database': [db_dev, db_inode], 'journal': [journal_dev, journal_inode]}
+    except (ValueError, AttributeError):
+        raise argparse.ArgumentTypeError('expected DBDEV:DBINODE:JOURNALDEV:JOURNALINODE') from None
+
+
+def shared_budget(path, *, expected_identity=None):
     from .rate_limit import SharedRequestBudget
     value = Path(path).absolute()
     if value.name != 'request-weight.sqlite3' or any(p.is_symlink() for p in (value, *value.parents)):
         raise ValueError('eth_shared_budget_path_invalid')
-    if value.exists():
-        with sqlite3.connect(value.as_uri()+'?mode=ro', uri=True) as db:
-            names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if names - {'weight_events', 'weight_meta', 'budget_security'}:
-                raise ValueError('eth_shared_budget_foreign_database')
-    return SharedRequestBudget(value)
+    if not value.is_file():
+        raise ValueError('eth_shared_budget_missing_database')
+    with sqlite3.connect(value.as_uri()+'?mode=ro', uri=True) as db:
+        names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if names != {'weight_events', 'weight_meta', 'budget_security'}:
+            raise ValueError('eth_shared_budget_foreign_database')
+        if not db.execute('SELECT 1 FROM budget_security WHERE id=1').fetchone():
+            raise ValueError('eth_shared_budget_journal_unverified')
+        if not db.execute('SELECT 1 FROM weight_meta WHERE id=1').fetchone():
+            raise ValueError('eth_shared_budget_metadata_missing')
+        db.execute('SELECT at_ms,weight,priority,pid FROM weight_events LIMIT 0')
+        db.execute('SELECT backoff_until_ms,headers_json FROM weight_meta LIMIT 0')
+    journal = Path(str(value)+'.cooldown')
+    try:
+        ready = (journal/'ready').read_bytes()
+    except OSError:
+        raise ValueError('eth_shared_budget_journal_unverified') from None
+    if journal.is_symlink() or (journal/'ready').is_symlink() or ready != b'cooldown-v1\n':
+        raise ValueError('eth_shared_budget_journal_unverified')
+    def current_identity():
+        database, cooldown = value.stat(), journal.stat()
+        return {'database': [database.st_dev, database.st_ino], 'journal': [cooldown.st_dev, cooldown.st_ino]}
+    prior = current_identity()
+    if expected_identity is not None and prior != expected_identity:
+        raise ValueError('eth_shared_budget_identity_mismatch')
+    budget = SharedRequestBudget(value)
+    if current_identity() != prior:
+        raise ValueError('eth_shared_budget_identity_changed')
+    return budget
 
 
 def next_resolution(engine, last_checked, at_ms):
@@ -265,26 +299,89 @@ def next_resolution(engine, last_checked, at_ms):
     return None
 
 
-async def collect(engine, budget_path, grace_seconds):
+@contextmanager
+def stop_signals(stop):
+    """Keep stop handlers installed through asyncio.run's executor drain."""
+    previous = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        for number in previous:
+            signal.signal(number, lambda signum, frame: stop.set())
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+class StopFlag:
+    """Polling-only, lock-free flag safe under repeated Python signal handlers."""
+    def __init__(self):
+        self.requested = False
+
+    def set(self):
+        self.requested = True
+
+    def is_set(self):
+        return self.requested
+
+
+async def final_resolution_pass(engine, read_detail, stop):
+    rows = engine.store.db.execute('SELECT start,payload FROM eth_shadow_windows ORDER BY start').fetchall()
+    for start, payload in rows:
+        if stop.is_set():
+            break
+        window = json.loads(payload)
+        if start+SLOT_MS > now_ms() or not window.get('identity') or engine.store.get('outcomes', start):
+            continue
+        try:
+            raw = await read_detail(window['identity']['market_topic'])
+            engine.resolve(start, raw, now_ms())
+        except Exception as exc:
+            engine.diagnostic('eth_final_resolution_read_'+type(exc).__name__, now_ms())
+
+
+async def collect(engine, budget_path, grace_seconds, *, stop=None, budget_identity=None):
     if engine.store.namespace['input_mode'] != 'collect':
         raise ValueError('eth_collect_namespace_mode_mismatch')
     from .eth_t67c_data import EthCatalog, PublicTape, book_feed, book_snapshot, fetch_klines
     key, secret = os.environ.get('PREDICTION_BINANCE_API_KEY', ''), os.environ.get('PREDICTION_BINANCE_API_SECRET', '')
-    catalog = EthCatalog(key, secret, shared_budget(budget_path))
+    if budget_identity is None:
+        raise ValueError('eth_shared_budget_expected_identity_required')
+    catalog = EthCatalog(key, secret, shared_budget(budget_path, expected_identity=budget_identity))
     tape, feed = PublicTape(engine), book_feed(key, secret)
-    stop = asyncio.Event()
+    stop = stop if stop is not None else StopFlag()
     current = {'raw': None, 'start': None}
+    pending_reads = set()
+
+    def read_done(task):
+        pending_reads.discard(task)
+        if not task.cancelled():
+            task.exception()  # Retrieve failures even if its scheduling task was cancelled.
+
+    async def read(function, *args, **kwargs):
+        if stop.is_set():
+            raise RuntimeError('eth_shutdown_requested')
+        def dispatch():
+            if stop.is_set():
+                raise RuntimeError('eth_shutdown_requested')
+            return function(*args, **kwargs)
+        task = asyncio.create_task(asyncio.to_thread(dispatch))
+        pending_reads.add(task)
+        task.add_done_callback(read_done)
+        # Cancel scheduling without cancelling the armed HTTP/journal completion.
+        return await asyncio.shield(task)
 
     async def discovery():
         while not stop.is_set():
             try:
                 start = now_ms()//SLOT_MS*SLOT_MS
-                data = await asyncio.to_thread(catalog.markets)
+                data = await read(catalog.markets)
                 topics = data.get('marketTopics', [])
                 for topic in topics:
+                    if stop.is_set():
+                        break
                     if topic.get('symbol') != SYMBOL:
                         continue
-                    raw = await asyncio.to_thread(catalog.detail, topic['marketTopicId'])
+                    raw = await read(catalog.detail, topic['marketTopicId'])
                     if raw.get('symbol') != SYMBOL:
                         continue
                     from .models import MarketInfo
@@ -309,7 +406,7 @@ async def collect(engine, budget_path, grace_seconds):
                 continue
             if stamp <= start+123000 and engine.store.get('features', start) is None:
                 try:
-                    candles = await asyncio.to_thread(fetch_klines, start, budget=catalog.budget)
+                    candles = await read(fetch_klines, start, budget=catalog.budget)
                     received = now_ms()  # Never freeze using the pre-request timestamp.
                     engine.observe(start, received, candles=candles, feature_received_ms=received)
                 except Exception as exc:
@@ -323,7 +420,7 @@ async def collect(engine, budget_path, grace_seconds):
             if pending:
                 start, window = pending
                 try:
-                    raw = await asyncio.to_thread(catalog.detail, window['identity']['market_topic'])
+                    raw = await read(catalog.detail, window['identity']['market_topic'])
                     engine.resolve(start, raw, now_ms())
                 except Exception as exc:
                     engine.diagnostic('eth_resolution_read_'+type(exc).__name__, now_ms())
@@ -331,10 +428,11 @@ async def collect(engine, budget_path, grace_seconds):
             await asyncio.sleep(20)
 
     tasks = []
+    completed = False
     try:
         await tape.start()
         tasks = [asyncio.create_task(fn()) for fn in (discovery, features, resolutions)]
-        while True:
+        while not stop.is_set():
             at = now_ms()
             start = at//SLOT_MS*SLOT_MS
             raw = current['raw'] if current['start'] == start else None
@@ -350,15 +448,31 @@ async def collect(engine, budget_path, grace_seconds):
             engine.observe(start, observed, raw=raw, book=book)
             count, last = engine.store.db.execute('SELECT count(*),max(start) FROM eth_shadow_windows').fetchone()
             if count >= engine.store.namespace['windows'] and at >= last+SLOT_MS+grace_seconds*1000:
+                completed = True
                 break
             await asyncio.sleep(.1)
     finally:
-        stop.set()
+        if not completed:
+            stop.set()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await tape.close()
-        await feed.close()
+        try:
+            await tape.close()
+            await feed.close()
+        finally:
+            # Never close the store/lock or exit with an armed journal HTTP thread.
+            # Socket timeout is not a total request deadline: do not impose an unsafe
+            # drain timeout which would abandon an unknown server response.
+            if pending_reads:
+                await asyncio.gather(*pending_reads, return_exceptions=True)
+            try:
+                if completed and not stop.is_set():
+                    await final_resolution_pass(engine, lambda topic: read(catalog.detail, topic), stop)
+            finally:
+                stop.set()
+                if pending_reads:
+                    await asyncio.gather(*pending_reads, return_exceptions=True)
 
 
 def main(argv=None):
@@ -370,11 +484,12 @@ def main(argv=None):
     parser.add_argument('--market-spec', type=Path)
     parser.add_argument('--windows', type=int, default=20)
     parser.add_argument('--shared-weight-db', type=Path)
+    parser.add_argument('--expected-shared-budget-identity', type=parse_budget_identity)
     parser.add_argument('--resolution-grace-seconds', type=int, default=600)
     parser.add_argument('--poll-telegram', action='store_true')
     args = parser.parse_args(argv)
-    if args.collect and not args.shared_weight_db:
-        parser.error('--collect requires an explicit shared --shared-weight-db')
+    if args.collect and (not args.shared_weight_db or not args.expected_shared_budget_identity):
+        parser.error('--collect requires --shared-weight-db and independently verified --expected-shared-budget-identity')
     if not 0 <= args.resolution_grace_seconds <= 3600 or (args.poll_telegram and not args.collect):
         parser.error('invalid grace or Telegram/replay combination')
     spec = json.loads(args.market_spec.read_text()) if args.market_spec else None
@@ -387,11 +502,15 @@ def main(argv=None):
             if args.replay:
                 replay(engine, args.replay)
             else:
-                if args.poll_telegram:
-                    from .eth_t67c_telegram import collect_with_telegram
-                    asyncio.run(collect_with_telegram(engine, args.shared_weight_db, args.resolution_grace_seconds))
-                else:
-                    asyncio.run(collect(engine, args.shared_weight_db, args.resolution_grace_seconds))
+                stop = StopFlag()
+                with stop_signals(stop):
+                    if args.poll_telegram:
+                        from .eth_t67c_telegram import collect_with_telegram
+                        asyncio.run(collect_with_telegram(engine, args.shared_weight_db, args.resolution_grace_seconds, stop=stop,
+                                                        budget_identity=args.expected_shared_budget_identity))
+                    else:
+                        asyncio.run(collect(engine, args.shared_weight_db, args.resolution_grace_seconds, stop=stop,
+                                            budget_identity=args.expected_shared_budget_identity))
             print(encode(engine.status()))
     finally:
         store.close()

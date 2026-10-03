@@ -58,14 +58,14 @@ def build_application(engine, environ=None):
     return app
 
 
-async def collect_with_telegram(engine, budget, grace):
+async def collect_with_telegram(engine, budget, grace, *, stop=None, budget_identity=None):
     from .eth_t67c_service import collect
     app = build_application(engine)
     async with app:
         await app.start()
         try:
             await app.updater.start_polling(allowed_updates=['message', 'callback_query'])
-            await collect(engine, budget, grace)
+            await collect(engine, budget, grace, stop=stop, budget_identity=budget_identity)
         finally:
             if app.updater.running:
                 await app.updater.stop()
