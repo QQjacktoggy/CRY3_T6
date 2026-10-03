@@ -63,3 +63,14 @@ def test_handler_and_command_menu():
     service=PredictionTelegramService(object(),['1'])
     assert any('firstreport' in getattr(h,'commands',()) for h in build_prediction_handlers(service))
     assert any(c.command=='firstreport' for c in prediction_bot_commands())
+
+
+def test_range_recheck_attempt_and_rejection_explained(tmp_path):
+    p=payload();p['rolling_ranges']={'20':dict(start=AT-6000000,end=AT,count=20)}
+    for group in p['rolling']['20'].values():
+        group['ALL'].update(quote_candidates=0,quote_candidate_rate=0,missing_features=1,
+            recheck_attempted=1,recheck_reasons={'price_above_frozen_cap':1})
+    save(tmp_path,p);text=_format_first_observer_report(tmp_path,now_ms=AT)
+    for label in ('統計區間','已結束市場','重檢：執行1｜通過0','高於凍結限價 1','不是0收益','不算條件不符'):
+        assert label in text
+    assert len(text)<3900

@@ -6,7 +6,39 @@ import html
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from policy import SYMBOLS, SLOT, FINGERPRINT
+from policy import SYMBOLS, SLOT, FINGERPRINT, recheck
+
+
+REASON_LABELS = {
+    'not_first_reversal':'無First反轉', 'prior_trend_filter':'前趨勢不符',
+    'price_band':'價格帶不符', 'initial_book_missing':'初始盤口缺漏',
+    'initial_inputs_missing':'初始資料缺漏', 'feature_missing':'K線取樣失敗',
+    'missed_feature_window':'錯過取樣窗口', 'insufficient_1u_depth':'初始深度不足',
+    'price_above_frozen_cap':'高於凍結限價', 'insufficient_frozen_share_depth':'限價內深度不足',
+    'quote_age':'報價過期', 'recheck_window':'超過重檢期限',
+    'recheck_data_unavailable':'重檢資料缺漏', 'recheck_not_attempted':'重檢未執行',
+    'book_stale_or_future':'盤口時間不符', 'recheck_unknown':'舊紀錄原因不足',
+}
+
+def recheck_reason(row):
+    """Explain stored evidence only. Never create a simulated fill or edit history."""
+    if not row.get('initial_quote') or row.get('sim_quote'):return None
+    if not row.get('recheck_attempted'):return 'recheck_not_attempted'
+    q=row.get('recheck_book')
+    if not q:return 'recheck_data_unavailable'
+    try:
+        if Decimal(q['levels'][0][0])>Decimal(row['initial_quote']['limit']):
+            return 'price_above_frozen_cap'
+        recheck(row['meta'],row['initial_quote'],q,q['received_at_ms'])
+    except ValueError as exc:
+        return str(exc) if str(exc) in REASON_LABELS else 'recheck_unknown'
+    except (KeyError,TypeError,ArithmeticError):return 'recheck_unknown'
+    return 'recheck_unknown'
+
+
+def rejection_summary(m):
+    counts=m.get('recheck_reasons',{})
+    return '、'.join(f"{REASON_LABELS.get(k,'其他資料/條件')} {n}" for k,n in sorted(counts.items()))
 
 
 def metrics(rows,side=None,key='sim_quote',pnl_key='sim_pnl'):
@@ -23,6 +55,8 @@ def metrics(rows,side=None,key='sim_quote',pnl_key='sim_pnl'):
         equity+=Decimal(r[pnl_key]);peak=max(peak,equity);mdd=max(mdd,peak-equity)
     return dict(scheduled_windows=len(rows),feature_complete=len(frows),initial_books_complete=sum(len(r.get('initial_books',{}))==2 for r in rows),
                 signal=len(signal),trend_pass=len(trend),initial_quote_eligible=len(initial),quote_candidates=len(candidates),settled=len(settled),
+                recheck_attempted=sum(bool(r.get('recheck_attempted')) for r in initial),
+                recheck_reasons=dict(Counter(recheck_reason(r) for r in initial if not r.get('sim_quote'))),
                 pending=len(candidates)-len(settled),wins=wins,losses=losses,draws=draws,
                 wr=round(wins/(wins+losses),6) if wins+losses else None,
                 quote_candidate_rate=round(len(candidates)/len(rows),6) if rows else None,
@@ -45,9 +79,10 @@ def snapshot(db,at):
                       'WR excludes official draws; PnL includes 0.5 payout draws and share fees.',
                       'ETH/BNB use transferred BTC First thresholds; not validated for Live.'],
              health={'at_ms':health[0],**json.loads(health[1])} if health else None,
-             rolling={},blocks20=[],current=[])
+             rolling={},rolling_ranges={},blocks20=[],current=[])
     for window in (20,40,100):
         selected=set(starts[-window:]);out['rolling'][str(window)]={}
+        out['rolling_ranges'][str(window)]=dict(count=len(selected),start=min(selected) if selected else None,end=max(selected)+SLOT if selected else None)
         for symbol in SYMBOLS:
             sr=[r for r in ended if r['symbol']==symbol and r['start'] in selected]
             out['rolling'][str(window)][symbol]={s:metrics(sr,None if s=='ALL' else s) for s in ('ALL','UP','DOWN')}

@@ -81,7 +81,7 @@ class Observer:
     def __init__(self,db,reader,directory):
         self.db=db;self.reader=reader;self.directory=Path(directory);self.stop=asyncio.Event()
         self.last_discovery=0;self.last_outcomes=0;self.last_report=0;self.last_start=None
-        self.timeline={};self.tasks=set();self.errors={};self.phase_started=set()
+        self.timeline={};self.tasks=set();self.errors={};self.phase_started=set();self.last_housekeeping=0
     def error(self,phase,exc):
         # Exception messages may contain signed URLs: retain only bounded classes/codes.
         key=phase+':'+(str(exc) if isinstance(exc,ReadError) else type(exc).__name__)
@@ -126,13 +126,14 @@ class Observer:
             row=self.row(symbol,start);row['meta']=meta;row['identified_at_ms']=received;self.save(row)
         except Exception as exc:self.error(symbol+'_metadata',exc)
     async def freeze(self,symbol,start):
+        row=self.row(symbol,start);row['feature_attempted_at_ms']=now();self.save(row)
         try:
             raw=await self.reader.get('/api/v3/klines',dict(symbol=symbol,interval='1m',startTime=start-900000,endTime=start+119999,limit=17))
-            received=now();f=features(symbol,start,raw,received);self.evidence(symbol,start,'features',raw,received)
+            received=now();self.evidence(symbol,start,'features',raw,received);f=features(symbol,start,raw,received)
             row=self.row(symbol,start);row['features']=f;row['reason']=f['reason'];self.save(row)
         except Exception as exc:
             self.error(symbol+'_features',exc)
-            row=self.row(symbol,start);row['reason']='feature_missing';self.save(row)
+            row=self.row(symbol,start);row['reason']='feature_missing';row['feature_error']=type(exc).__name__;self.save(row)
     async def capture_book(self,symbol,start,side,stage):
         meta=self.row(symbol,start)['meta']
         raw=await self.reader.get(PREFIX+'/order-book',dict(vendor='predict_fun',marketId=meta['market_id'],tokenId=meta['tokens'][side]))
@@ -190,6 +191,24 @@ class Observer:
                 self.error(symbol+'_resolution',exc)
                 row=self.row(symbol,start);row['last_resolution_check']=now();self.save(row)
         await asyncio.gather(*(one(r) for r in pending[:3]))
+    def schedule_phases(self,start,at):
+        # Dispatch once throughout the admissible window, leaving request time.
+        # Receipt deadlines remain enforced by the frozen policy functions.
+        offset=at-start
+        for symbol in SYMBOLS:
+            row=self.row(symbol,start)
+            if 120100<=offset<=122000 and not row.get('features') and not row.get('feature_attempted_at_ms'):
+                self.spawn((start,'features',symbol),self.freeze(symbol,start))
+            if 124100<=offset<=125500 and not row.get('initial_books'):
+                self.spawn((start,'initial',symbol),self.initial(symbol,start))
+            if 128100<=offset<=129000 and not row.get('sim_quote'):
+                self.spawn((start,'confirm',symbol),self.confirm(symbol,start))
+            if offset>123000 and not row.get('features') and not row.get('feature_attempted_at_ms'):
+                if row.get('feature_capture_status')!='dispatch_window_missed':
+                    row['feature_capture_status']='dispatch_window_missed'
+                    row['feature_deadline_missed_at_ms']=at
+                    row['reason']='missed_feature_window';self.save(row)
+
     async def run(self):
         from report import write_reports
         try:
@@ -208,23 +227,21 @@ class Observer:
                     self.last_start=start
                     self.phase_started={k for k in self.phase_started if k[0]>=start-SLOT}
                     self.timeline={k:v for k,v in self.timeline.items() if k[1]>=start-SLOT}
-                if shutil.disk_usage(self.directory).free<1024**3 or sum(p.stat().st_size for p in self.directory.glob('first-observer.sqlite3*'))>512*1024**2:
-                    raise RuntimeError('observer_storage_budget')
                 if not 119000<=offset<=137000:
                     if at-self.last_discovery>=30000:
                         self.last_discovery=at;self.spawn((start,'discover',at//30000),self.discover(start))
                     if at-self.last_outcomes>=60000:
                         self.last_outcomes=at;self.spawn((start,'outcomes',at//60000),self.outcomes())
-                for symbol in SYMBOLS:
-                    row=self.row(symbol,start)
-                    if 120100<=offset<=121000 and not row.get('features'):
-                        self.spawn((start,'features',symbol),self.freeze(symbol,start))
-                    if 124100<=offset<=125000 and not row.get('initial_books'):
-                        self.spawn((start,'initial',symbol),self.initial(symbol,start))
-                    if 128100<=offset<=128500 and not row.get('sim_quote'):
-                        self.spawn((start,'confirm',symbol),self.confirm(symbol,start))
-                if at-self.last_report>=15000:
-                    self.last_report=at;write_reports(self.db,self.directory,at)
+                self.schedule_phases(start,at)
+                # Full-history report serialization and filesystem work must not
+                # block the sub-second capture loop during any quote checkpoint.
+                if not 119000<=offset<=137000:
+                    if at-self.last_housekeeping>=15000:
+                        self.last_housekeeping=at
+                        if shutil.disk_usage(self.directory).free<1024**3 or sum(p.stat().st_size for p in self.directory.glob('first-observer.sqlite3*'))>512*1024**2:
+                            raise RuntimeError('observer_storage_budget')
+                    if at-self.last_report>=15000:
+                        self.last_report=at;write_reports(self.db,self.directory,at)
                 health=dict(policy=FINGERPRINT,errors=self.errors,inflight=len(self.tasks),cooldown_until_ms=self.reader.cooldown,readonly=True,selector_enabled=False)
                 with self.db:self.db.execute('INSERT OR REPLACE INTO health VALUES(1,?,?)',(at,dumps(health)))
                 try:await asyncio.wait_for(self.stop.wait(),timeout=.1 if 119000<=offset<=130000 else 1)

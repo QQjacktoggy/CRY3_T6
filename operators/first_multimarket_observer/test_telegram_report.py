@@ -133,3 +133,12 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([a[0] for a in f.calls],['sendMessage','editMessageText','editMessageText'])
 
 if __name__=='__main__':unittest.main()
+
+class DiagnosticFormatTests(unittest.TestCase):
+    def test_zero_candidates_distinguish_attempt_and_data_loss(self):
+        b=block();m=b['markets']['BTCUSDT']['ALL']
+        m.update(initial_quote_eligible=1,recheck_attempted=1,recheck_reasons={'price_above_frozen_cap':1},missing_features=1)
+        text=render(b)
+        for phrase in ('重檢：執行1｜通過0','高於凍結限價 1','不是0收益','不算條件不符'):
+            self.assertIn(phrase,text)
+        self.assertLess(len(text),3900)

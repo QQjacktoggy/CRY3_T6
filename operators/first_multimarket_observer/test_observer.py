@@ -143,3 +143,55 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('features',o.row('BTCUSDT',START));db.close()
 
 if __name__=='__main__':unittest.main()
+
+class SchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delayed_tick_uses_remaining_valid_window_once(self):
+        from unittest.mock import AsyncMock
+        with tempfile.TemporaryDirectory() as td:
+            with patch('service.now',return_value=START):db=connect(td)
+            o=Observer(db,None,td);o.freeze=AsyncMock();o.initial=AsyncMock();o.confirm=AsyncMock()
+            o.schedule_phases(START,START+121500)
+            o.schedule_phases(START,START+121600)
+            await asyncio.gather(*o.tasks)
+            self.assertEqual(o.freeze.await_count,3)
+            o.schedule_phases(START,START+125200)
+            o.schedule_phases(START,START+128800)
+            await asyncio.gather(*o.tasks)
+            self.assertEqual(o.initial.await_count,3);self.assertEqual(o.confirm.await_count,3)
+            db.close()
+
+    async def test_missed_dispatch_is_explicit_not_backfilled(self):
+        from unittest.mock import AsyncMock
+        with tempfile.TemporaryDirectory() as td:
+            with patch('service.now',return_value=START):db=connect(td)
+            o=Observer(db,None,td);o.freeze=AsyncMock()
+            o.schedule_phases(START,START+123100)
+            o.freeze.assert_not_called()
+            for s in SYMBOLS:
+                row=o.row(s,START)
+                self.assertEqual(row['feature_capture_status'],'dispatch_window_missed')
+                self.assertNotIn('features',row)
+            db.close()
+
+    async def test_late_reply_saved_for_audit_but_never_a_feature(self):
+        class Fake:
+            async def get(self,*a,**kw):return candles()
+        with tempfile.TemporaryDirectory() as td:
+            with patch('service.now',return_value=START):db=connect(td)
+            o=Observer(db,Fake(),td)
+            with patch('service.now',return_value=START+123001):await o.freeze('BTCUSDT',START)
+            row=o.row('BTCUSDT',START)
+            self.assertNotIn('features',row);self.assertEqual(row['feature_error'],'ValueError')
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM evidence WHERE stage='features'").fetchone()[0],1)
+            db.close()
+
+class DiagnosticReportTests(unittest.TestCase):
+    def test_rejection_reason_from_old_evidence_without_rewriting(self):
+        from report import recheck_reason
+        from copy import deepcopy
+        row=dict(start=START,reason='recheck_unavailable_or_rejected',meta=metadata(raw_market(),'BTCUSDT',START),
+                 features=dict(reversal=True,side='UP',trend_pass=True),initial_quote=walk([['.24','100']],200),
+                 recheck_attempted=START+128100,recheck_book=quote('.26',offset=128250))
+        original=deepcopy(row);self.assertEqual(recheck_reason(row),'price_above_frozen_cap')
+        m=metrics([row]);self.assertEqual(m['recheck_attempted'],1);self.assertEqual(m['quote_candidates'],0)
+        self.assertEqual(m['recheck_reasons'],{'price_above_frozen_cap':1});self.assertEqual(row,original)

@@ -31,3 +31,11 @@ collector與三個Live服務均不重啟，正式release/pin不改。TG發送狀
 正式145檔 fingerprint：`a4ac4135b670f07c380a92c818aa7afba4e60d5c1407653768b270885616716c`，父版 `41933712d8759688f1a3c59d4ff5f4f59200e586c5825a21f232a6e4f040ec89`。VM 候選／部署記錄：`prediction/first-observer-command-staged-20261003/`；源碼／manifest／pin 備份：`/mnt/disks/data/cry3/operators/first-observer-command-20261003/1791039706491`。不能整庫回復交易 DB。
 
 新增指令13項測試在本地與VM通過。較大的本地報表測試組在40項通過後，既有非同步報表測試的 executor 收尾卡住而中止；未宣稱完整套件通過。
+
+### 2026-10-04 報表與排程修正
+
+「重檢通過」是候選筆數，並非執行次數。報表分列重檢執行／通過及凍結限價、深度、資料缺漏原因，無樣本的WR/PnL仍顯示「—」。最近20/40/100場JSON新增實際起止時間；漏K線保留分母，不歸類為策略不符合。
+
+獨立觀測器把全歷史報表序列化及檔案空間檢查移至119–137秒以外。特徵／初始／重檢任務仍只送一次，在原有收件截止前容許排程較晚喚醒；所有收件deadline與報價規則保持原policy fingerprint。記錄feature dispatch／error／missed deadline；晚到K線僅保存稽核證據，不能補造可入場訊號。無法保證主機被長時間阻塞時不漏採；缺漏會明確留下證據。
+
+獨立服務可在Live執行時更新，部署須核對主worker、BTC/ETH/BNB來源及First以外服務PID與release manifest/pin未變，不觸碰交易DB或Live設定。`src/gridbot/prediction/telegram.py` 的手動 `/firstreport` 格式更新需主worker載入；Live loop期間只暫存候選，等安全空檔部署，不熱注入或重啟交易程序。

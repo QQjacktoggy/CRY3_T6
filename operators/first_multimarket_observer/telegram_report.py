@@ -17,7 +17,7 @@ import sqlite3
 import time
 from zoneinfo import ZoneInfo
 from policy import SYMBOLS,SLOT
-from report import snapshot
+from report import snapshot, rejection_summary
 
 
 def timestamp(ms):return datetime.fromtimestamp(ms/1000,ZoneInfo('Asia/Taipei')).strftime('%m/%d %H:%M')
@@ -41,9 +41,13 @@ def render(block,bootstrap=False,*,rolling=False):
     for symbol in SYMBOLS:
         group=block['markets'][symbol];m=group['ALL']
         lines += [f"【{symbol[:-4]}】K線 {m['feature_complete']}/{m['scheduled_windows']}｜雙向盤口 {m['initial_books_complete']}/{m['scheduled_windows']}",
-                  f"訊號{m['signal']} → 趨勢{m['trend_pass']} → 初始{m['initial_quote_eligible']} → 重檢{m['quote_candidates']}"]
+                  f"訊號{m['signal']} → 趨勢{m['trend_pass']} → 初始{m['initial_quote_eligible']} → 重檢通過{m['quote_candidates']}"]
         rate='—' if m['quote_candidate_rate'] is None else f"{m['quote_candidate_rate']*100:.1f}%"
         lines.append(f'報價候選率 {rate}（非fill率）')
+        lines.append(f"重檢：執行{m.get('recheck_attempted',0)}｜通過{m['quote_candidates']}")
+        rejected=rejection_summary(m)
+        if rejected:lines.append('未通過：'+rejected)
+        if not m['quote_candidates']:lines.append('無重檢通過樣本；WR/PnL的「—」不是0收益。')
         for side,label in (('ALL','合計'),('UP','First UP'),('DOWN','First DOWN')):
             row=group[side];wr='—' if row['wr'] is None else f"{row['wr']*100:.1f}%"
             net='—' if not row['settled'] else f"{Decimal(row['net_pnl']):+.4f}U"
@@ -52,7 +56,7 @@ def render(block,bootstrap=False,*,rolling=False):
             lines.append(f"{label}：候選{row['quote_candidates']}｜{row['wins']}勝{row['losses']}負{row['draws']}平｜待結{row['pending']}")
             lines.append(f'WR {wr}｜PnL {net}｜MDD {mdd}{suffix}')
         missing=m['missing_features']
-        if missing:lines.append(f'⚠ 缺K線{missing}場，保留分母。')
+        if missing:lines.append(f'⚠ 缺K線{missing}場，保留分母；屬資料缺漏，不算條件不符。')
         reason_names={'not_first_reversal':'無First反轉','prior_trend_filter':'前趨勢不符','price_band':'價格帶不符',
                       'initial_book_missing':'初始盤口缺漏','initial_inputs_missing':'初始資料缺漏',
                       'feature_missing':'K線取樣失敗','missed_feature_window':'錯過取樣窗口',

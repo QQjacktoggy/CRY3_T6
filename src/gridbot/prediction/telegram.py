@@ -2980,6 +2980,10 @@ def _format_first_observer_report(root, window=20, *, now_ms=None):
         raise ValueError("first_report_future")
     stamp = datetime.fromtimestamp(at/1000, ZoneInfo("Asia/Taipei")).strftime("%m/%d %H:%M:%S")
     lines = [f"First 三市場觀測｜最近{window}場", f"更新：{stamp}（台灣）", "1U報價模擬，非真實成交；未套Live風控。", ""]
+    span = p.get("rolling_ranges", {}).get(str(window), {})
+    if span.get("start") is not None and span.get("end") is not None:
+        fmt = lambda ms: datetime.fromtimestamp(ms/1000, ZoneInfo("Asia/Taipei")).strftime("%m/%d %H:%M")
+        lines.insert(2, f"統計區間：{fmt(span['start'])}–{fmt(span['end'])}（已結束市場）")
     health = p.get("health") or {}
     if current-at > 120000 or current-int(health.get("at_ms", 0)) > 120000:
         lines.extend(["⚠ 觀測資料已過期，以下為舊快照，不能視為目前市況。", ""])
@@ -2987,9 +2991,19 @@ def _format_first_observer_report(root, window=20, *, now_ms=None):
     for symbol in ("BTCUSDT", "ETHUSDT", "BNBUSDT"):
         m = group[symbol]["ALL"]
         lines.append(f"【{symbol[:-4]}】實際{m['scheduled_windows']}/{window}場｜K線{m['feature_complete']}｜雙向盤口{m['initial_books_complete']}")
-        lines.append(f"訊號{m['signal']} → 趨勢{m['trend_pass']} → 初始{m['initial_quote_eligible']} → 重檢{m['quote_candidates']}")
+        lines.append(f"訊號{m['signal']} → 趨勢{m['trend_pass']} → 初始{m['initial_quote_eligible']} → 重檢通過{m['quote_candidates']}")
         rate = "—" if m["quote_candidate_rate"] is None else f"{m['quote_candidate_rate']*100:.1f}%"
         lines.append(f"報價候選率 {rate}（非fill率）")
+        if "recheck_attempted" in m:
+            lines.append(f"重檢：執行{m['recheck_attempted']}｜通過{m['quote_candidates']}")
+        labels = {'price_above_frozen_cap':'高於凍結限價', 'insufficient_frozen_share_depth':'限價內深度不足',
+                  'recheck_not_attempted':'重檢未執行', 'recheck_data_unavailable':'重檢資料缺漏',
+                  'recheck_window':'超過重檢期限', 'quote_age':'報價過期', 'price_band':'價格帶不符'}
+        reasons = m.get('recheck_reasons', {})
+        if reasons:
+            lines.append('未通過：'+'、'.join(f"{labels.get(k,'其他資料/條件')} {n}" for k,n in sorted(reasons.items())))
+        if not m['quote_candidates']:
+            lines.append('無重檢通過樣本；WR/PnL的「—」不是0收益。')
         for side, label in (("ALL", "合計"), ("UP", "First UP"), ("DOWN", "First DOWN")):
             row = group[symbol][side]
             wr = "—" if row["wr"] is None else f"{row['wr']*100:.1f}%"
@@ -2999,9 +3013,9 @@ def _format_first_observer_report(root, window=20, *, now_ms=None):
             lines.append(f"{label}：{row['wins']}勝{row['losses']}負{row['draws']}平｜待結{row['pending']}")
             lines.append(f"WR {wr}｜PnL {net}｜MDD {mdd}{suffix}")
         if m["missing_features"]:
-            lines.append(f"⚠ 缺K線{m['missing_features']}場，保留分母。")
+            lines.append(f"⚠ 缺K線{m['missing_features']}場，保留分母；屬資料缺漏，不算條件不符。")
         lines.append("")
-    lines.extend(["官方胜方結算；WR排除平局、PnL包含平局。", "ETH/BNB沿用BTC First條件，尚未驗證Live適用性。", "不自動選幣或開單。"])
+    lines.extend(["官方勝方結算；WR排除平局、PnL包含平局。", "ETH/BNB沿用BTC First條件，尚未驗證Live適用性。", "不自動選幣或開單。"])
     text = "\n".join(lines)
     if len(text) > 3900:
         raise ValueError("first_report_length")
