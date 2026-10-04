@@ -239,3 +239,28 @@ def test_initial_not_yet_observed_stays_pending(tmp_path):
     run.tick(125000)
     run.tick(128000)
     assert run.reason('flat_quiet_favorite') == 'quoted'
+
+
+def test_f1_flat_favorite_is_a_shadow_quote(tmp_path):
+    run = Run(tmp_path, core('.2', '-.1', 2))
+    run.tick(124000)
+    run.tick(128000)
+    q = run.quotes()['flat_favorite']
+    assert q['side'] == 'UP' and q['quoted_at_ms'] == S+128000 and q['fill_status'] == 'PAPER_QUOTE_ONLY'
+    assert (q['lower'], q['upper']) == ('0.65', '0.80')
+    assert run.reason('flat_quiet_favorite') == 'flat_favorite_state'
+
+
+@pytest.mark.parametrize('first,last,confirm,reason', [
+    ('.5', '0', ('.7', '.3'), 'not_flat'),
+    ('.1', '-.5', ('.7', '.3'), 'not_flat'),
+    ('.2', '.1', ('.3', '.7'), 'favorite_tie_or_changed'),
+    ('.2', '.1', ('.64', '.36'), 'checkpoint_rejected:price_below_lower'),
+])
+def test_f1_boundaries_and_single_judgement(tmp_path, first, last, confirm, reason):
+    run = Run(tmp_path, core(first, last, 2))
+    run.tick(124000)
+    run.tick(128000, *confirm)
+    run.tick(128500)
+    assert 'flat_favorite' not in run.quotes()
+    assert run.reason('flat_favorite') == reason

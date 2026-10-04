@@ -200,8 +200,9 @@ def test_t69_live_rules_equal_parent_except_explicit_version_metadata():
                   'risk_state_key','loop_mdd_1u'):
         assert current[field] == parent[field], field
     assert current['reference_backfill_mode'] == 'live'
-    assert current['live'][:-2] == parent['live']
-    assert current['live'][-2:] == ('flat_favorite', 'reference_180_mid')
+    assert current['live'][:-1] == parent['live']
+    assert current['live'][-1:] == ('reference_180_mid',)
+    assert 'flat_favorite' in current['shadow_branches']
     assert 'reference_180_mid' not in current['shadow_branches']
 
 

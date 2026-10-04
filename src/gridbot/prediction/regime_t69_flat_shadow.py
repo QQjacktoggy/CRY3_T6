@@ -1,4 +1,4 @@
-"""T6.9 Flat F2-F4 paper routes; feature DB writes only, never an order or claim.
+"""T6.9 Flat F1-F4 paper routes; feature DB writes only, never an order or claim.
 
 Each route freezes the first observed valid checkpoint and judges it once.
 Quotes share ``t69_shadow_quotes`` so official resolution and the report
@@ -19,7 +19,7 @@ CHECKPOINTS = {
     'hold_confirmation': (180000, 181500),
 }
 # A route is final once its last needed window has passed.
-DEADLINES = {'flat_quiet_favorite': 129500, 'flat_cheap_prior': 134500, 'flat_hold_180': 181500}
+DEADLINES = {'flat_favorite': 129500, 'flat_quiet_favorite': 129500, 'flat_cheap_prior': 134500, 'flat_hold_180': 181500}
 
 
 def schema(db):
@@ -124,11 +124,23 @@ def _quiet(route, moves, points, books, identity, unit):
             or not abs(net) < dec(rule['net_abs_max_exclusive_bp'])
             or not abs(prior) < dec(rule['prior_abs_max_exclusive_bp'])):
         return 'not_quiet'
-    name = 'initial'
+    return _stable_favorite(route, 'flat_quiet_favorite', rule, points, books, identity, unit)
+
+
+def _flat(route, moves, points, books, identity, unit):
+    """F1 keeps the T6.7d rule; Shadow until regime evidence supports Live."""
+    rule = RULES['flat_favorite']
+    limit = dec(rule['minute_abs_max_exclusive_bp'])
+    if not abs(moves['first_bp']) < limit or not abs(moves['last_bp']) < limit:
+        return 'not_flat'
+    return _stable_favorite(route, 'flat_favorite', rule, points, books, identity, unit)
+
+
+def _stable_favorite(route, branch, rule, points, books, identity, unit):
     initial, confirmation = points.get('initial'), points.get('confirmation')
     if initial is None:
         # Not yet observed stays pending; a passed window is final.
-        return None if _pending(points, name) else 'initial_missing'
+        return None if _pending(points, 'initial') else 'initial_missing'
     if confirmation is None:
         return None
     if not _same_fee(initial, confirmation):
@@ -136,7 +148,7 @@ def _quiet(route, moves, points, books, identity, unit):
     side = _favorite(initial)
     if side is None or side != _favorite(confirmation):
         return 'favorite_tie_or_changed'
-    route['quote'] = _quote(identity, 'flat_quiet_favorite', books['confirmation'], confirmation,
+    route['quote'] = _quote(identity, branch, books['confirmation'], confirmation,
                             side, unit, *rule['price_band'], {})
     return 'quoted'
 
@@ -242,14 +254,17 @@ def observe(db, identity, books, spots, at_ms, unit, core_decision):
             if at_ms > start+126500 or gate not in ('core_decision_missing', 'core_unverified'):
                 route.update(terminal=True, reason=gate)
             continue
-        needed = dict(flat_quiet_favorite='confirmation', flat_hold_180='hold_confirmation').get(branch)
+        needed = dict(flat_favorite='confirmation', flat_quiet_favorite='confirmation',
+                      flat_hold_180='hold_confirmation').get(branch)
         if needed and points.get(needed) and needed not in checkpoint_books:
             # The frozen checkpoint was seen on an earlier tick; its book is
             # gone, so it is judged now from what was frozen then.
             route.update(terminal=True, reason='checkpoint_book_unavailable')
             continue
         try:
-            if branch == 'flat_quiet_favorite':
+            if branch == 'flat_favorite':
+                reason = _flat(route, moves, points, checkpoint_books, identity, unit)
+            elif branch == 'flat_quiet_favorite':
                 reason = _quiet(route, moves, points, checkpoint_books, identity, unit)
             elif branch == 'flat_cheap_prior':
                 reason = _cheap(route, moves, points, checkpoint_books, identity, unit, latest)

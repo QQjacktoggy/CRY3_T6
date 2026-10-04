@@ -64,14 +64,15 @@ def test_policy_diff_is_only_version_lineage_flat_and_markets():
     from src.gridbot.prediction.regime_t68a_policy import POLICY as parent, FINGERPRINT as parent_fp
     from src.gridbot.prediction.regime_t67d_policy import POLICY as flat_parent, FINGERPRINT as flat_fp
     changed={k for k in POLICY.keys()|parent.keys() if POLICY.get(k)!=parent.get(k)}
-    assert changed=={'profile','parent_fingerprint','live','validation_mode','flat_favorite',
+    assert changed=={'profile','parent_fingerprint','validation_mode',
                      'flat_source_fingerprint','markets','market_binding','shadow_branches','flat_shadow'}
     assert POLICY['parent_fingerprint']==parent_fp and POLICY['flat_source_fingerprint']==flat_fp
     assert POLICY['first_up_prior_min_bp']=='5'
-    rule=dict(POLICY['flat_favorite']);source=dict(flat_parent['flat_favorite'])
-    assert rule.pop('core')=='verified_empty_only; after_additions' and source.pop('core')=='verified_empty_only'
-    assert rule.pop('reference_after')=='selected_flat_blocks_180s_backfill'
-    assert rule==source
+    # F1 is Shadow-only, with the T6.7d thresholds and checkpoints.
+    rule=POLICY['flat_shadow']['flat_favorite'];source=flat_parent['flat_favorite']
+    assert POLICY['live']==parent['live'] and 'flat_favorite' not in POLICY['live']
+    assert rule['price_band']==source['price_band'] and rule['confirmation_ms']==source['confirmation_ms']
+    assert rule['minute_abs_max_exclusive_bp']==source['first_abs_max_exclusive_bp']==source['last_abs_max_exclusive_bp']
     assert POLICY['markets']==('BTCUSDT','ETHUSDT','BNBUSDT')
 
 

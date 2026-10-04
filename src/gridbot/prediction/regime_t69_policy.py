@@ -1,4 +1,4 @@
-"""T6.9 keeps T6.8a and adds the verified Flat favorite; three loop markets."""
+"""T6.9 keeps T6.8a Live, studies the Flat family in Shadow; three loop markets."""
 import hashlib
 import json
 
@@ -12,10 +12,9 @@ TIER = 'REGIME_T69'
 CORE_BRANCHES = ('core_first_down', 'core_first_up', 'core_stall_down',
                  'core_c_down', 'core_continuation_original')
 NEW_BRANCHES = ('c_mirror_up_prior', 'shallow_retracement')
-FLAT_BRANCHES = ('flat_favorite',)
-LIVE_BRANCHES = CORE_BRANCHES + NEW_BRANCHES + FLAT_BRANCHES + ('reference_180_mid',)
+LIVE_BRANCHES = CORE_BRANCHES + NEW_BRANCHES + ('reference_180_mid',)
 MARKETS = ('BTCUSDT', 'ETHUSDT', 'BNBUSDT')
-FLAT_SHADOW_BRANCHES = ('flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
+FLAT_SHADOW_BRANCHES = ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
 SHADOW_BRANCHES = ('external_lead_lag', 'reference_value') + FLAT_SHADOW_BRANCHES
 POLICY = dict(
     profile=PROFILE, version=1, parent_fingerprint=PARENT_FINGERPRINT,
@@ -37,12 +36,6 @@ POLICY = dict(
                              first_abs_to_last_abs_min='2', side='compounded_net',
                              price_band=['0.10', '0.75']),
     flat_source_fingerprint=FLAT_FINGERPRINT,
-    flat_favorite=dict(first_abs_max_exclusive_bp='0.5', last_abs_max_exclusive_bp='0.5',
-                       confirmation_ms=[128000, 129500], favorite='stable_actual_ask_no_ties',
-                       checkpoint='first_fresh_valid_immutable; no_later_price_search',
-                       price_band=['0.65', '0.80'], limit='frozen_requested_depth_limit',
-                       core='verified_empty_only; after_additions', ttl_ms=2000,
-                       reference_after='selected_flat_blocks_180s_backfill'),
     markets=MARKETS, market_binding='immutable_loop_symbol; isolated_asset_data',
     reference_checkpoints_ms=(60000, 120000, 180000, 240000),
     reference_checkpoint_grace_ms=1500,
@@ -58,6 +51,10 @@ POLICY = dict(
     shadow_branches=SHADOW_BRANCHES,
     flat_shadow=dict(
         gate='verified_empty_core; first_observed_checkpoint_immutable; records_live_overlap',
+        flat_favorite=dict(source='T6.7d_flat_favorite_rule', minute_abs_max_exclusive_bp='0.5',
+                           initial_ms=[124000, 126000], confirmation_ms=[128000, 129500],
+                           favorite='stable_actual_ask_no_ties', price_band=['0.65', '0.80'],
+                           promotion='manual_after_regime_scoreboard_evidence'),
         flat_quiet_favorite=dict(minute_abs_max_exclusive_bp='1', net_abs_max_exclusive_bp='1',
                                  prior_abs_max_exclusive_bp='5', excludes='flat_favorite_state',
                                  initial_ms=[124000, 126000], confirmation_ms=[128000, 129500],
@@ -72,6 +69,6 @@ POLICY = dict(
                            price_band=['0.70', '0.85'], after='reference_180_mid'),
     ),
     risk_state_key='regime_target6_risk_v1', loop_mdd_1u='3.5',
-    validation_mode='retained_seven_live; flat_favorite_live; reference_180_mid_live; flat_f2_f4_shadow_only; no_profit_or_fill_forecast',
+    validation_mode='retained_seven_live; reference_180_mid_live; flat_f1_f4_shadow_only; no_profit_or_fill_forecast',
 )
 FINGERPRINT = hashlib.sha256(json.dumps(POLICY, sort_keys=True).encode()).hexdigest()

@@ -194,12 +194,13 @@ def test_post_claim_controls_are_individually_diagnosable(change, expected):
     assert PredictionWorker._post_claim_admission_denials(**arguments) == expected
 
 
-def test_t69_live_composition_keeps_parent_and_adds_only_flat():
+def test_t69_live_composition_keeps_parent_and_flat_is_shadow_only():
     from src.gridbot.prediction.regime_t67c_policy import LIVE_BRANCHES as retained
     from src.gridbot.prediction.regime_t69_policy import LIVE_BRANCHES, SHADOW_BRANCHES
-    assert LIVE_BRANCHES == retained + ('flat_favorite', 'reference_180_mid')
-    assert SHADOW_BRANCHES == ('external_lead_lag', 'reference_value', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
-    assert len(LIVE_BRANCHES) == 9 and len(SHADOW_BRANCHES) == 5
+    assert LIVE_BRANCHES == retained + ('reference_180_mid',)
+    assert SHADOW_BRANCHES == ('external_lead_lag', 'reference_value', 'flat_favorite',
+                               'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
+    assert len(LIVE_BRANCHES) == 8 and len(SHADOW_BRANCHES) == 6
 
 
 @pytest.mark.parametrize('profile,offset,attempted,pending,expected', [

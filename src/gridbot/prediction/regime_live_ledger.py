@@ -143,7 +143,7 @@ class RegimeLiveLedger:
                      "REGIME_T63A" if profile == "regime_target6_3a_v1" else
                      "REGIME_T63" if profile == "regime_target6_3_v1" else TIER if profile == PROFILE else
                      "REGIME_T62" if profile in ("regime_target6_2_v1", 'regime_target6_3_v1') else "REGIME_T61")
-        self.max_price = Decimal("0.80") if profile in ("regime_target6_7d_v1", "regime_target6_9_v1") else Decimal("0.65") if profile == PROFILE else Decimal("0.75")
+        self.max_price = Decimal("0.80") if profile == "regime_target6_7d_v1" else Decimal("0.65") if profile == PROFILE else Decimal("0.75")
 
     async def _risk_conn(self, conn, loop_id, start, now):
         row = await self._row(conn,
