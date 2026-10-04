@@ -2327,6 +2327,25 @@ class PredictionTelegramService:
         await self._reply(update, "找不到這個操作，請使用選單。")
 
 
+    async def cmd_t67creport(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Read the independent full T6.7c observer; never invoke trading control."""
+        if await self._deny_if_unauthorized(update):
+            return
+        args = list(getattr(context, "args", None) or [])
+        if len(args)>2 or (args and args[0] not in ('20','40','100')) or (len(args)==2 and args[1].upper() not in ('BTC','ETH','BNB')):
+            await self._reply(update, "用法：/t67creport [20|40|100] [BTC|ETH|BNB]；預設三幣最近20場。")
+            return
+        try:
+            from pathlib import Path
+            from operators.t67c_multimarket_observer.report import load_render
+            root=Path(__file__).resolve().parents[3]
+            text=await asyncio.to_thread(load_render,root,int(args[0]) if args else 20,
+                args[1].upper()+'USDT' if len(args)==2 else None,self._now_ms())
+            await self._reply(update,text,parse_mode=None)
+        except Exception:
+            LOGGER.warning('t67c_observer_report_unavailable')
+            await self._reply(update,'【T6.7c三市場觀測】暫時無法讀取；不代表沒有訊號或零損益。')
+
     async def cmd_firstreport(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Read the independent First observer snapshot; no runtime operations."""
         if await self._deny_if_unauthorized(update):
@@ -2406,6 +2425,7 @@ def build_prediction_handlers(service: PredictionTelegramService) -> tuple[Any, 
 
     return (
         CommandHandler("firstreport", service.cmd_firstreport),
+        CommandHandler("t67creport", service.cmd_t67creport),
         CommandHandler("report", service.cmd_predict_report),
         CommandHandler("predict_report", service.cmd_predict_report),
         CommandHandler("shadow_report", service.cmd_predict_shadow_report),
@@ -2998,7 +3018,10 @@ def _format_first_observer_report(root, window=20, *, now_ms=None):
             lines.append(f"重檢：執行{m['recheck_attempted']}｜通過{m['quote_candidates']}")
         labels = {'price_above_frozen_cap':'高於凍結限價', 'insufficient_frozen_share_depth':'限價內深度不足',
                   'recheck_not_attempted':'重檢未執行', 'recheck_data_unavailable':'重檢資料缺漏',
-                  'recheck_window':'超過重檢期限', 'quote_age':'報價過期', 'price_band':'價格帶不符'}
+                  'recheck_window':'超過重檢期限', 'quote_age':'報價過期', 'price_band':'價格帶不符',
+                  'book_stale':'盤口過期','book_future':'盤口時間超前','book_stale_or_future':'盤口時間不符',
+                  'book_token_side':'盤口方向不符','book_market':'盤口市場不符',
+                  'ask_invalid':'盤口價格或數量無效','ask_sort_or_empty':'盤口空白或排序無效','crossed_book':'盤口交叉'}
         reasons = m.get('recheck_reasons', {})
         if reasons:
             lines.append('未通過：'+'、'.join(f"{labels.get(k,'其他資料/條件')} {n}" for k,n in sorted(reasons.items())))

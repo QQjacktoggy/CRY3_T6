@@ -461,6 +461,8 @@ class C180SignalRuntime:
         self._t67_last_error_ms = 0
 
     def _t67_active(self, now):
+        if os.environ.get('PREDICTION_T67C_OBSERVER_ORIGINAL_ENABLED') == '1':
+            return True
         if now-self._t67_profile_checked_ms >= 2000:
             from .regime_t67_evidence import selected_profile
             from .regime_t67_policy import PROFILE
@@ -477,6 +479,11 @@ class C180SignalRuntime:
         return self._t67_selected
 
     def _on_frozen(self, evidence):
+        # Explicitly authorized paid research; same per-symbol producer/store,
+        # no second model call or trading worker. Default gating stays unchanged.
+        if os.environ.get('PREDICTION_T67C_OBSERVER_ORIGINAL_ENABLED') == '1':
+            self.signals.on_frozen(evidence)
+            return
         # T6.7 consumes public evidence, not a paid Original/JEV decision.
         try:
             from .loop_market import signal_asset_active

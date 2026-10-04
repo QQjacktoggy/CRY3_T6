@@ -182,6 +182,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             with patch('service.now',return_value=START+123001):await o.freeze('BTCUSDT',START)
             row=o.row('BTCUSDT',START)
             self.assertNotIn('features',row);self.assertEqual(row['feature_error'],'ValueError')
+            o.flush()
             self.assertEqual(db.execute("SELECT COUNT(*) FROM evidence WHERE stage='features'").fetchone()[0],1)
             db.close()
 
@@ -195,3 +196,30 @@ class DiagnosticReportTests(unittest.TestCase):
         original=deepcopy(row);self.assertEqual(recheck_reason(row),'price_above_frozen_cap')
         m=metrics([row]);self.assertEqual(m['recheck_attempted'],1);self.assertEqual(m['quote_candidates'],0)
         self.assertEqual(m['recheck_reasons'],{'price_above_frozen_cap':1});self.assertEqual(row,original)
+
+class CapturePersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_critical_window_has_no_sqlite_write_but_retains_exact_receipt(self):
+        class Fake:
+            async def get(self,*a,**kw):return candles()
+        with tempfile.TemporaryDirectory() as td:
+            with patch('service.now',return_value=START):db=connect(td)
+            o=Observer(db,Fake(),td);writes=[]
+            db.set_trace_callback(lambda sql:writes.append(sql) if sql.startswith(('INSERT','UPDATE','COMMIT','BEGIN')) else None)
+            with patch('service.now',return_value=START+120500):await o.freeze('BTCUSDT',START)
+            self.assertEqual(writes,[])
+            self.assertEqual(o.row('BTCUSDT',START)['features']['received_at_ms'],START+120500)
+            o.flush();self.assertTrue(writes)
+            self.assertEqual(db.execute("SELECT received FROM evidence WHERE stage='features'").fetchone()[0],START+120500)
+            db.close()
+
+    async def test_old_raw_stale_book_reports_actual_reason_without_db_rewrite(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch('service.now',return_value=START):db=connect(td)
+            o=Observer(db,None,td);row=dict(symbol='BTCUSDT',start=START,end=START+SLOT,reason='recheck_unavailable_or_rejected',
+                meta=metadata(raw_market(),'BTCUSDT',START),features=dict(reversal=True,trend_pass=True,side='UP'),
+                initial_quote=walk([['.3','100']],200),recheck_attempted=START+128100)
+            o.save(row);o.evidence('BTCUSDT',START,'recheck_UP',dict(tokenId='10',outcome='Up',timestamp=START+125000,asks=[dict(price='.3',size='100')]),START+128100)
+            before=db.execute('SELECT payload FROM windows').fetchone()[0]
+            p=snapshot(db,START+SLOT)
+            self.assertEqual(p['rolling']['20']['BTCUSDT']['ALL']['recheck_reasons'],{'book_stale':1})
+            self.assertEqual(db.execute('SELECT payload FROM windows').fetchone()[0],before);db.close()
