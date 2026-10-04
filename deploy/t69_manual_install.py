@@ -143,9 +143,8 @@ def main(argv=None):
                               parent=plan['old']['release_fingerprint'], files=len(plan['candidate']['files']),
                               services=list(services), live_activated=False)))
         return
+    # Re-check the live parent right before taking the backup.
     verify_release(ops.ROOT, plan['old'], pin_text=plan['old_pin'], expected_fingerprint=plan['old']['release_fingerprint'])
-    if runpy.run_path(str(safe_path(ops.ROOT, RELEASE)))['verify_release_manifest'](ops.ROOT, plan['old'], pin_path=ops.ROOT/ops.PIN):
-        raise RuntimeError('Parent release.py rejects the restored manifest')
     backup = backup_dir(args.backup_root)
     rollback_command = write_backup(backup, plan, before, services, args)
     try:
