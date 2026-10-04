@@ -1,4 +1,4 @@
-"""T6.7c asset identity. Public data is isolated; the account ledger is shared."""
+"""T6.7c/T6.9 asset identity. Public data is isolated; the account ledger is shared."""
 from contextlib import closing
 import hashlib
 import json
@@ -7,6 +7,8 @@ import sqlite3
 
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
 PROFILE = "regime_target6_7c_v1"
+T69_PROFILE = "regime_target6_9_v1"
+PROFILES = (PROFILE, T69_PROFILE)
 
 
 def symbol(value):
@@ -16,10 +18,17 @@ def symbol(value):
     return value
 
 
-def execution_fingerprint(asset):
-    from .regime_t67c_policy import FINGERPRINT
+def execution_fingerprint(asset, profile=PROFILE):
+    if profile == T69_PROFILE:
+        from .regime_t69_policy import FINGERPRINT
+        routing = "t69_nine_branches"
+    elif profile == PROFILE:
+        from .regime_t67c_policy import FINGERPRINT
+        routing = "t67c_seven_branches"
+    else:
+        raise ValueError("profile has no loop market binding")
     return hashlib.sha256(json.dumps(dict(version=1, symbol=symbol(asset),
-        parent=FINGERPRINT, routing="t67c_seven_branches", isolation="asset_database_v1"),
+        parent=FINGERPRINT, routing=routing, isolation="asset_database_v1"),
         sort_keys=True).encode()).hexdigest()
 
 

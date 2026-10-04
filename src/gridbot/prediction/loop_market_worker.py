@@ -2,7 +2,7 @@
 from dataclasses import replace
 from decimal import Decimal
 
-from .loop_market import PROFILE, symbol, data_paths, execution_fingerprint, verify_data_db
+from .loop_market import PROFILES, symbol, data_paths, execution_fingerprint, verify_data_db
 
 
 class LoopMarketWorker:
@@ -31,7 +31,7 @@ class LoopMarketWorker:
         binding = await getter(active['loop_id']) if active else None
         if binding:
             if (binding['profile'] != active['strategy_profile']
-                    or binding['execution_fingerprint'] != execution_fingerprint(binding['symbol'])
+                    or binding['execution_fingerprint'] != execution_fingerprint(binding['symbol'], binding['profile'])
                     or binding['unit'] != str(self._selected_order_unit_usdt)
                     or binding['target'] != active['target']):
                 raise ValueError("persisted loop market identity changed")
@@ -60,8 +60,8 @@ class LoopMarketWorker:
         await self.restore_selected_strategy()
         await self.restore_loop_market()
         async with self._lock:
-            if self._selected_strategy_profile != PROFILE:
-                return {**self._status(), 'action_denied': True, 'reason': 'select T6.7c before selecting a market'}
+            if self._selected_strategy_profile not in PROFILES:
+                return {**self._status(), 'action_denied': True, 'reason': 'select T6.7c or T6.9 before selecting a market'}
             existing = await self.repository.get_active_loop()
             task = getattr(self, '_task', None)
             if existing or (task is not None and not task.done()):
@@ -87,9 +87,9 @@ class LoopMarketWorker:
     async def _loop_market_start_guard(self, count):
         await self.restore_loop_market()
         asset = getattr(self.settings, "market_symbol", "BTCUSDT")
-        if self._selected_strategy_profile != PROFILE:
+        if self._selected_strategy_profile not in PROFILES:
             if asset != 'BTCUSDT' and self._selected_strategy_profile.startswith('regime_target6'):
-                return 'only T6.7c supports non-BTC loop markets'
+                return 'only T6.7c/T6.9 support non-BTC loop markets'
             return None
         active = await self.repository.get_active_loop()
         if active:
@@ -97,7 +97,7 @@ class LoopMarketWorker:
             if binding:
                 if (binding['symbol'] != asset or binding['unit'] != str(self._selected_order_unit_usdt)
                         or binding['target'] != count or binding['profile'] != self._selected_strategy_profile
-                        or binding['execution_fingerprint'] != execution_fingerprint(asset)):
+                        or binding['execution_fingerprint'] != execution_fingerprint(asset, self._selected_strategy_profile)):
                     return 'running loop market/profile/unit/target is immutable'
             elif asset != 'BTCUSDT':
                 return 'non-BTC loop binding missing'
@@ -113,7 +113,7 @@ class LoopMarketWorker:
         return None
 
     def _loop_market_start_kwargs(self):
-        if self._selected_strategy_profile != PROFILE:
+        if self._selected_strategy_profile not in PROFILES:
             return {}
         return dict(market_symbol=self.settings.market_symbol,
                     market_unit=str(self._selected_order_unit_usdt))

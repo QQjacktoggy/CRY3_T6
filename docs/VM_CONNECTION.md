@@ -19,6 +19,8 @@ T6.8a 的 First UP 前15分鐘5bp篩選與核心占位見 [T6.8a](T6_8A.md)；�
 
 T6.7d 的原七路保留、Flat 補位與安全部署規則見 [T6.7d](T6_7D.md)。安裝不等於啟動 Live。
 
+T6.9 的 T6.8a 八路加 Flat 補位與 BTC／ETH／BNB 整輪選幣見 [T6.9](T6_9.md)。安裝不等於啟動 Live。
+
 ## 目標
 
 - VM：`cry3jack`

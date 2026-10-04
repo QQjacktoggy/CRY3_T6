@@ -5,10 +5,10 @@ import pytest
 from src.gridbot.prediction.telegram import PredictionTelegramService, SELECTABLE_LANES, selectable_lanes_for_market
 
 
-def test_menu_keeps_all_t6_versions_only_and_prioritizes_t67d():
+def test_menu_keeps_all_t6_versions_only_and_prioritizes_t69():
     profiles=[p for p,_ in SELECTABLE_LANES]
-    assert profiles[0]=='regime_target6_7d_v1'
-    assert len(profiles)==len(set(profiles))==14
+    assert profiles[0]=='regime_target6_9_v1'
+    assert len(profiles)==len(set(profiles))==15
     assert all(p.startswith('regime_target6') for p in profiles)
     for market in ('BTCUSDT','ETHUSDT',None):
         assert all(p.startswith('regime_target6') for p,_ in selectable_lanes_for_market(market))
@@ -42,8 +42,8 @@ async def test_picker_text_and_buttons_only_describe_available_t6_lanes():
     assert '目前提供 T6 系列策略' in text
     assert 'P3' not in text and 'fav_p3' not in text and 'FAV' not in text
     rows = service._reply.await_args.kwargs['reply_markup'].inline_keyboard
-    assert len(rows) == 14
-    assert rows[0][0].callback_data == 'predict_lane:regime_target6_7d_v1'
+    assert len(rows) == 15
+    assert rows[0][0].callback_data == 'predict_lane:regime_target6_9_v1'
     assert all(row[0].callback_data.startswith('predict_lane:regime_target6') for row in rows)
     assert service._invoke.await_count == 1
     assert service._invoke.await_args.args[0] == ('status', 'predict_status')
