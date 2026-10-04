@@ -36,7 +36,7 @@ from .client import (
     PredictionReadTimestampError,
     PredictionClientError,
     PredictionEntryNotSubmitted,
-    entry_http_guard_scope, request_admission_guard_scope,
+    entry_http_guard_scope, request_admission_guard_scope, request_timing_scope, request_stage,
     available_balance_display,
     normalize_amount_in,
 )
@@ -1507,7 +1507,7 @@ class PredictionWorker(LoopMarketWorker):
         execution = checked.execution
         denials = (
             ("signal_recheck_denied", not checked.allowed),
-            ("frozen_signal_changed", checked.signal != ready.signal),
+            ("frozen_signal_changed", checked.signal is not None and checked.signal != ready.signal),
             ("execution_missing", execution is None),
             ("worst_ask_missing", execution is not None and execution.worst_ask_limit is None),
             ("worst_ask_exceeds_intent_limit", execution is not None
@@ -1582,6 +1582,9 @@ class PredictionWorker(LoopMarketWorker):
         # is repeated and a frozen rejection never gets another selection.
         missing = {"regime_features_missing_skip", "regime_initial_book_missing_skip",
                    "t67a_features_missing", "t67b_features_missing", "t67c_features_missing", "t67d_features_missing", "t68_features_missing", "t68a_features_missing"}
+        if self._selected_strategy_profile == "regime_target6_7c_v1":
+            from .regime_t67c_bridge import TRANSIENT_BOOK_REASONS
+            missing |= TRANSIENT_BOOK_REASONS
         for attempt in range(9):
             ready = bridge.check_signal(
                 market=campaign.market, unit_usdt=self._selected_order_unit_usdt,
@@ -1590,8 +1593,31 @@ class PredictionWorker(LoopMarketWorker):
             if (ready.allowed or ready.reason not in missing or attempt == 8
                     or not start+124000 <= self._now_ms() < start+125900):
                 return ready
-            await asyncio.sleep(0.1)
+            # Never call readiness again after the original initial window,
+            # including an oversleep or a delayed event-loop wakeup.
+            await asyncio.sleep(min(.1, max(0, (start+126000-self._now_ms())/1000)))
+            if self._now_ms() >= start+126000:
+                return ready
         return ready
+
+    async def _entry_refresh_within_deadline(self, bridge, campaign, ready, *, attempts=8):
+        from .c180_worker_bridge import C180Ready
+        from .regime_t67c_bridge import TRANSIENT_BOOK_REASONS
+        retryable = {"quote_not_new_after_ready"}
+        if self._selected_strategy_profile == "regime_target6_7c_v1":
+            retryable |= TRANSIENT_BOOK_REASONS
+        expires = ready.execution.expires_at_ms
+        for attempt in range(attempts):
+            now = self._now_ms()
+            if now >= expires:
+                return C180Ready(False, "execution_expired_during_book_wait")
+            checked = bridge.check_signal(market=campaign.market,
+                unit_usdt=self._selected_order_unit_usdt, at_ms=now,
+                last_seen_book_at_ms=ready.book_at_ms)
+            if checked.allowed or checked.reason not in retryable or attempt == attempts-1:
+                return checked
+            await asyncio.sleep(min(.1, max(0, (expires-self._now_ms())/1000)))
+        return checked
 
     async def _observation_repository(self):
         # Never share the execution transaction connection: its commit/rollback
@@ -1705,6 +1731,7 @@ class PredictionWorker(LoopMarketWorker):
             health = self._rate_limiter.health()
             self._rate_limiter.note_deferred(weight, error=f"{method_name} deferred by local weight budget")
             raise PredictionRateLimitDeferred(method_name, health.as_dict())
+        pre_http_spans = []
         trace_start = time.monotonic_ns()
         self._trace_event('api_start',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,**trace_fields)
         try:
@@ -1722,7 +1749,8 @@ class PredictionWorker(LoopMarketWorker):
             def admission_guard():
                 entry_guard()
                 if entry_buy:
-                    self._entry_durable_http_guard(entry_loop, entry_profile)
+                    with request_stage("durable_buy_admission"):
+                        self._entry_durable_http_guard(entry_loop, entry_profile)
                     entry_guard()  # Recheck controls/deadline after the durable read.
             def http_guard():
                 admission_guard()
@@ -1735,10 +1763,12 @@ class PredictionWorker(LoopMarketWorker):
                 if not self._rate_limiter.can_send_prepaid():
                     raise PredictionRateLimitDeferred(method_name, self._rate_limiter.health().as_dict())
             def invoke():
-                admission_guard()  # Also guards injected/custom clients before invocation.
-                cooldown_guard()
-                with request_admission_guard_scope(cooldown_guard), entry_http_guard_scope(http_guard if entry_buy else None):
-                    return method(*args, **kwargs)
+                callback = lambda stage, ns: pre_http_spans.append((stage, ns))
+                with request_timing_scope(callback if entry_buy else None):
+                    admission_guard()  # Also guards injected/custom clients before invocation.
+                    cooldown_guard()
+                    with request_admission_guard_scope(cooldown_guard), entry_http_guard_scope(http_guard if entry_buy else None):
+                        return method(*args, **kwargs)
             with request_budget_scope("exit" if emergency else ("management" if management else "normal"), shared_prepaid):
                 result = await asyncio.to_thread(invoke)
         except SharedBudgetDeferred as exc:
@@ -1754,6 +1784,12 @@ class PredictionWorker(LoopMarketWorker):
             elif "429" in str(exc) or "rate limit" in str(exc).lower():
                 self._rate_limiter.note_rate_limit(error=str(exc))
             raise
+        finally:
+            # Flush only after the blocking client has returned; no telemetry
+            # persistence or event-loop callback delays the HTTP boundary.
+            for stage, ns in pre_http_spans:
+                self._trace_event('entry_pre_http_stage', campaign_id=trace_cid,
+                    intent_id=trace_iid, stage=stage, duration_ns=ns, **trace_fields)
         self._trace_event('api_ack',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,**trace_fields)
         self._rate_limiter.note_success()
         now = self._now_ms()
@@ -8334,15 +8370,7 @@ class PredictionWorker(LoopMarketWorker):
                 self._finish_entry_attempt(campaign.campaign_id, "bridge_or_frozen_book_missing")
                 return
             with self._entry_stage(campaign.campaign_id, "fresh_book_wait"):
-                refreshed = None
-                for _ in range(8):
-                    refreshed = bridge.check_signal(
-                        market=campaign.market, unit_usdt=self._selected_order_unit_usdt,
-                        at_ms=self._now_ms(), last_seen_book_at_ms=ready.book_at_ms,
-                    )
-                    if refreshed.reason != "quote_not_new_after_ready":
-                        break
-                    await asyncio.sleep(0.1)
+                refreshed = await self._entry_refresh_within_deadline(bridge, campaign, ready)
             if (not refreshed.allowed or refreshed.execution is None
                     or refreshed.execution.worst_ask_limit is None
                     or refreshed.execution.worst_ask_limit > intent.limit_price
@@ -8438,9 +8466,8 @@ class PredictionWorker(LoopMarketWorker):
                                                       "execution_expired_after_claim")
                 return
         if c180_buy:
-            checked = bridge.check_signal(market=campaign.market,
-                unit_usdt=self._selected_order_unit_usdt, at_ms=self._now_ms(),
-                last_seen_book_at_ms=ready.book_at_ms)
+            checked = await self._entry_refresh_within_deadline(bridge, campaign, ready,
+                attempts=8 if self._selected_strategy_profile == "regime_target6_7c_v1" else 1)
             bound = await self.repository.get_loop(self._loop_id)
             risk_state = await self.repository.get_runtime_config("prediction_risk_state", {})
             if (not checked.allowed or checked.signal != ready.signal or checked.execution is None
@@ -8486,9 +8513,8 @@ class PredictionWorker(LoopMarketWorker):
                                                       "execution_expired_after_claim")
                 return
         if c180_buy:
-            final_book = bridge.check_signal(market=campaign.market,
-                unit_usdt=self._selected_order_unit_usdt, at_ms=self._now_ms(),
-                last_seen_book_at_ms=ready.book_at_ms)
+            final_book = await self._entry_refresh_within_deadline(bridge, campaign, ready,
+                attempts=8 if self._selected_strategy_profile == "regime_target6_7c_v1" else 1)
             if (not final_book.allowed or final_book.signal != ready.signal
                     or final_book.execution is None or final_book.execution.worst_ask_limit is None
                     or final_book.execution.worst_ask_limit > intent.limit_price):
