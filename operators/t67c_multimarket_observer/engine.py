@@ -19,6 +19,15 @@ VERSION='t67c-three-market-quote-v1'
 SLOT=300000
 
 
+def same_fee(left,right):
+    """Compare validated basis points, independent of JSON numeric spelling."""
+    try:
+        a,b=D(str(left)),D(str(right))
+        return a.is_finite() and b.is_finite() and 0<=a<=10000 and a==b
+    except (ValueError,TypeError,ArithmeticError):
+        return False
+
+
 def new_state(symbol,start):
     return dict(version=VERSION,policy=FINGERPRINT,symbol=symbol,start=start,end=start+SLOT,
                 reason='awaiting',diagnostics={},shadow={},selected=None,quote=None)
@@ -96,7 +105,7 @@ def observe_shadow(state,market,books,spots,at):
     try:
         stamp=RegimeWorkerBridge._book(book,market,at)
         if at-stamp>1000 or int(book['reference_received_ms'])>at or D(book['reference'])<=0 or not _usable_depth(book):return
-        if str(book['fee_bps'])!=str(state['meta']['fee_bps']):return
+        if not same_fee(book['fee_bps'],state['meta']['fee_bps']):return
         memory=state.setdefault('shadow_state',{})
         choices=candidates(book,spots,None,memory,at,D(1),[b for b in books[:-1] if _usable_depth(b)])
         for c in choices:

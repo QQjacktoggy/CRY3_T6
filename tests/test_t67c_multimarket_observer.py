@@ -158,3 +158,29 @@ def test_shadow_cadence_can_confirm_inside_two_second_trigger_expiry():
     with patch('operators.t67c_multimarket_observer.service.read_inputs',return_value=([],[])),patch('operators.t67c_multimarket_observer.service.observe_shadow') as observe:
         c.tick(S+61020)
     assert observe.call_count==3 and c.last_shadow==S+61020
+
+
+@pytest.mark.parametrize('fee,expected',[(200.0,True),('200.00',True),(201,False),(None,False),('NaN',False),('Infinity',False),(-1,False)])
+def test_collector_real_source_fee_representation_and_mismatch(fee,expected):
+    from operators.t67c_multimarket_observer.service import Collector
+    c=Collector.__new__(Collector);c.last_start=S;c.last_shadow=S+124000;c.last_report=S+124000
+    r=new_state('BTCUSDT',S);r['meta']={'fee_bps':'200'};c.states={'BTCUSDT':r}
+    q=book('.3','.7',124000);q['fee_bps']=fee
+    c.paths={'BTCUSDT':('unused','unused')};c.bridges={'BTCUSDT':bridge(book('.3','.7',124000))}
+    c.market=lambda *args:market();c.errors={};c.feature_jobs={};c.feature_cache={}
+    prefix='operators.t67c_multimarket_observer.service.'
+    with patch(prefix+'now',return_value=S+124000),patch(prefix+'read_row',return_value=feature(2,-1,2)),patch(prefix+'read_c180_signal',return_value=None),patch(prefix+'read_c180_book',return_value=q),patch.object(b,'read_c180_signal',return_value=None):
+        c.tick(S+124000)
+    assert (r['selected'] is not None)==expected
+    assert not c.errors
+    if not expected:assert r['reason']=='metadata_fee_mismatch'
+
+
+def test_shadow_accepts_equivalent_fee_spelling_and_rejects_changed_fee():
+    from operators.t67c_multimarket_observer.engine import same_fee
+    r=new_state('BTCUSDT',S);r['meta']={'fee_bps':'200'}
+    q=book('.3','.7',60000);q.update(fee_bps=200.0,reference='100',reference_received_ms=S)
+    with patch('operators.t67c_multimarket_observer.engine._usable_depth',return_value=True),patch('operators.t67c_multimarket_observer.engine.candidates',return_value=[]) as candidate:
+        observe_shadow(r,market(),[q],[],S+60000);candidate.assert_called_once()
+        q['fee_bps']=201;observe_shadow(r,market(),[q],[],S+60000);assert candidate.call_count==1
+    assert not same_fee('10001',10001) and not same_fee(True,1)

@@ -21,7 +21,7 @@ from src.gridbot.prediction.loop_market import SYMBOLS,data_paths,verify_data_db
 from src.gridbot.prediction.c180_signal_runtime import read_c180_book,read_c180_signal,_signal_json
 from src.gridbot.prediction.regime_worker_bridge import RegimeWorkerBridge
 from src.gridbot.prediction.regime_t67_evidence import read_inputs
-from .engine import VERSION,FINGERPRINT,new_state,evaluate,observe_shadow,settle,SLOT
+from .engine import VERSION,FINGERPRINT,new_state,evaluate,observe_shadow,settle,SLOT,same_fee
 from .report import snapshot
 from src.gridbot.prediction.regime_lane import freeze_features
 from src.gridbot.prediction.http_bounds import KLINES_BODY_BYTES,read_bounded
@@ -134,7 +134,7 @@ class Collector:
                     if original and state['original_present']:state['original_evidence']=json.loads(_signal_json(original))
                     if offset>=124000:
                         book=read_c180_book(signal_path,start);clock=now()
-                        if book and str(book.get('fee_bps'))!=str(state['meta']['fee_bps']):
+                        if book and not same_fee(book.get('fee_bps'),state['meta']['fee_bps']):
                             state['reason']='metadata_fee_mismatch';continue
                         evaluate(state,self.bridges[s],market,features,book,clock)
                         finished=now()
