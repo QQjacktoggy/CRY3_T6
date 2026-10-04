@@ -16,16 +16,41 @@
 
 ## 前提
 
-- 候選目錄 `prediction/t69-release-staged-*`，裡面有 `candidate.json`、`validation.json`（狀態 `STAGED_VERIFIED_NOT_DEPLOYED`）、完整 manifest 和 pin。候選目錄的建立方式沿用 VM 上既有流程，不在這個 repo。
+- 候選目錄 `prediction/t69-release-staged-*` 的格式和 T6.7d 相同：
+  - `candidate.json`：`parent`、`expected_fingerprint`，以及逐檔的 `before`／`after` 雜湊。
+  - `validation.json`：狀態 `STAGED_VERIFIED_NOT_DEPLOYED`，含 `parent`、`fingerprint`。
+  - 完整的 manifest 和 pin。
 - release fingerprint 由你另外核准，不能從 STAGE 讀。
 - 最後一輪 DONE 100/100，或你明確授權的已停止 CANCELLED 輪；沒有 RUNNING、沒有未終結或 UNKNOWN 的 intent／order、官方零持倉零掛單、沒有風控鎖。
 - `hs-recovery-startup.env` 保持 autoarm／autoloop=false。
-- 備份根目錄 `/mnt/disks/data/cry3/operators/t69/runs` 必須事先存在（資料碟；系統碟空間不足）。
+- 備份預設放在 installer 旁邊的 `runs/<毫秒>/`（和 T6.7d 一樣在 `operators/` 底下，也就是資料碟）。
+
+## 和 VM 上 T6.7d installer 的對照
+
+依 VM `operators/t67d-20261003/t67d_install.py`（2026-10-04 唯讀調查）調整，以下各點相同：
+
+- 指紋由 `--expected-fingerprint` 另外提供。stage manifest、`validation.fingerprint`、`candidate.expected_fingerprint` 與這個值必須四者相等。
+- 新舊兩邊先用 STAGE 外的 `release_verifier.py` 驗證；雜湊通過後，才各自用自己的 `release.py` 再驗一次 manifest。
+- 逐檔核對 `before`／`after` 雜湊；8 張帳本表雜湊與受保護設定要在每個階段前後都相同；官方零持倉零掛單。
+- 替換後要用部署後的 `release.py` 重建 manifest，必須等於核准的 manifest。
+- 失敗時自動還原；成功後 `deployment.json` 同時寫進 STAGE 與備份目錄。
+
+T6.9 另外加了：
+
+- 冷載入：MainPID 必須換過。
+- 全新 interpreter 檢查 policy fingerprint、8 Live 加 6 Shadow 和 Shadow 表。
+- 備份裡的 `rollback.txt`，以及獨立的回退與驗證程式。
+- STAGE 名稱改成參數，並限定 `t69-release-staged-` 開頭。T6.7d 是寫死在程式裡。
+
+## 待確認（不猜）
+
+1. **VM 怎麼建立 STAGE 目錄**：repo 和這次調查都沒有建立腳本或流程。installer 只讀取並驗證已存在的 STAGE。
+2. **ETH／BNB producer 的服務名稱**：目前只知道觀察器 `cry3-first-multimarket-observer.service`。預設的三個受管服務以外，要不要一起重載，要等名稱確認後再用 `--extra-service` 加入。程式不會自己猜服務名稱。
 
 ## 指令
 
 ```sh
-OP=/mnt/disks/data/cry3/operators/t69-YYYYMMDD
+OP=/mnt/disks/data/cry3/operators/t69-YYYYMMDD   # 放五個檔案；備份會寫到 $OP/runs/
 FP=<你核准的 64 位 release fingerprint>
 STAGE=t69-release-staged-v1-YYYYMMDD
 LOOP=<最後一輪 loop_id>
@@ -40,17 +65,17 @@ python3 $OP/t69_manual_install.py --expected-fingerprint $FP --stage $STAGE --lo
 python3 $OP/t69_verify.py --expected-fingerprint $FP --backup <安裝輸出的 backup>
 ```
 
-需要一併重載 ETH／BNB producer 時，每個 unit 加一個 `--extra-service cry3-...service`；unit 名稱要先在 VM 上查清楚，安裝與回退都會沿用備份裡記錄的清單。
+需要一併重載其他 unit 時，每個加一個 `--extra-service cry3-...service`。名稱見上面待確認第 2 點；安裝與回退都會沿用備份裡記錄的清單。
 
 `--apply` 的流程：
 
 1. 重新驗證父版本。
-2. 在備份根目錄建立新的 `runs/<毫秒>/`，寫入被替換的 source、manifest、pin、`before.json`（安全 snapshot、candidate、服務清單、父版本與新 fingerprint）和 `rollback.txt`（回退指令）。
+2. 建立新的 `$OP/runs/<毫秒>/`（權限 0700），寫入被替換的 source、manifest、pin、`before.json`（安全 snapshot、candidate、服務清單、父版本與新 fingerprint）和 `rollback.txt`（回退指令）。
 3. 停止服務，重新確認交易紀錄沒變、官方零曝險。
-4. 寫入 preflight 時驗證過的位元組，再更新 manifest 和 pin。
+4. 寫入 preflight 時驗證過的位元組；用部署後的 `release.py` 重建 manifest，必須等於核准的版本，再更新 manifest 和 pin。
 5. 啟動服務。要求全部 active，而且 MainPID 都換過（冷載入）。
 6. 用全新 interpreter 檢查：policy fingerprint 是 `19b06579…1bd`、8 路 Live 加 6 路 Shadow、Shadow 表可以建立、T6.9 報表可以產生（不發送）。報表存到 `report.txt`。
-7. 最後再核對一次交易紀錄和 guard，寫入 `deployment.json`。
+7. 最後再核對一次交易紀錄和 guard，把 `deployment.json` 寫進備份和 STAGE。
 
 任何一步失敗都會自動還原 source、manifest、pin，並重新啟動服務。
 

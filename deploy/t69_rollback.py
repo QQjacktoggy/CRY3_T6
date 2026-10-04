@@ -8,6 +8,7 @@ databases, risk latches, the selected strategy, arm state or loops.
 import argparse
 import json
 import os
+import runpy
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from release_verifier import safe_path, verify_release
 import t69_ops as ops
 
 T69 = 'regime_target6_9_v1'
+RELEASE = 'src/gridbot/prediction/release.py'
 
 
 def load(backup):
@@ -92,6 +94,8 @@ def main(argv=None):
         safe_path(ops.ROOT, ops.MANIFEST).write_text((backup / ops.MANIFEST).read_text())
         safe_path(ops.ROOT, ops.PIN).write_text(old_pin)
         verify_release(ops.ROOT, old, pin_text=old_pin, expected_fingerprint=before['parent'])
+        if runpy.run_path(str(safe_path(ops.ROOT, RELEASE)))['verify_release_manifest'](ops.ROOT, old, pin_path=ops.ROOT/ops.PIN):
+            raise RuntimeError('Parent release.py rejects the restored manifest')
         if (ops.ROOT / ops.GUARD).read_bytes() != guard or take() != state:
             raise RuntimeError('Guard or trading records changed during rollback')
     except BaseException:

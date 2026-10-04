@@ -40,8 +40,22 @@ def manifest(base, files):
     return result
 
 
+RELEASE_CODE = """
+import hashlib, json
+from pathlib import Path
+def build_release_manifest(root):
+    entries = [{'path': p, 'sha256': hashlib.sha256((Path(root) / p).read_bytes()).hexdigest()}
+               for p in sorted(_REQUIRED_FIXED_RELEASE_PATHS)]
+    fingerprint = hashlib.sha256(json.dumps(entries, ensure_ascii=False, sort_keys=True,
+                                            separators=(',', ':')).encode()).hexdigest()
+    return {'schema': 'prediction-release-v1', 'files': entries, 'release_fingerprint': fingerprint}
+def verify_release_manifest(root, manifest, pin_path):
+    return [] if build_release_manifest(root) == manifest else ['mismatch']
+"""
+
+
 def inventory(*paths):
-    return f'_REQUIRED_FIXED_RELEASE_PATHS = {tuple(paths)!r}\n'.encode()
+    return (f'_REQUIRED_FIXED_RELEASE_PATHS = {tuple(paths)!r}\n' + RELEASE_CODE).encode()
 
 
 class Env:
@@ -57,7 +71,7 @@ class Env:
         files = [{'path': RELEASE, 'before': sha(inventory(RELEASE, SOURCE)), 'after': sha(inventory(RELEASE, SOURCE, ADDED))},
                  {'path': SOURCE, 'before': sha(b'parent'), 'after': sha(b't69')},
                  {'path': ADDED, 'before': None, 'after': sha(b'added')}]
-        (self.stage / 'candidate.json').write_text(json.dumps({'parent': self.old, 'files': files}))
+        (self.stage / 'candidate.json').write_text(json.dumps({'parent': self.old, 'expected_fingerprint': self.new, 'files': files}))
         (self.stage / 'validation.json').write_text(json.dumps({
             'status': 'STAGED_VERIFIED_NOT_DEPLOYED', 'parent': self.old, 'fingerprint': self.new}))
         (self.root / 'prediction/hs-recovery-startup.env').write_text(
@@ -131,6 +145,8 @@ def test_apply_installs_backs_up_and_never_activates(env, capsys):
     assert (before['parent'], before['fingerprint'], before['loop_id']) == (env.old, env.new, 'loop:done')
     assert 'T6.9 Report' in (run / 'report.txt').read_text()
     assert json.loads((run / 'deployment.json').read_text())['backup'] == str(run)
+    stage = json.loads((env.stage / 'deployment.json').read_text())
+    assert stage['live_activated'] is False and stage['ledger_unchanged'] and stage['guard_unchanged']
     assert 't69_rollback.py --backup ' + str(run) in (run / 'rollback.txt').read_text()
 
 
@@ -157,7 +173,7 @@ def test_failed_apply_restores_parent_and_restarts(env, failure):
     assert not (env.backup() / 'deployment.json').exists()
 
 
-@pytest.mark.parametrize('case', ['running', 'fingerprint', 'stage', 'guard', 'validation', 'tampered_stage'])
+@pytest.mark.parametrize('case', ['running', 'fingerprint', 'stage', 'guard', 'validation', 'tampered_stage', 'candidate_fingerprint'])
 def test_unsafe_boundaries_refused_before_services(env, case):
     kwargs = {}
     if case == 'running':
@@ -173,6 +189,10 @@ def test_unsafe_boundaries_refused_before_services(env, case):
         return
     elif case == 'guard':
         (env.root / 'prediction/hs-recovery-startup.env').write_text('PREDICTION_LIVE_ARM_ON_START=true\n')
+    elif case == 'candidate_fingerprint':
+        plan = json.loads((env.stage / 'candidate.json').read_text())
+        plan['expected_fingerprint'] = '1' * 64
+        (env.stage / 'candidate.json').write_text(json.dumps(plan))
     elif case == 'validation':
         (env.stage / 'validation.json').write_text(json.dumps({'status': 'DEPLOYED'}))
     else:

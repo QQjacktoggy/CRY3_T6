@@ -9,6 +9,7 @@ any failure. Trading databases are never modified or restored.
 import argparse
 import json
 import os
+import runpy
 import shutil
 import sys
 import time
@@ -19,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_verifier import approved_fingerprint, safe_path, verify_release, validate_candidate
 import t69_ops as ops
 
-BACKUP_ROOT = Path('/mnt/disks/data/cry3/operators/t69/runs')
+# Like T6.7d: runs/<ms> beside this installer, i.e. operators/t69-YYYYMMDD/runs on the data disk.
+BACKUP_ROOT = Path(__file__).resolve().parent / 'runs'
+RELEASE = 'src/gridbot/prediction/release.py'
 STAGE_PREFIX = 't69-release-staged-'
 
 
@@ -42,15 +45,26 @@ def load(args):
     new = json.loads(safe_path(stage, ops.MANIFEST).read_text())
     if not (old.get('release_fingerprint') == candidate.get('parent') == validation.get('parent')):
         raise RuntimeError('Parent changed; inspect before installing')
-    if new.get('release_fingerprint') != validation.get('fingerprint'):
-        raise RuntimeError('Stage manifest differs from validation.json')
-    if new.get('release_fingerprint') != args.expected_fingerprint:
+    # Same identity chain as T6.7d: stage manifest == validation == candidate == operator value.
+    if not (new.get('release_fingerprint') == validation.get('fingerprint')
+            == candidate.get('expected_fingerprint') == args.expected_fingerprint):
         raise RuntimeError('Release differs from operator-approved fingerprint')
     old_pin = safe_path(ops.ROOT, ops.PIN).read_text()
     new_pin = safe_path(stage, ops.PIN).read_text()
-    old_bytes = verify_release(ops.ROOT, old, pin_text=old_pin)
+    old_bytes = verify_release(ops.ROOT, old, pin_text=old_pin, expected_fingerprint=candidate['parent'])
     new_bytes = verify_release(stage, new, pin_text=new_pin, expected_fingerprint=args.expected_fingerprint)
     validate_candidate(ops.ROOT, stage, candidate, old_bytes, new_bytes)
+    for row in candidate['files']:
+        if ops.digest(safe_path(ops.ROOT, row['path'])) != row['before']:
+            raise RuntimeError('Deployed source changed: ' + row['path'])
+        if ops.digest(safe_path(stage, row['path'])) != row['after']:
+            raise RuntimeError('Candidate source changed: ' + row['path'])
+    # Only after both trees' bytes match the approved hashes: each tree's own
+    # release.py must also accept its manifest (T6.7d does the same).
+    if runpy.run_path(str(safe_path(ops.ROOT, RELEASE)))['verify_release_manifest'](ops.ROOT, old, pin_path=ops.ROOT/ops.PIN):
+        raise RuntimeError('Parent release.py rejects the live manifest')
+    if runpy.run_path(str(safe_path(stage, RELEASE)))['verify_release_manifest'](stage, new, pin_path=stage/ops.PIN):
+        raise RuntimeError('Candidate release.py rejects the stage manifest')
     modes = {row['path']: safe_path(stage, row['path']).stat().st_mode & 0o777 for row in candidate['files']}
     return dict(stage=stage, candidate=candidate, old=old, new=new, old_pin=old_pin, new_pin=new_pin,
                 new_bytes=new_bytes, modes=modes)
@@ -58,10 +72,10 @@ def load(args):
 
 def backup_dir(root):
     root = Path(root)
-    if root.is_symlink() or not root.is_dir():
-        raise RuntimeError('Backup root must be an existing data-disk directory: ' + str(root))
+    if root.is_symlink():
+        raise RuntimeError('Backup root must not be a symlink: ' + str(root))
     path = root / str(time.time_ns() // 1000000)
-    path.mkdir(mode=0o700)
+    path.mkdir(mode=0o700, parents=True)
     return path
 
 
@@ -93,7 +107,9 @@ def restore(backup, plan):
             shutil.copy2(backup / row['path'], dest)
     for relative in (ops.MANIFEST, ops.PIN):
         shutil.copy2(backup / relative, safe_path(ops.ROOT, relative))
-    verify_release(ops.ROOT, plan['old'], pin_text=plan['old_pin'])
+    verify_release(ops.ROOT, plan['old'], pin_text=plan['old_pin'], expected_fingerprint=plan['old']['release_fingerprint'])
+    if runpy.run_path(str(safe_path(ops.ROOT, RELEASE)))['verify_release_manifest'](ops.ROOT, plan['old'], pin_path=ops.ROOT/ops.PIN):
+        raise RuntimeError('Parent release.py rejects the restored manifest')
 
 
 def main(argv=None):
@@ -102,7 +118,7 @@ def main(argv=None):
                         help='SHA-256 approved out of band; never obtain this value from STAGE')
     parser.add_argument('--stage', required=True, help='prediction/' + STAGE_PREFIX + '* directory name')
     parser.add_argument('--loop-id', required=True, help='Last finished loop; must be DONE 100/100 or authorized CANCELLED')
-    parser.add_argument('--backup-root', default=str(BACKUP_ROOT), help='Existing data-disk directory for run backups')
+    parser.add_argument('--backup-root', default=str(BACKUP_ROOT), help='Run backups go to <backup-root>/<ms>/ (default: runs/ beside this installer)')
     parser.add_argument('--extra-service', action='append', default=[], type=ops.service_name,
                         help='Additional cry3 user unit to cold-reload (for example ETH/BNB producers)')
     parser.add_argument('--apply', action='store_true', help='Install code and cold-reload services; no Live activation')
@@ -127,7 +143,9 @@ def main(argv=None):
                               parent=plan['old']['release_fingerprint'], files=len(plan['candidate']['files']),
                               services=list(services), live_activated=False)))
         return
-    verify_release(ops.ROOT, plan['old'], pin_text=plan['old_pin'])
+    verify_release(ops.ROOT, plan['old'], pin_text=plan['old_pin'], expected_fingerprint=plan['old']['release_fingerprint'])
+    if runpy.run_path(str(safe_path(ops.ROOT, RELEASE)))['verify_release_manifest'](ops.ROOT, plan['old'], pin_path=ops.ROOT/ops.PIN):
+        raise RuntimeError('Parent release.py rejects the restored manifest')
     backup = backup_dir(args.backup_root)
     rollback_command = write_backup(backup, plan, before, services, args)
     try:
@@ -147,8 +165,13 @@ def main(argv=None):
             temp.chmod(plan['modes'][row['path']])
             os.replace(temp, dest)
         verify_release(ops.ROOT, plan['new'], pin_text=plan['new_pin'], expected_fingerprint=args.expected_fingerprint)
+        deployed = runpy.run_path(str(safe_path(ops.ROOT, RELEASE)))
+        if deployed['build_release_manifest'](ops.ROOT) != plan['new']:
+            raise RuntimeError('Deployed tree does not rebuild the approved manifest')
         safe_path(ops.ROOT, ops.MANIFEST).write_text(json.dumps(plan['new'], indent=2) + '\n')
         safe_path(ops.ROOT, ops.PIN).write_text(plan['new_pin'])
+        if deployed['verify_release_manifest'](ops.ROOT, plan['new'], pin_path=ops.ROOT/ops.PIN):
+            raise RuntimeError('Deployed release.py rejects the installed manifest')
         if (ops.ROOT / ops.GUARD).read_bytes() != guard or take() != before:
             raise RuntimeError('Guard or trading records changed during install')
         for name in reversed(services):
@@ -165,9 +188,11 @@ def main(argv=None):
         result = dict(status='CODE_INSTALLED_LIVE_NOT_ACTIVATED', fingerprint=plan['new']['release_fingerprint'],
                       parent=plan['old']['release_fingerprint'], policy=fresh['policy'], backup=str(backup),
                       services_before=states, services_after=after, selected_profile=ops.selected_profile(),
-                      t69_tables=ops.t69_tables(), rollback=rollback_command,
+                      t69_tables=ops.t69_tables(), rollback=rollback_command, services=list(services),
+                      ledger_unchanged=True, guard_unchanged=True, report_rendered_not_sent=True, live_activated=False,
                       next_step='Operator selects T6.9, market and amount, then confirms Live in Telegram')
-        (backup / 'deployment.json').write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
+        for path in (backup / 'deployment.json', plan['stage'] / 'deployment.json'):
+            path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
         print(json.dumps(result, ensure_ascii=False))
     except BaseException:
         for name in services:
