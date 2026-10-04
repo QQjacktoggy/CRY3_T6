@@ -95,14 +95,16 @@ class Env:
             fresh_check=Mock(return_value={'policy': self.ops.POLICY_FINGERPRINT, 'live': 8, 'shadow': 6,
                                            'report': '📊 T6.9 Report｜八路 Live＋六路 Shadow\nmock'}),
             t69_tables=Mock(return_value={'BTCUSDT': {'database': 'present', 'tables': []}}),
-            selected_profile=Mock(side_effect=lambda key='prediction_selected_strategy': self.profile.get(key)))
+            selected_profile=Mock(side_effect=lambda key='prediction_selected_strategy': self.profile.get(key)),
+            require_runtime=Mock(), producer_units=Mock(return_value=()),
+            raise_on_hangup=Mock(), ignore_hangup=Mock())
         for key, value in self.mocks.items():
             monkeypatch.setattr(self.ops, key, value)
         monkeypatch.setattr(self.installer.os, 'getuid', lambda: 1000)
 
     def install(self, *extra, fingerprint=None):
         self.installer.main(['--expected-fingerprint', fingerprint or self.new, '--stage', STAGE,
-                             '--loop-id', 'loop:done', '--backup-root', str(self.backups), *extra])
+                             '--loop-id', 'loop:done', '--backup-root', str(self.backups), '--settle-seconds', '0', *extra])
 
     def actions(self):
         return [c.args[0] for c in self.mocks['service'].call_args_list]
@@ -302,3 +304,118 @@ def test_feature_tables_are_read_only(tmp_path, monkeypatch):
     value = ops.t69_tables()
     assert value['BTCUSDT'] == {'database': 'present', 'tables': ['t69_shadow_quotes'], 'quotes': 1, 'latest_quote_start': 5}
     assert value['ETHUSDT'] == {'database': 'missing'} and path.read_bytes() == data
+
+
+def test_unreloaded_producer_units_are_refused_before_services(env):
+    env.mocks['producer_units'].return_value = ('cry3-t67c-eth-feature.service',)
+    with pytest.raises(RuntimeError, match='--extra-service cry3-t67c-eth-feature.service'):
+        env.install('--apply')
+    assert env.actions() == [] and not list(env.backups.iterdir())
+    env.install('--apply', '--extra-service', 'cry3-t67c-eth-feature.service')
+    assert env.actions().count('stop') == 4 and env.live_release() == env.new
+
+
+def test_hangup_during_apply_restores_parent(env):
+    calls = []
+    def service(action, name):
+        calls.append(action)
+        if action == 'start' and calls.count('start') == 1 and 'stop' in calls and len(calls) < 6:
+            raise env.ops.Interrupted('received signal 1')
+        env.pid.pop(name, None) if action == 'start' else None
+        return 'active'
+    env.mocks['service'].side_effect = service
+    with pytest.raises(env.ops.Interrupted):
+        env.install('--apply')
+    env.mocks['raise_on_hangup'].assert_called_once()
+    env.mocks['ignore_hangup'].assert_called_once()
+    assert env.live_release() == env.old and not (env.root / ADDED).exists()
+
+
+def test_restore_continues_when_a_stop_times_out(env):
+    env.mocks['fresh_check'].side_effect = RuntimeError('report failed')
+    stops = []
+    def service(action, name):
+        if action == 'stop':
+            stops.append(name)
+            if len(stops) == 4:  # first stop inside the restore path
+                raise subprocess.TimeoutExpired('systemctl', 120)
+        if action == 'start':
+            env.pid.pop(name, None)
+        return 'active'
+    env.mocks['service'].side_effect = service
+    with pytest.raises(RuntimeError, match='report failed'):
+        env.install('--apply')
+    assert env.live_release() == env.old and not (env.root / ADDED).exists()
+    assert env.actions()[-3:] == ['start'] * 3
+
+
+def test_leftover_temp_file_does_not_block_install(env):
+    (env.root / (SOURCE + '.t69-new')).write_bytes(b'stale')
+    env.install('--apply')
+    assert env.live_release() == env.new and not (env.root / (SOURCE + '.t69-new')).exists()
+
+
+def test_installed_manifest_is_the_stage_file_bytes(env):
+    env.install('--apply')
+    assert (env.root / 'prediction/release-manifest.json').read_bytes() == \
+        (env.stage / 'prediction/release-manifest.json').read_bytes()
+
+
+def test_service_crashing_after_start_triggers_restore(env):
+    seen = {}
+    def state(name):
+        seen[name] = seen.get(name, 0) + 1
+        restarts = '1' if seen[name] >= 3 else '0'  # third read is the settle re-check
+        return dict(active='active', main_pid=env.pid.setdefault(name, str(100 + len(env.pid) + seen[name])), restarts=restarts)
+    env.mocks['service_state'].side_effect = state
+    with pytest.raises(RuntimeError, match='did not stay up'):
+        env.install('--apply')
+    assert env.live_release() == env.old
+
+
+def test_rollback_txt_uses_app_venv_python(env):
+    env.install('--apply')
+    text = (env.backup() / 'rollback.txt').read_text()
+    assert str(env.root / 'testnet/.venv/bin/python') + ' ' in text and 'python3 ' not in text
+
+
+def test_require_runtime_names_the_venv(monkeypatch):
+    ops = module('t69_ops')
+    import builtins
+    real = builtins.__import__
+    def fake(name, *args, **kwargs):
+        if name == 'telegram':
+            raise ImportError("No module named 'telegram'", name='telegram')
+        return real(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', fake)
+    with pytest.raises(RuntimeError, match='testnet/.venv/bin/python'):
+        ops.require_runtime()
+
+
+def test_producer_units_come_from_systemd_exec_start(monkeypatch):
+    ops = module('t69_ops')
+    def service(*args):
+        if args[0] == 'list-units':
+            return ('cry3-predict-user.service loaded active running x\n'
+                    'cry3-eth-feature.service loaded active running y\n'
+                    'cry3-first-multimarket-observer.service loaded active running z\n')
+        return {'cry3-eth-feature.service': 'ExecStart={ path=/home/jack_shih/cry3/scripts/run_t67c_asset.sh ; argv[]=run_t67c_asset.sh feature ETHUSDT }',
+                'cry3-predict-user.service': 'ExecStart={ argv[]=python predict_main.py }',
+                'cry3-first-multimarket-observer.service': 'ExecStart={ argv[]=python -m operators.first_multimarket_observer.service }'}[args[1]]
+    monkeypatch.setattr(ops, 'service', service)
+    assert ops.producer_units() == ('cry3-eth-feature.service',)
+
+
+def test_hangup_handler_raises_interrupted():
+    import signal
+    ops = module('t69_ops')
+    old = signal.getsignal(signal.SIGHUP), signal.getsignal(signal.SIGTERM)
+    try:
+        ops.raise_on_hangup()
+        with pytest.raises(ops.Interrupted):
+            signal.getsignal(signal.SIGHUP)(signal.SIGHUP, None)
+        ops.ignore_hangup()
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, old[0])
+        signal.signal(signal.SIGTERM, old[1])

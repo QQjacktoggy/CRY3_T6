@@ -27,7 +27,7 @@ def check(name, fn, results):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--expected-fingerprint', required=True, type=approved_fingerprint)
-    parser.add_argument('--backup', help='Installer run directory; compares ledger hashes with before.json')
+    parser.add_argument('--backup', help='Installer run directory; compares ledger hashes with before.json (meaningful only before T6.9 is selected or traded)')
     parser.add_argument('--extra-service', action='append', default=[], type=ops.service_name)
     parser.add_argument('--require-t69-tables', action='store_true',
                         help='After T6.9 is selected: require t69 Shadow tables in the BTC feature DB')
@@ -42,7 +42,9 @@ def main(argv=None):
         return manifest['release_fingerprint']
 
     def services_ok():
-        states = {name: ops.service_state(name) for name in services}
+        # Producer units found in systemd (ETH/BNB) are checked too.
+        names = tuple(dict.fromkeys(services + ops.producer_units()))
+        states = {name: ops.service_state(name) for name in names}
         if not all(s['active'] == 'active' for s in states.values()):
             raise RuntimeError('service not active: ' + json.dumps(states))
         return states

@@ -10,28 +10,31 @@
 | 1 | VM session | 唯讀 preflight（指令 1） | `READ_ONLY_PREFLIGHT_PASSED` |
 | 2 | 你 | 確認沒有 RUNNING loop、官方零持倉零掛單，然後同意安裝 | — |
 | 3 | VM session | 安裝（指令 2） | `CODE_INSTALLED_LIVE_NOT_ACTIVATED`，並印出 backup 路徑 |
-| 4 | VM session | 唯讀驗證（指令 3） | `T69_VERIFIED`（這時還沒有 t69 表，屬正常） |
+| 4 | VM session | 唯讀驗證（指令 3）。帶 `--backup` 會比對安裝前的帳本，所以只在 TG 選 T6.9 之前有意義 | `T69_VERIFIED`（這時還沒有 t69 表，屬正常） |
 | 5 | 你 | 在 TG 選 T6.9、幣種和金額，確認 Live 並啟動 | TG 顯示 T6.9 Report |
-| 6 | VM session | 跑過幾個市場後再驗一次，加 `--require-t69-tables` | `T69_VERIFIED` |
+| 6 | VM session | 跑過幾個市場後再驗一次，加 `--require-t69-tables`，不帶 `--backup` | `T69_VERIFIED` |
 
 ```sh
+PY=/home/jack_shih/cry3/testnet/.venv/bin/python   # 一定要用 app venv；官方查詢需要 dotenv／telegram，系統 python3 可能沒有
 OP=/mnt/disks/data/cry3/operators/t69-YYYYMMDD     # 放五個檔案；備份寫到 $OP/runs/
 FP=<你核准的 64 位 release fingerprint>
 STAGE=t69-release-staged-v1-YYYYMMDD
 LOOP=<最後一輪 loop_id>
 
-python3 $OP/t69_manual_install.py --expected-fingerprint $FP --stage $STAGE --loop-id $LOOP          # 1 唯讀
-python3 $OP/t69_manual_install.py --expected-fingerprint $FP --stage $STAGE --loop-id $LOOP --apply  # 2 安裝
-python3 $OP/t69_verify.py --expected-fingerprint $FP --backup $OP/runs/<毫秒>                         # 3 驗證
+$PY $OP/t69_manual_install.py --expected-fingerprint $FP --stage $STAGE --loop-id $LOOP          # 1 唯讀
+$PY $OP/t69_manual_install.py --expected-fingerprint $FP --stage $STAGE --loop-id $LOOP --apply  # 2 安裝
+$PY $OP/t69_verify.py --expected-fingerprint $FP --backup $OP/runs/<毫秒>                             # 3 驗證（選 T6.9 之前）
 ```
 
-最後一輪如果是你停下的 CANCELLED 輪，加 `--allow-cancelled-loop`。如果有舊的已結束 campaign 沒有結算紀錄，加 `--allow-historical-closed-ledger`。需要多重載的服務，每個加一個 `--extra-service cry3-….service`（見待確認 2）。
+**指令 2 和回退的 `--apply` 一定要在 tmux 裡跑**（`tmux new -s t69`）。IAP SSH 斷線時，tmux 讓程序繼續跑完。萬一沒用 tmux，程式也會把 SIGHUP／SIGTERM 轉成例外並自動還原，但仍以 tmux 為準。
+
+最後一輪如果是你停下的 CANCELLED 輪，加 `--allow-cancelled-loop`。如果有舊的已結束 campaign 沒有結算紀錄，加 `--allow-historical-closed-ledger`。ETH／BNB producer 也要一起冷載入：installer 會從 systemd 列出 ExecStart 含 `run_t67c_asset.sh`、`regime_feature_service` 或 `c180_signal_runtime` 的 `cry3-*` unit。只要有一個不在重載清單，就拒絕並印出要補的 `--extra-service cry3-….service`。照印出的名稱加上即可（見待確認 2）。
 
 ## 回退
 
 ```sh
-python3 $OP/t69_rollback.py --backup $OP/runs/<毫秒>            # 唯讀 preflight
-python3 $OP/t69_rollback.py --backup $OP/runs/<毫秒> --apply    # 回到父版本
+$PY $OP/t69_rollback.py --backup $OP/runs/<毫秒>            # 唯讀 preflight
+$PY $OP/t69_rollback.py --backup $OP/runs/<毫秒> --apply    # 回到父版本
 ```
 
 同樣的指令也寫在每次備份的 `rollback.txt`。
@@ -48,7 +51,7 @@ python3 $OP/t69_rollback.py --backup $OP/runs/<毫秒> --apply    # 回到父版
    - `candidate.json`：`parent`、`expected_fingerprint`、逐檔 `before`／`after`。
    - `validation.json`：狀態 `STAGED_VERIFIED_NOT_DEPLOYED`，含 `parent`、`fingerprint`。
    - 完整的 manifest 和 pin。
-2. **ETH／BNB producer 的服務名稱**。目前只知道觀察器 `cry3-first-multimarket-observer.service`。這些服務會載入 T6.9 改到的程式，名稱確認後要用 `--extra-service` 一起冷載入。
+2. **ETH／BNB producer 的服務名稱**。目前只知道觀察器 `cry3-first-multimarket-observer.service`。producer 會載入 T6.9 改到的程式，所以一定要一起冷載入。installer 會自己從 systemd 找出來，沒加就拒絕；名稱確認後寫進上面的指令。觀察器不是 producer，不會被重載。
 
 ## 檔案
 
@@ -66,7 +69,7 @@ python3 $OP/t69_rollback.py --backup $OP/runs/<毫秒> --apply    # 回到父版
 
 - **安全邊界**，每個階段前後都核對：
   - 最後一輪 DONE 100/100，或你授權的 CANCELLED 輪。
-  - 沒有 RUNNING loop，沒有未終結或 UNKNOWN 的 intent／order，沒有風控鎖。
+  - 沒有 RUNNING loop，沒有未終結或 UNKNOWN 的 intent／order，沒有 `pending_unknown` 或 `pending_intent_id` 的 campaign，沒有風控鎖。
   - 官方零持倉零掛單。
   - 8 張帳本表雜湊和受保護設定不變。
   - autoarm／autoloop 維持 false。
@@ -76,7 +79,8 @@ python3 $OP/t69_rollback.py --backup $OP/runs/<毫秒> --apply    # 回到父版
   2. 停服務，再核對一次邊界。
   3. 寫入預檢時驗證過的位元組。
   4. 用部署後的 `release.py` 重建 manifest，必須等於核准的版本。
-  5. 啟動服務，要求全部 active 且 MainPID 都換過。
+  5. 啟動服務，要求全部 active 且 MainPID 都換過；等 20 秒（`--settle-seconds`）再確認 MainPID 和 NRestarts 沒變。
 - **功能檢查**：用全新 interpreter 確認 policy fingerprint `19b06579…1bd`、8 路 Live 加 6 路 Shadow、Shadow 表能建立、T6.9 報表能產生（不發送，存成 `report.txt`）。
-- **結果**：`deployment.json` 寫進備份和 STAGE，內含 `ledger_unchanged`、`guard_unchanged`、`live_activated=false`。任何一步失敗都會自動還原 source、manifest、pin，並重啟服務。
+- **結果**：`deployment.json` 寫進備份和 STAGE，內含 `ledger_unchanged`、`guard_unchanged`、`live_activated=false`。manifest 寫入的是 STAGE 原檔的位元組。
+- **失敗時**：任何一步失敗（包括 SSH 斷線）都會自動還原 source、manifest、pin。每一步各自嘗試，例如某個 stop 逾時也不會跳過還原。父版本驗證通過才重啟服務；沒通過就讓服務停著，並印出 `RESTORE INCOMPLETE`。上次中斷留下的 `*.t69-new` 暫存檔會先清掉。
 - **t69 表**：`t69_*` Shadow 表要等 TG 選定 T6.9 後，feature service 才會建立，所以第 4 步不檢查。

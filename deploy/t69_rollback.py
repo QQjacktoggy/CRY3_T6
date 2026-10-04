@@ -59,6 +59,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if os.getuid() == 0:
         raise RuntimeError('Run as application user jack_shih')
+    ops.require_runtime()
     backup, before, candidate, old, old_pin, services, current = load(args.backup)
     loop_id = args.loop_id or before['loop_id']
     take = lambda: ops.snapshot(loop_id, allow_cancelled=args.allow_cancelled_loop,
@@ -75,6 +76,7 @@ def main(argv=None):
         print(json.dumps(dict(status='ROLLBACK_PREFLIGHT_PASSED', current=current, restore_to=before['parent'],
                               files=len(candidate['files']), services=list(services), live_activated=False)))
         return
+    ops.raise_on_hangup()
     for name in services:
         ops.service('stop', name)
     try:
@@ -87,11 +89,12 @@ def main(argv=None):
                 dest.unlink(missing_ok=True)
                 continue
             temp = dest.with_name(dest.name + '.t69-rollback')
+            temp.unlink(missing_ok=True)  # leftover from an interrupted earlier rollback
             with temp.open('xb') as output:
                 output.write((backup / row['path']).read_bytes())
             temp.chmod((backup / row['path']).stat().st_mode & 0o777)
             os.replace(temp, dest)
-        safe_path(ops.ROOT, ops.MANIFEST).write_text((backup / ops.MANIFEST).read_text())
+        safe_path(ops.ROOT, ops.MANIFEST).write_bytes((backup / ops.MANIFEST).read_bytes())
         safe_path(ops.ROOT, ops.PIN).write_text(old_pin)
         verify_release(ops.ROOT, old, pin_text=old_pin, expected_fingerprint=before['parent'])
         if runpy.run_path(str(safe_path(ops.ROOT, RELEASE)))['verify_release_manifest'](ops.ROOT, old, pin_path=ops.ROOT/ops.PIN):
@@ -99,6 +102,7 @@ def main(argv=None):
         if (ops.ROOT / ops.GUARD).read_bytes() != guard or take() != state:
             raise RuntimeError('Guard or trading records changed during rollback')
     except BaseException:
+        ops.ignore_hangup()
         # A half-restored tree must not run; leave services stopped for a human.
         print('Rollback stopped before completion; services left stopped. Inspect ' + str(backup), file=sys.stderr)
         raise

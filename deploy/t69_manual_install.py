@@ -42,7 +42,9 @@ def load(args):
     if validation.get('status') != 'STAGED_VERIFIED_NOT_DEPLOYED':
         raise RuntimeError('Stage is not STAGED_VERIFIED_NOT_DEPLOYED')
     old = json.loads(safe_path(ops.ROOT, ops.MANIFEST).read_text())
-    new = json.loads(safe_path(stage, ops.MANIFEST).read_text())
+    # Install the stage manifest's own bytes (as T6.7d copies the file), not a re-serialization.
+    new_manifest = safe_path(stage, ops.MANIFEST).read_bytes()
+    new = json.loads(new_manifest)
     if not (old.get('release_fingerprint') == candidate.get('parent') == validation.get('parent')):
         raise RuntimeError('Parent changed; inspect before installing')
     # Same identity chain as T6.7d: stage manifest == validation == candidate == operator value.
@@ -66,7 +68,7 @@ def load(args):
     if runpy.run_path(str(safe_path(stage, RELEASE)))['verify_release_manifest'](stage, new, pin_path=stage/ops.PIN):
         raise RuntimeError('Candidate release.py rejects the stage manifest')
     modes = {row['path']: safe_path(stage, row['path']).stat().st_mode & 0o777 for row in candidate['files']}
-    return dict(stage=stage, candidate=candidate, old=old, new=new, old_pin=old_pin, new_pin=new_pin,
+    return dict(stage=stage, candidate=candidate, old=old, new=new, new_manifest=new_manifest, old_pin=old_pin, new_pin=new_pin,
                 new_bytes=new_bytes, modes=modes)
 
 
@@ -91,25 +93,56 @@ def write_backup(backup, plan, before, services, args):
     here = Path(__file__).resolve().parent
     flags = ' --allow-cancelled-loop' if args.allow_cancelled_loop else ''
     flags += ' --allow-historical-closed-ledger' if args.allow_historical_closed_ledger else ''
-    command = f'python3 {here}/t69_rollback.py --backup {backup}{flags}'
+    command = f'{ops.ROOT / ops.VENV_PYTHON} {here}/t69_rollback.py --backup {backup}{flags}'
     (backup / 'rollback.txt').write_text(
         '# Read-only rollback preflight, then the same command with --apply.\n'
         + command + '\n' + command + ' --apply\n')
     return command
 
 
-def restore(backup, plan):
+def restore(backup, plan, services):
+    """Best effort: every step is attempted even if an earlier one fails."""
+    errors = []
+    def attempt(label, fn):
+        try:
+            fn()
+        except BaseException as exc:  # keep restoring; report all failures at the end
+            errors.append(f'{label}: {type(exc).__name__}: {exc}')
+    for name in services:
+        attempt('stop ' + name, lambda name=name: ops.service('stop', name))
+    stop_errors = len(errors)
     for row in plan['candidate']['files']:
         dest = safe_path(ops.ROOT, row['path'])
         if row['before'] is None:
-            dest.unlink(missing_ok=True)
+            attempt('remove ' + row['path'], lambda dest=dest: dest.unlink(missing_ok=True))
         else:
-            shutil.copy2(backup / row['path'], dest)
+            attempt('restore ' + row['path'], lambda row=row, dest=dest: shutil.copy2(backup / row['path'], dest))
+        attempt('clean temp ' + row['path'], lambda dest=dest: dest.with_name(dest.name + '.t69-new').unlink(missing_ok=True))
     for relative in (ops.MANIFEST, ops.PIN):
-        shutil.copy2(backup / relative, safe_path(ops.ROOT, relative))
+        attempt('restore ' + relative, lambda relative=relative: shutil.copy2(backup / relative, safe_path(ops.ROOT, relative)))
+    attempt('verify parent', lambda: verify_parent(plan))
+    # Start only on a verified parent tree; a half-restored tree must not run.
+    if len(errors) == stop_errors:
+        for name in reversed(services):
+            attempt('start ' + name, lambda name=name: ops.service('start', name))
+    return errors
+
+
+def verify_parent(plan):
     verify_release(ops.ROOT, plan['old'], pin_text=plan['old_pin'], expected_fingerprint=plan['old']['release_fingerprint'])
     if runpy.run_path(str(safe_path(ops.ROOT, RELEASE)))['verify_release_manifest'](ops.ROOT, plan['old'], pin_path=ops.ROOT/ops.PIN):
         raise RuntimeError('Parent release.py rejects the restored manifest')
+
+
+def settled(services, after, seconds):
+    """Catch a service that crashes a few seconds after start (T6.7c idle_health)."""
+    time.sleep(seconds)
+    later = {name: ops.service_state(name) for name in services}
+    for name in services:
+        if later[name]['active'] != 'active' or later[name]['main_pid'] != after[name]['main_pid'] \
+                or later[name]['restarts'] != after[name]['restarts']:
+            raise RuntimeError('Service did not stay up after start: ' + name)
+    return later
 
 
 def main(argv=None):
@@ -121,10 +154,12 @@ def main(argv=None):
     parser.add_argument('--backup-root', default=str(BACKUP_ROOT), help='Run backups go to <backup-root>/<ms>/ (default: runs/ beside this installer)')
     parser.add_argument('--extra-service', action='append', default=[], type=ops.service_name,
                         help='Additional cry3 user unit to cold-reload (for example ETH/BNB producers)')
+    parser.add_argument('--settle-seconds', type=int, default=20, help='Wait before the post-start health re-check')
     parser.add_argument('--apply', action='store_true', help='Install code and cold-reload services; no Live activation')
     parser.add_argument('--allow-cancelled-loop', action='store_true')
     parser.add_argument('--allow-historical-closed-ledger', action='store_true')
     args = parser.parse_args(argv)
+    ops.require_runtime()
     services = tuple(dict.fromkeys(ops.SERVICES + tuple(args.extra_service)))
     take = lambda: ops.snapshot(args.loop_id, allow_cancelled=args.allow_cancelled_loop,
                                 allow_historical_closed=args.allow_historical_closed_ledger)
@@ -135,18 +170,25 @@ def main(argv=None):
     ops.official_clear()
     if take() != before:
         raise RuntimeError('Trading records changed during preflight')
+    producers = ops.producer_units()
+    missing = [name for name in producers if name not in services]
+    if missing:
+        # ETH/BNB producers import T6.9 code; leaving them on old code mixes versions.
+        raise RuntimeError('Producer units must be reloaded too; add ' +
+                           ' '.join('--extra-service ' + name for name in missing))
     states = {name: ops.service_state(name) for name in services}
     if not all(s['active'] == 'active' for s in states.values()):
         raise RuntimeError('A service is not active before install')
     if not args.apply:
         print(json.dumps(dict(status='READ_ONLY_PREFLIGHT_PASSED', candidate=plan['new']['release_fingerprint'],
                               parent=plan['old']['release_fingerprint'], files=len(plan['candidate']['files']),
-                              services=list(services), live_activated=False)))
+                              services=list(services), producers=list(producers), live_activated=False)))
         return
     # Re-check the live parent right before taking the backup.
     verify_release(ops.ROOT, plan['old'], pin_text=plan['old_pin'], expected_fingerprint=plan['old']['release_fingerprint'])
     backup = backup_dir(args.backup_root)
     rollback_command = write_backup(backup, plan, before, services, args)
+    ops.raise_on_hangup()
     try:
         for name in services:
             ops.service('stop', name)
@@ -158,6 +200,7 @@ def main(argv=None):
             dest = safe_path(ops.ROOT, row['path'])
             temp = dest.with_name(dest.name + '.t69-new')
             dest.parent.mkdir(parents=True, exist_ok=True)
+            temp.unlink(missing_ok=True)  # leftover from an interrupted earlier run
             # Install the immutable bytes verified before stopping services.
             with temp.open('xb') as output:
                 output.write(plan['new_bytes'][row['path']])
@@ -167,7 +210,7 @@ def main(argv=None):
         deployed = runpy.run_path(str(safe_path(ops.ROOT, RELEASE)))
         if deployed['build_release_manifest'](ops.ROOT) != plan['new']:
             raise RuntimeError('Deployed tree does not rebuild the approved manifest')
-        safe_path(ops.ROOT, ops.MANIFEST).write_text(json.dumps(plan['new'], indent=2) + '\n')
+        safe_path(ops.ROOT, ops.MANIFEST).write_bytes(plan['new_manifest'])
         safe_path(ops.ROOT, ops.PIN).write_text(plan['new_pin'])
         if deployed['verify_release_manifest'](ops.ROOT, plan['new'], pin_path=ops.ROOT/ops.PIN):
             raise RuntimeError('Deployed release.py rejects the installed manifest')
@@ -180,6 +223,7 @@ def main(argv=None):
             raise RuntimeError('A service is not active after install')
         if any(after[n]['main_pid'] in (None, '0', states[n]['main_pid']) for n in services):
             raise RuntimeError('A service was not cold-reloaded')
+        after = settled(services, after, args.settle_seconds)
         fresh = ops.fresh_check()
         (backup / 'report.txt').write_text(fresh['report'])
         if take() != before or (ops.ROOT / ops.GUARD).read_bytes() != guard:
@@ -194,13 +238,14 @@ def main(argv=None):
             path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
         print(json.dumps(result, ensure_ascii=False))
     except BaseException:
-        for name in services:
-            ops.service('stop', name)
-        restore(backup, plan)
-        for name in reversed(services):
-            ops.service('start', name)
-        print('Source/manifest/pin rolled back from ' + str(backup) + '; trading DB retained; Live not activated.',
-              file=sys.stderr)
+        ops.ignore_hangup()
+        errors = restore(backup, plan, services)
+        if errors:
+            print('RESTORE INCOMPLETE; services may be stopped. Inspect ' + str(backup) + ': ' + '; '.join(errors),
+                  file=sys.stderr)
+        else:
+            print('Source/manifest/pin rolled back from ' + str(backup) + '; trading DB retained; Live not activated.',
+                  file=sys.stderr)
         raise
 
 

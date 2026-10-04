@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -20,6 +21,8 @@ MANIFEST = 'prediction/release-manifest.json'
 PIN = 'prediction/release-pin.env'
 GUARD = 'prediction/hs-recovery-startup.env'
 SERVICES = ('cry3-predict-user.service', 'cry3-regime-feature.service', 'cry3-c180-favorite-signal.service')
+VENV_PYTHON = 'testnet/.venv/bin/python'
+PRODUCER_MARKERS = ('run_t67c_asset.sh', 'regime_feature_service', 'c180_signal_runtime')
 # Reviewed offline from main 15c67fb; a different value means different policy bytes.
 POLICY_FINGERPRINT = '19b065791563f411faee5df68979c2e3d8c7c19de3088f0406a921c7c215f1bd'
 T69_TABLES = ('t69_flat_shadow_states', 't69_shadow_outcomes', 't69_shadow_quotes', 't69_shadow_states')
@@ -85,7 +88,8 @@ def snapshot(loop_id, *, allow_cancelled=False, allow_historical_closed=False):
         closed_exception = (" AND NOT COALESCE((c.state='DONE' AND c.loop_id<>? AND c.end_time_ms>0 AND c.end_time_ms<?),0)"
                             if allow_historical_closed else "")
         params = (loop_id, row['created_at_ms']) if allow_historical_closed else ()
-        if db.execute("SELECT 1 FROM prediction_campaigns c WHERE pending_unknown=1 OR "
+        # pending_intent_id mirrors repository.loop_market_local_clear().
+        if db.execute("SELECT 1 FROM prediction_campaigns c WHERE pending_unknown=1 OR pending_intent_id IS NOT NULL OR "
                       "(buy_count>0 AND NOT EXISTS(SELECT 1 FROM prediction_settlements s WHERE s.campaign_id=c.campaign_id AND s.status='SETTLED')"
                       + closed_exception + ")", params).fetchone():
             raise RuntimeError('Unsettled campaign')
@@ -105,6 +109,51 @@ def service(*args):
     # systemd's configured stop timeout is 90s; allow its normal teardown to finish.
     timeout = 120 if args and args[0] == 'stop' else 30
     return subprocess.check_output(['systemctl', '--user', *args], env=env, text=True, timeout=timeout).strip()
+
+
+def producer_units():
+    """Loaded cry3 user units whose ExecStart runs a feature/signal producer.
+
+    ETH/BNB producers (scripts/run_t67c_asset.sh) import T6.9 code, so they must
+    be cold-reloaded with the BTC services. Names come from systemd, not guesses.
+    """
+    listed = service('list-units', '--all', '--plain', '--no-legend', '--type=service', 'cry3-*')
+    found = []
+    for line in listed.splitlines():
+        name = line.split()[0] if line.split() else ''
+        if not name.startswith('cry3-') or not name.endswith('.service'):
+            continue
+        exec_start = service('show', name, '-p', 'ExecStart')
+        if any(marker in exec_start for marker in PRODUCER_MARKERS):
+            found.append(service_name(name))
+    return tuple(found)
+
+
+class Interrupted(Exception):
+    """SIGHUP/SIGTERM (for example a dropped SSH session) during --apply."""
+
+
+def raise_on_hangup():
+    """Turn hangup/terminate into an exception so the restore path runs."""
+    def handler(signum, _frame):
+        raise Interrupted('received signal ' + str(signum))
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, handler)
+
+
+def ignore_hangup():
+    """While restoring, a second hangup must not abort the restore itself."""
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, signal.SIG_IGN)
+
+
+def require_runtime():
+    """official_clear imports predict_main, which needs the app venv packages."""
+    try:
+        import dotenv  # noqa: F401
+        import telegram  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError('Run with ' + str(ROOT / VENV_PYTHON) + ' (missing ' + str(exc.name) + ')') from exc
 
 
 def service_state(name):
@@ -180,7 +229,7 @@ print(json.dumps(dict(policy=FINGERPRINT, live=len(LIVE_BRANCHES), shadow=len(SH
 
 def fresh_check():
     """Import deployed T6.9 in a new interpreter; render the report without sending it."""
-    result = subprocess.run([str(ROOT / 'testnet/.venv/bin/python'), '-B', '-c', FRESH_CHECK, str(ROOT)],
+    result = subprocess.run([str(ROOT / VENV_PYTHON), '-B', '-c', FRESH_CHECK, str(ROOT)],
                             cwd=ROOT, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise RuntimeError('Fresh deployed T6.9 import/report failed')
