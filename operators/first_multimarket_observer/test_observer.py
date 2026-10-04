@@ -219,6 +219,7 @@ class CapturePersistenceTests(unittest.IsolatedAsyncioTestCase):
                 meta=metadata(raw_market(),'BTCUSDT',START),features=dict(reversal=True,trend_pass=True,side='UP'),
                 initial_quote=walk([['.3','100']],200),recheck_attempted=START+128100)
             o.save(row);o.evidence('BTCUSDT',START,'recheck_UP',dict(tokenId='10',outcome='Up',timestamp=START+125000,asks=[dict(price='.3',size='100')]),START+128100)
+            o.flush()  # Fixture persistence must not depend on wall-clock phase.
             before=db.execute('SELECT payload FROM windows').fetchone()[0]
             p=snapshot(db,START+SLOT)
             self.assertEqual(p['rolling']['20']['BTCUSDT']['ALL']['recheck_reasons'],{'book_stale':1})
