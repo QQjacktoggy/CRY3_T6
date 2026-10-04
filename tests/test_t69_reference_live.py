@@ -58,7 +58,7 @@ def test_ninth_live_lane_fresh_reference_180_preserves_core_and_original_risk(tm
     result = late(obj)
     assert result.allowed, result.reason
     d = state(obj)
-    assert len(LIVE_BRANCHES) == 9 and len(SHADOW_BRANCHES) == 2
+    assert len(LIVE_BRANCHES) == 9 and len(SHADOW_BRANCHES) == 5
     assert d['branch'] == 'reference_180_mid'
     assert d['core_guard'] == before['core_guard']
     assert result.signal.cutoff_ms == S+180000

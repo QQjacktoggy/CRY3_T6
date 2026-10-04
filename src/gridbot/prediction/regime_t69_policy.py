@@ -15,7 +15,8 @@ NEW_BRANCHES = ('c_mirror_up_prior', 'shallow_retracement')
 FLAT_BRANCHES = ('flat_favorite',)
 LIVE_BRANCHES = CORE_BRANCHES + NEW_BRANCHES + FLAT_BRANCHES + ('reference_180_mid',)
 MARKETS = ('BTCUSDT', 'ETHUSDT', 'BNBUSDT')
-SHADOW_BRANCHES = ('external_lead_lag', 'reference_value')
+FLAT_SHADOW_BRANCHES = ('flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
+SHADOW_BRANCHES = ('external_lead_lag', 'reference_value') + FLAT_SHADOW_BRANCHES
 POLICY = dict(
     profile=PROFILE, version=1, parent_fingerprint=PARENT_FINGERPRINT,
     report_revision='pr12_verified_fixed_20run_v1', execution_revision='pr9_atomic_claim_selected_readonly_v1', core_fingerprint=CORE_FINGERPRINT,
@@ -55,7 +56,22 @@ POLICY = dict(
     checkpoint_max_rows=20000, checkpoint_max_payload_bytes=32*1024*1024,
     shadow='independent_public_quote_only; no_claim_no_live_risk_writes',
     shadow_branches=SHADOW_BRANCHES,
+    flat_shadow=dict(
+        gate='verified_empty_core; first_observed_checkpoint_immutable; records_live_overlap',
+        flat_quiet_favorite=dict(minute_abs_max_exclusive_bp='1', net_abs_max_exclusive_bp='1',
+                                 prior_abs_max_exclusive_bp='5', excludes='flat_favorite_state',
+                                 initial_ms=[124000, 126000], confirmation_ms=[128000, 129500],
+                                 favorite='stable_actual_ask_no_ties', price_band=['0.62', '0.80']),
+        flat_cheap_prior=dict(net_abs_max_exclusive_bp='1', prior_abs_min_bp='1',
+                              initial_ms=[124000, 126000], side='initial_cheaper_tie_down_aligned_prior',
+                              quote_ms=[128000, 134500], quote='first_executable_observed',
+                              price_band=['0.25', '0.40']),
+        flat_hold_180=dict(minute_abs_max_exclusive_bp='0.5', third_minute='binance_spot_120s_to_180s',
+                           spot_max_gap_ms=1500, initial_ms=[120000, 121500],
+                           confirmation_ms=[180000, 181500], favorite='stable_actual_ask_no_ties',
+                           price_band=['0.70', '0.85'], after='reference_180_mid'),
+    ),
     risk_state_key='regime_target6_risk_v1', loop_mdd_1u='3.5',
-    validation_mode='retained_seven_live; flat_favorite_live; reference_180_mid_live; no_profit_or_fill_forecast',
+    validation_mode='retained_seven_live; flat_favorite_live; reference_180_mid_live; flat_f2_f4_shadow_only; no_profit_or_fill_forecast',
 )
 FINGERPRINT = hashlib.sha256(json.dumps(POLICY, sort_keys=True).encode()).hexdigest()

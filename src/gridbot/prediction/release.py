@@ -162,6 +162,7 @@ _REQUIRED_FIXED_RELEASE_PATHS = (
     'src/gridbot/prediction/regime_t69_policy.py',
     'src/gridbot/prediction/regime_t69_bridge.py',
     'src/gridbot/prediction/regime_t69_shadow.py',
+    'src/gridbot/prediction/regime_t69_flat_shadow.py',
     'src/gridbot/prediction/regime_t69_reference.py',
     'src/gridbot/prediction/regime_t69_report.py',
     'src/gridbot/prediction/regime_worker_bridge.py',

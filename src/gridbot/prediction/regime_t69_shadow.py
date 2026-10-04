@@ -81,6 +81,14 @@ def observe(db, prediction_db, signal_db, at_ms, symbol='BTCUSDT'):
         exposure.update(identity, observed_at_ms=at_ms)
     capture_checkpoints(db, identity, books, spots, at_ms, unit,
                         core_decision=core_decision, exposure=exposure)
+    if identity['fee_bps'] is not None:
+        from .regime_t69_flat_shadow import observe as observe_flat
+        schema(db)
+        try:
+            observe_flat(db, identity, books, spots, at_ms, unit, core_decision)
+        except (ValueError, KeyError, TypeError, ArithmeticError):
+            # A Flat paper route failure must not hide the other Shadow quotes.
+            db.rollback()
     if not books:
         return 'shadow_book_missing'
     book = books[-1]

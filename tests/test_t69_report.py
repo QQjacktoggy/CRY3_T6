@@ -116,13 +116,15 @@ def test_empty_t69_never_falls_back_to_old_live(tmp_path):
         assert title+'｜報價 0｜已知paper WR —｜假設paper PnL —' in text
 
 
-def test_zero_rows_show_nine_live_and_two_shadow_only(tmp_path):
+def test_zero_rows_show_nine_live_and_five_shadow_grouped(tmp_path):
     with main_database(tmp_path):
         pass
     text = render(tmp_path)
     assert '本輪 WR —' in text and '本輪已知淨 PnL —' in text
     assert text.count('｜成交 0｜') == 9
-    assert text.count('｜報價 0｜') == 2
+    assert text.count('｜報價 0｜') == 5
+    for group in ('〔核心〕', '〔增量〕', '〔Flat〕', '〔180s 補位〕', '〔研究〕', '〔Flat F2–F4〕'):
+        assert group in text
     for retired in ('T6.6', 'M4 Shadow', 'M6 Shadow', 'A Shadow', 'flat/original Shadow', '補位Shadow'):
         assert retired not in text
 
@@ -331,7 +333,7 @@ def test_reference180_live_row_uses_actual_buy_and_official_net_settlement(tmp_p
         live_fill(db, feature, branch='reference_180_mid', side=side, pnl='2')
         paper_quote(db, feature, branch='reference_value', winner=side)
     text = render(tmp_path)
-    assert '九路 Live＋兩路 Shadow' in text
+    assert '九路 Live＋五路 Shadow' in text
     assert 'Reference 180s補位｜成交 1｜已知WR 100.0%｜已知PnL +2.0000 USDT｜待結算 0' in text
     assert 'Live fill rate 100.0%（1/1' in text
     assert '本輪已知淨 PnL +2.0000 USDT' in text
@@ -528,3 +530,15 @@ def test_fixed_twenty_run_results_keep_old_risk_boundary_and_t69_loop_scope(tmp_
     assert '待结算' not in second and '待結算/核對1' in second
     assert '已知PnL —（待核對／結算）' in second
     assert '本輪績效僅含T6.9此loop' in fixed
+
+
+@pytest.mark.parametrize('branch', ['flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180'])
+def test_flat_shadow_rows_are_grouped_with_breakeven(tmp_path, branch):
+    with main_database(tmp_path) as db, feature_database(tmp_path) as feature:
+        paper_quote(db, feature, branch=branch, winner='UP')
+    text = render(tmp_path)
+    section = text.split('〔Flat F2–F4〕', 1)[1].split('Shadow報價不等於實際成交', 1)[0]
+    title = SHADOW_LABELS[branch]
+    assert f'{title}｜報價 1｜已知paper WR 100.0%｜假設paper PnL +1.0000 USDT｜未知 0' in section
+    assert '兩平WR 50.0%（含費平均成本）' in section
+    assert text.count('｜報價 0｜') == 4
