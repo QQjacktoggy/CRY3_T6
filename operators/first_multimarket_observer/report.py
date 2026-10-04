@@ -4,9 +4,10 @@ from decimal import Decimal
 from datetime import datetime
 import html
 import json
+import zlib
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from policy import SYMBOLS, SLOT, FINGERPRINT, recheck
+from policy import SYMBOLS, SLOT, FINGERPRINT, recheck, book
 
 
 REASON_LABELS = {
@@ -17,6 +18,9 @@ REASON_LABELS = {
     'price_above_frozen_cap':'高於凍結限價', 'insufficient_frozen_share_depth':'限價內深度不足',
     'quote_age':'報價過期', 'recheck_window':'超過重檢期限',
     'recheck_data_unavailable':'重檢資料缺漏', 'recheck_not_attempted':'重檢未執行',
+    'book_token_side':'盤口方向不符','book_market':'盤口市場不符',
+    'ask_invalid':'盤口價格或數量無效','ask_sort_or_empty':'盤口空白或排序無效','crossed_book':'盤口交叉',
+    'book_stale':'盤口過期','book_future':'盤口時間超前',
     'book_stale_or_future':'盤口時間不符', 'recheck_unknown':'舊紀錄原因不足',
 }
 
@@ -25,7 +29,7 @@ def recheck_reason(row):
     if not row.get('initial_quote') or row.get('sim_quote'):return None
     if not row.get('recheck_attempted'):return 'recheck_not_attempted'
     q=row.get('recheck_book')
-    if not q:return 'recheck_data_unavailable'
+    if not q:return row.get('recheck_error','recheck_data_unavailable')
     try:
         if Decimal(q['levels'][0][0])>Decimal(row['initial_quote']['limit']):
             return 'price_above_frozen_cap'
@@ -67,6 +71,22 @@ def metrics(rows,side=None,key='sim_quote',pnl_key='sim_pnl'):
 
 def snapshot(db,at):
     rows=[json.loads(r[0]) for r in db.execute('SELECT payload FROM windows ORDER BY start,symbol')]
+    # Diagnose historical raw evidence on a copy; never rewrite old outcomes.
+    for row in rows:
+        if row.get('initial_quote') and row.get('recheck_attempted') and not row.get('recheck_book'):
+            side=row.get('features',{}).get('side')
+            evidence=db.execute('SELECT body,received FROM evidence WHERE symbol=? AND start=? AND stage=?',
+                (row['symbol'],row['start'],'recheck_'+str(side))).fetchone()
+            if evidence:
+                try:
+                    raw=json.loads(zlib.decompress(evidence[0]));book(raw,row['meta'],side,evidence[1])
+                except ValueError as exc:
+                    reason=str(exc)
+                    if reason=='book_stale_or_future':
+                        stamp=int(raw.get('data',raw).get('timestamp',0))
+                        reason='book_stale' if evidence[1]>stamp else 'book_future'
+                    if reason in REASON_LABELS:row['recheck_error']=reason
+                except (KeyError,TypeError,zlib.error):pass
     ended=[r for r in rows if r['end']<=at]
     starts=sorted({r['start'] for r in ended})
     health=db.execute('SELECT at_ms,payload FROM health WHERE id=1').fetchone()

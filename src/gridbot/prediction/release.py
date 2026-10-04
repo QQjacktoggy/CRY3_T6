@@ -16,6 +16,9 @@ MANIFEST_SCHEMA = "prediction-release-v1"
 # Prediction release inputs.
 _REQUIRED_FIXED_RELEASE_PATHS = (
     'predict_main.py',
+    'operators/t67c_multimarket_observer/engine.py',
+    'operators/t67c_multimarket_observer/service.py',
+    'operators/t67c_multimarket_observer/report.py',
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/calibration.py',
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/candidate_engine.py',
     'prediction/experiments/c180-original-mix75-v1-bda3e5a85a98/candidate_report.py',

@@ -1,5 +1,6 @@
 """Independent signed GET-only observer. Never imports the Live application."""
 import argparse
+from copy import deepcopy
 import asyncio
 from collections import deque
 import fcntl
@@ -82,17 +83,31 @@ class Observer:
         self.db=db;self.reader=reader;self.directory=Path(directory);self.stop=asyncio.Event()
         self.last_discovery=0;self.last_outcomes=0;self.last_report=0;self.last_start=None
         self.timeline={};self.tasks=set();self.errors={};self.phase_started=set();self.last_housekeeping=0
+        self.pending_rows={};self.pending_evidence={};self.last_health=0
     def error(self,phase,exc):
         # Exception messages may contain signed URLs: retain only bounded classes/codes.
         key=phase+':'+(str(exc) if isinstance(exc,ReadError) else type(exc).__name__)
         self.errors[key]=self.errors.get(key,0)+1
     def row(self,symbol,start):
+        if (symbol,start) in self.pending_rows:return deepcopy(self.pending_rows[(symbol,start)])
         row=self.db.execute('SELECT payload FROM windows WHERE symbol=? AND start=?',(symbol,start)).fetchone()
         return json.loads(row[0]) if row else dict(symbol=symbol,start=start,end=start+SLOT,reason='awaiting',policy=FINGERPRINT)
     def save(self,row):
-        with self.db:self.db.execute('INSERT OR REPLACE INTO windows VALUES(?,?,?)',(row['symbol'],row['start'],dumps(row)))
+        # Keep receipt/decision timestamps causal; disk fsync must not block the
+        # 120..136s capture window. A crash loses unflushed research data only.
+        self.pending_rows[(row['symbol'],row['start'])]=deepcopy(row)
+        if not 117000<=now()%SLOT<=140000:self.flush()
     def evidence(self,symbol,start,stage,raw,received):
-        with self.db:self.db.execute('INSERT OR IGNORE INTO evidence VALUES(?,?,?,?,?)',(symbol,start,stage,received,zlib.compress(dumps(raw).encode())))
+        self.pending_evidence.setdefault((symbol,start,stage),(received,deepcopy(raw)))
+        if not 117000<=now()%SLOT<=140000:self.flush()
+    def flush(self):
+        with self.db:
+            for (symbol,start,stage),(received,raw) in self.pending_evidence.items():
+                self.db.execute('INSERT OR IGNORE INTO evidence VALUES(?,?,?,?,?)',
+                    (symbol,start,stage,received,zlib.compress(dumps(raw).encode())))
+            for (symbol,start),row in self.pending_rows.items():
+                self.db.execute('INSERT OR REPLACE INTO windows VALUES(?,?,?)',(symbol,start,dumps(row)))
+        self.pending_rows.clear();self.pending_evidence.clear()
     def spawn(self,key,coroutine):
         if key in self.phase_started:coroutine.close();return
         self.phase_started.add(key)
@@ -167,6 +182,10 @@ class Observer:
             row['sim_at_ms']=at;row['reason']='QUOTE_SIMULATED_NOT_FILLED'
         except Exception as exc:
             self.error(symbol+'_recheck',exc);row['reason']='recheck_unavailable_or_rejected'
+            known={'book_token_side','book_market','book_stale_or_future','ask_invalid',
+                   'ask_sort_or_empty','crossed_book','quote_age','recheck_window','price_band',
+                   'insufficient_frozen_share_depth'}
+            row['recheck_error']=str(exc) if isinstance(exc,ValueError) and str(exc) in known else 'recheck_data_unavailable'
         self.save(row)
     async def outcomes(self):
         # Round robin oldest check avoids permanent starvation by one unresolved market.
@@ -227,7 +246,7 @@ class Observer:
                     self.last_start=start
                     self.phase_started={k for k in self.phase_started if k[0]>=start-SLOT}
                     self.timeline={k:v for k,v in self.timeline.items() if k[1]>=start-SLOT}
-                if not 119000<=offset<=137000:
+                if not 117000<=offset<=140000:
                     if at-self.last_discovery>=30000:
                         self.last_discovery=at;self.spawn((start,'discover',at//30000),self.discover(start))
                     if at-self.last_outcomes>=60000:
@@ -235,21 +254,24 @@ class Observer:
                 self.schedule_phases(start,at)
                 # Full-history report serialization and filesystem work must not
                 # block the sub-second capture loop during any quote checkpoint.
-                if not 119000<=offset<=137000:
+                if not 117000<=offset<=140000:
                     if at-self.last_housekeeping>=15000:
                         self.last_housekeeping=at
                         if shutil.disk_usage(self.directory).free<1024**3 or sum(p.stat().st_size for p in self.directory.glob('first-observer.sqlite3*'))>512*1024**2:
                             raise RuntimeError('observer_storage_budget')
                     if at-self.last_report>=15000:
                         self.last_report=at;write_reports(self.db,self.directory,at)
+                if not 117000<=offset<=140000:self.flush()
                 health=dict(policy=FINGERPRINT,errors=self.errors,inflight=len(self.tasks),cooldown_until_ms=self.reader.cooldown,readonly=True,selector_enabled=False)
-                with self.db:self.db.execute('INSERT OR REPLACE INTO health VALUES(1,?,?)',(at,dumps(health)))
+                if not 117000<=offset<=140000 and at-self.last_health>=5000:
+                    with self.db:self.db.execute('INSERT OR REPLACE INTO health VALUES(1,?,?)',(at,dumps(health)))
+                    self.last_health=at
                 try:await asyncio.wait_for(self.stop.wait(),timeout=.1 if 119000<=offset<=130000 else 1)
                 except asyncio.TimeoutError:pass
         finally:
             for task in list(self.tasks):task.cancel()
             await asyncio.gather(*self.tasks,return_exceptions=True)
-            write_reports(self.db,self.directory,now());self.db.close()
+            self.flush();write_reports(self.db,self.directory,now());self.db.close()
 
 async def main_async(args):
     import aiohttp
