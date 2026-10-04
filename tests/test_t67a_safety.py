@@ -270,7 +270,7 @@ async def test_t67a_risk_includes_every_old_profile_and_preserves_epoch(tmp_path
     repo = PredictionRepository(tmp_path/'db')
     await repo.initialize()
     try:
-        assert len(RISK_PROFILES) == len(set(RISK_PROFILES)) == 14
+        assert len(RISK_PROFILES) == len(set(RISK_PROFILES)) == 15
         assert PROFILE in RISK_PROFILES
         await repo.start_loop('oldest', 100, mode='LIVE', strategy_profile=RISK_PROFILES[0])
         oldest = RegimeLiveLedger(repo, profile=RISK_PROFILES[0])

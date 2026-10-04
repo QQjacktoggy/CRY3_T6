@@ -352,9 +352,9 @@ class PredictionRepository:
         return not (orders or pending or positions)
 
     async def start_bound_loop(self, loop_id, target, *, mode, strategy_profile, market_symbol, market_unit):
-        from .loop_market import PROFILE, symbol, execution_fingerprint
+        from .loop_market import PROFILES, symbol, execution_fingerprint
         asset = symbol(market_symbol)
-        if strategy_profile != PROFILE or str(market_unit) not in ('1','2','3') or int(target) < 1:
+        if strategy_profile not in PROFILES or str(market_unit) not in ('1','2','3') or int(target) < 1:
             raise ValueError("invalid bound loop configuration")
         conn = self._require_conn()
         await self._begin(conn)
@@ -368,7 +368,7 @@ class PredictionRepository:
                 raise ValueError("bound loop state/profile/mode changed")
             if binding:
                 if (binding['symbol'] != asset or binding['unit'] != str(market_unit)
-                        or binding['target'] != int(target) or binding['execution_fingerprint'] != execution_fingerprint(asset)):
+                        or binding['target'] != int(target) or binding['execution_fingerprint'] != execution_fingerprint(asset, strategy_profile)):
                     raise ValueError("bound loop identity immutable")
             elif asset != 'BTCUSDT':
                 raise ValueError("legacy loop has no asset binding")
@@ -381,7 +381,7 @@ class PredictionRepository:
             (loop_id,target,completed,state,mode,strategy_profile,created_at_ms,updated_at_ms)
             VALUES(?,?,0,'RUNNING',?,?,?,?)""", (loop_id,int(target),str(mode).upper(),strategy_profile,now,now))
         await conn.execute("INSERT INTO prediction_loop_market_bindings VALUES(?,?,?,?,?,?,?)",
-            (loop_id,asset,strategy_profile,execution_fingerprint(asset),str(market_unit),int(target),now))
+            (loop_id,asset,strategy_profile,execution_fingerprint(asset, strategy_profile),str(market_unit),int(target),now))
         await conn.commit()
         return await self._fetchone("SELECT * FROM prediction_loops WHERE loop_id=?", (loop_id,))
 
