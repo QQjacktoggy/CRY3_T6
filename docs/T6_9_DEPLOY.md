@@ -6,7 +6,7 @@
 
 | # | 誰 | 做什麼 | 通過的樣子 |
 |---|---|---|---|
-| 0 | VM session | 把下面五個檔案放到 `$OP`。建立候選目錄 `prediction/t69-release-staged-*`（建立方式待確認 1）。取得新 release fingerprint，交給你核准 | 你拿到一個 64 位 `FP` |
+| 0 | VM session | 把下面五個檔案放到 `$OP`。依下面「建立候選目錄」建立 `prediction/t69-release-staged-*`。取得新 release fingerprint，交給你核准 | 你拿到一個 64 位 `FP` |
 | 1 | VM session | 唯讀 preflight（指令 1） | `READ_ONLY_PREFLIGHT_PASSED` |
 | 2 | 你 | 確認沒有 RUNNING loop、官方零持倉零掛單，然後同意安裝 | — |
 | 3 | VM session | 安裝（指令 2） | `CODE_INSTALLED_LIVE_NOT_ACTIVATED`，並印出 backup 路徑 |
@@ -28,7 +28,7 @@ $PY $OP/t69_verify.py --expected-fingerprint $FP --backup $OP/runs/<毫秒>     
 
 **指令 2 和回退的 `--apply` 一定要在 tmux 裡跑**（`tmux new -s t69`）。IAP SSH 斷線時，tmux 讓程序繼續跑完。萬一沒用 tmux，程式也會把 SIGHUP／SIGTERM 轉成例外並自動還原，但仍以 tmux 為準。
 
-最後一輪如果是你停下的 CANCELLED 輪，加 `--allow-cancelled-loop`。如果有舊的已結束 campaign 沒有結算紀錄，加 `--allow-historical-closed-ledger`。ETH／BNB producer 也要一起冷載入：installer 會從 systemd 列出 ExecStart 含 `run_t67c_asset.sh`、`regime_feature_service` 或 `c180_signal_runtime` 的 `cry3-*` unit。只要有一個不在重載清單，就拒絕並印出要補的 `--extra-service cry3-….service`。照印出的名稱加上即可（見待確認 2）。
+最後一輪如果是你停下的 CANCELLED 輪，加 `--allow-cancelled-loop`。如果有舊的已結束 campaign 沒有結算紀錄，加 `--allow-historical-closed-ledger`。預設會冷載入 BTC 加 ETH／BNB 共 7 個服務（見下面「冷載入哪些服務」）。
 
 ## 回退
 
@@ -45,13 +45,41 @@ $PY $OP/t69_rollback.py --backup $OP/runs/<毫秒> --apply    # 回到父版本
 - 回退中途失敗時，服務保持停止等人檢查。這時沒有 loop 在跑，不會交易。
 - 安裝本身失敗時會自動還原，不需要另外跑回退。
 
-## 待確認（不猜，結果到了再補）
+## 建立候選目錄（待確認，請審查複核）
 
-1. **VM 怎麼建立候選目錄**。installer 只讀取、驗證已存在的候選目錄，格式和 T6.7d 相同：
-   - `candidate.json`：`parent`、`expected_fingerprint`、逐檔 `before`／`after`。
-   - `validation.json`：狀態 `STAGED_VERIFIED_NOT_DEPLOYED`，含 `parent`、`fingerprint`。
-   - 完整的 manifest 和 pin。
-2. **ETH／BNB producer 的服務名稱**。目前只知道觀察器 `cry3-first-multimarket-observer.service`。producer 會載入 T6.9 改到的程式，所以一定要一起冷載入。installer 會自己從 systemd 找出來，沒加就拒絕；名稱確認後寫進上面的指令。觀察器不是 producer，不會被重載。
+VM 上沒有建立 STAGE 的腳本或說明（2026-10-04 唯讀調查）。以下步驟依 T6.7d 的 STAGE 結構，以及 repo 既有的 release 工具（`release.py` 的 `build_release_manifest`、`scripts/build_t65_vm_overlay.py` 保留 VM inventory 的做法）推出，還沒在 VM 上跑過。T6.7d 的結構是：現行完整 release 的副本、疊上 PR20 的 13 檔 overlay、manifest 由 141 檔變 145 檔。
+
+1. **先看空間**：STAGE 在 `/home/jack_shih/cry3/prediction/` 底下（系統碟），是一份完整 release 副本。先 `du` 現行 release 的大小，系統碟剩餘空間要大於它加 128 MB。
+2. **複製父版本**：以現行 `prediction/release-manifest.json` 列出的每個檔案為準，用 `cp -p` 保留權限複製到 `prediction/t69-release-staged-v1-YYYYMMDD/` 的相同相對路徑；manifest 和 pin 也一起複製。
+3. **列出 overlay**：取 repo 已合併的 main（含 T6.9，PR #24／#25／#26）中，T6.9 新增或改過的 runtime 檔。凡是 VM 父版本有、而 repo 的對應檔不同的路徑，都先用 `git log --format=%H -- <path>` 對每個歷史版本算 sha256，確認 VM 那份是 repo 歷史裡的某一版。找不到就停：那代表 VM 有未審查的本地修改，覆蓋會遺失它。
+4. **疊上 overlay**：只複製步驟 3 確認過的檔案到 STAGE。VM 有、repo 沒有的檔案保留不動。
+5. **更新 inventory**：STAGE 的 `src/gridbot/prediction/release.py` 以 VM 父版本那份為底，只在 `_REQUIRED_FIXED_RELEASE_PATHS` 加入 T6.9 新增的路徑，不整份換成 repo 版本。這和 `build_t65_vm_overlay.py` 的做法相同。
+6. **重建 manifest 和 pin**：在 STAGE 目錄用 STAGE 自己的 `release.py` 執行 `build_release_manifest(STAGE)`，寫出 `prediction/release-manifest.json` 和 `prediction/release-pin.env`（格式同 `scripts/build_t6_release.py`），再用 `verify_release_manifest` 確認回傳空。
+7. **在 STAGE 跑測試**：`cd STAGE && nice -n 19 $PY -m pytest -q tests/test_t69*.py`，暫存目錄放資料碟。
+8. **寫 `candidate.json`**：
+   - `version`：`6.9.2`。
+   - `parent`：現行 manifest 的 fingerprint。
+   - `expected_fingerprint`：步驟 6 的 fingerprint。
+   - `files`：所有內容和父版本不同的路徑，各有 `path`、`before`（父版本 sha256，新檔為 null）、`after`。必須剛好等於 manifest 差異，installer 會用 `validate_candidate` 檢查。
+9. **寫 `validation.json`**：
+   - `status`：`STAGED_VERIFIED_NOT_DEPLOYED`。
+   - `parent`、`fingerprint`。
+   - 步驟 7 的測試結果。
+   - `service_restart: false`、`live_activation: false`。
+10. **交給 jack 核准**：把 fingerprint 交給 jack。他核准的值就是部署步驟裡的 `FP`。
+
+## 冷載入哪些服務
+
+預設 7 個（`deploy/t69_ops.py` 的 `SERVICES`）：
+
+- BTC：`cry3-predict-user`、`cry3-regime-feature`、`cry3-c180-favorite-signal`。
+- ETH／BNB producer：`cry3-t67c-{ethusdt,bnbusdt}-{feature,signal}`。
+
+ETH／BNB 的四個服務名稱和角色來自 2026-10-04 的 VM 唯讀調查。它們用 `scripts/run_t67c_asset.sh` 跑 `regime_feature_service` 和 `c180_signal_runtime`，和 BTC 載入同一份 T6.9 程式。「需要一起重載」是讀程式碼推論的，請審查複核。
+
+兩個觀測器 `cry3-first-multimarket-observer` 和 `cry3-t67c-multimarket-observer` 不重載。
+
+保險：installer 還會從 systemd 找出所有 ExecStart 含 `run_t67c_asset.sh`、`regime_feature_service` 或 `c180_signal_runtime` 的 `cry3-*` unit。只要有一個不在清單裡就拒絕，並印出要補的 `--extra-service`。
 
 ## 檔案
 

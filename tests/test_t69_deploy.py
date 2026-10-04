@@ -15,6 +15,7 @@ RELEASE = 'src/gridbot/prediction/release.py'
 SOURCE = 'src/gridbot/prediction/regime_t69_policy.py'
 ADDED = 'src/gridbot/prediction/regime_t69_new.py'
 STAGE = 't69-release-staged-v1-test'
+N = 7  # default reload list: BTC worker/feature/signal + ETH/BNB feature/signal
 
 
 def module(name):
@@ -138,7 +139,8 @@ def test_apply_installs_backs_up_and_never_activates(env, capsys):
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'CODE_INSTALLED_LIVE_NOT_ACTIVATED' and result['fingerprint'] == env.new
     assert env.live_release() == env.new and (env.root / ADDED).read_bytes() == b'added'
-    assert env.actions().count('stop') == 3 and env.actions().count('start') == 3
+    assert env.actions().count('stop') == N and env.actions().count('start') == N
+    assert len(env.ops.SERVICES) == 7 and 'cry3-t67c-bnbusdt-signal.service' in env.ops.SERVICES
     assert not {'enable', 'restart'} & set(env.actions())
     run = env.backup()
     assert (run / SOURCE).read_bytes() == b'parent' and not (run / ADDED).exists()
@@ -154,7 +156,7 @@ def test_apply_installs_backs_up_and_never_activates(env, capsys):
 
 def test_extra_services_are_cold_reloaded(env):
     env.install('--apply', '--extra-service', 'cry3-t67c-feature-ethusdt.service')
-    assert env.actions().count('stop') == 4
+    assert env.actions().count('stop') == N + 1
     with pytest.raises(SystemExit):
         env.install('--extra-service', '../evil.service')
 
@@ -171,7 +173,7 @@ def test_failed_apply_restores_parent_and_restarts(env, failure):
         env.install('--apply')
     assert env.live_release() == env.old
     assert (env.root / SOURCE).read_bytes() == b'parent' and not (env.root / ADDED).exists()
-    assert env.actions()[-3:] == ['start'] * 3
+    assert env.actions()[-N:] == ['start'] * N
     assert not (env.backup() / 'deployment.json').exists()
 
 
@@ -220,7 +222,7 @@ def test_rollback_preflight_then_apply_restores_parent(env, capsys):
     assert json.loads(capsys.readouterr().out)['status'] == 'ROLLED_BACK_LIVE_NOT_ACTIVATED'
     assert env.live_release() == env.old and not (env.root / ADDED).exists()
     assert (env.root / SOURCE).read_bytes() == b'parent'
-    assert env.actions()[calls:] == ['stop'] * 3 + ['start'] * 3
+    assert env.actions()[calls:] == ['stop'] * N + ['start'] * N
     assert json.loads((env.backup() / 'rollback.json').read_text())['fingerprint'] == env.old
 
 
@@ -247,7 +249,7 @@ def test_rollback_failure_after_stop_leaves_services_stopped(env):
     env.mocks['snapshot'].side_effect = [{'fixed': True}, {'fixed': True}, {'changed': True}]
     with pytest.raises(RuntimeError, match='changed after stopping'):
         roll(env, '--apply')
-    assert env.actions()[calls:] == ['stop'] * 3
+    assert env.actions()[calls:] == ['stop'] * N
 
 
 def test_verifier_is_read_only_and_reports_each_check(env, capsys):
@@ -312,14 +314,14 @@ def test_unreloaded_producer_units_are_refused_before_services(env):
         env.install('--apply')
     assert env.actions() == [] and not list(env.backups.iterdir())
     env.install('--apply', '--extra-service', 'cry3-t67c-eth-feature.service')
-    assert env.actions().count('stop') == 4 and env.live_release() == env.new
+    assert env.actions().count('stop') == N + 1 and env.live_release() == env.new
 
 
 def test_hangup_during_apply_restores_parent(env):
     calls = []
     def service(action, name):
         calls.append(action)
-        if action == 'start' and calls.count('start') == 1 and 'stop' in calls and len(calls) < 6:
+        if action == 'start' and calls.count('start') == 1:
             raise env.ops.Interrupted('received signal 1')
         env.pid.pop(name, None) if action == 'start' else None
         return 'active'
@@ -337,7 +339,7 @@ def test_restore_continues_when_a_stop_times_out(env):
     def service(action, name):
         if action == 'stop':
             stops.append(name)
-            if len(stops) == 4:  # first stop inside the restore path
+            if len(stops) == N + 1:  # first stop inside the restore path
                 raise subprocess.TimeoutExpired('systemctl', 120)
         if action == 'start':
             env.pid.pop(name, None)
@@ -346,7 +348,7 @@ def test_restore_continues_when_a_stop_times_out(env):
     with pytest.raises(RuntimeError, match='report failed'):
         env.install('--apply')
     assert env.live_release() == env.old and not (env.root / ADDED).exists()
-    assert env.actions()[-3:] == ['start'] * 3
+    assert env.actions()[-N:] == ['start'] * N
 
 
 def test_leftover_temp_file_does_not_block_install(env):

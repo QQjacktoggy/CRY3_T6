@@ -122,10 +122,11 @@ def restore(backup, plan, services):
         attempt('restore ' + relative, lambda relative=relative: shutil.copy2(backup / relative, safe_path(ops.ROOT, relative)))
     attempt('verify parent', lambda: verify_parent(plan))
     # Start only on a verified parent tree; a half-restored tree must not run.
-    if len(errors) == stop_errors:
+    restored = len(errors) == stop_errors
+    if restored:
         for name in reversed(services):
             attempt('start ' + name, lambda name=name: ops.service('start', name))
-    return errors
+    return restored, errors
 
 
 def verify_parent(plan):
@@ -239,13 +240,13 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False))
     except BaseException:
         ops.ignore_hangup()
-        errors = restore(backup, plan, services)
-        if errors:
-            print('RESTORE INCOMPLETE; services may be stopped. Inspect ' + str(backup) + ': ' + '; '.join(errors),
+        restored, errors = restore(backup, plan, services)
+        if not restored:
+            print('RESTORE INCOMPLETE; services left stopped. Inspect ' + str(backup) + ': ' + '; '.join(errors),
                   file=sys.stderr)
         else:
-            print('Source/manifest/pin rolled back from ' + str(backup) + '; trading DB retained; Live not activated.',
-                  file=sys.stderr)
+            print('Source/manifest/pin rolled back from ' + str(backup) + '; trading DB retained; Live not activated.'
+                  + (' Warnings: ' + '; '.join(errors) if errors else ''), file=sys.stderr)
         raise
 
 

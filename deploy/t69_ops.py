@@ -20,7 +20,11 @@ ROOT = Path('/home/jack_shih/cry3')
 MANIFEST = 'prediction/release-manifest.json'
 PIN = 'prediction/release-pin.env'
 GUARD = 'prediction/hs-recovery-startup.env'
-SERVICES = ('cry3-predict-user.service', 'cry3-regime-feature.service', 'cry3-c180-favorite-signal.service')
+SERVICES = ('cry3-predict-user.service', 'cry3-regime-feature.service', 'cry3-c180-favorite-signal.service',
+            # ETH/BNB producers (scripts/run_t67c_asset.sh) run the same modules; names from the
+            # 2026-10-04 read-only VM survey. producer_units() still refuses any unit missing here.
+            'cry3-t67c-ethusdt-feature.service', 'cry3-t67c-bnbusdt-feature.service',
+            'cry3-t67c-ethusdt-signal.service', 'cry3-t67c-bnbusdt-signal.service')
 VENV_PYTHON = 'testnet/.venv/bin/python'
 PRODUCER_MARKERS = ('run_t67c_asset.sh', 'regime_feature_service', 'c180_signal_runtime')
 # Reviewed offline from main 15c67fb; a different value means different policy bytes.
