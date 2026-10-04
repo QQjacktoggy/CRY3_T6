@@ -15,13 +15,55 @@ class _FeaturesMissing(ValueError):
     pass
 
 
+# Only missing/stale local data can be polled again. Identity, future clocks,
+# price, depth and EV failures must remain explicit, fail-closed refusals.
+TRANSIENT_BOOK_REASONS = frozenset({
+    't67c_book_missing', 't67c_book_receipt_stale',
+    't67c_book_source_stale', 't67c_fresh_book_required',
+})
+
+
+def _refusal(exc, snapshot, at_ms):
+    known = {
+        'book identity/depth missing': 't67c_book_identity_or_depth_invalid',
+        'frozen_identity_unit_fee_mismatch': 't67c_frozen_identity_unit_fee_mismatch',
+        'initial_fee_changed': 't67c_initial_fee_changed',
+        'candidate_price_band': 't67c_execution_price_band',
+        'best ask below price band': 't67c_execution_price_band',
+        'price band': 't67c_execution_price_band',
+        'insufficient requested depth': 't67c_execution_insufficient_depth',
+        'candidate_ev': 't67c_execution_ev',
+        'fee net EV': 't67c_execution_ev',
+        'invalid ask depth': 't67c_execution_depth_invalid',
+        'unsorted ask depth': 't67c_execution_depth_invalid',
+        'invalid fee': 't67c_execution_fee_invalid',
+        'nonfinite input': 't67c_nonfinite_input',
+    }
+    # Exception text is matched locally against constants; never emitted.
+    message = str(exc) if isinstance(exc, ValueError) else ''
+    if message in ('book receipt stale or future', 'book stale or future'):
+        try:
+            book_at = int(snapshot['book_at_ms'])
+            if message == 'book stale or future':
+                return 't67c_book_source_future' if book_at > at_ms else 't67c_book_source_stale'
+            clocks = [int(snapshot[k]) for k in ('received_at', 'received_at_ms', 'captured_at_ms')]
+            future = any(t > at_ms or t < book_at for t in clocks)
+            return 't67c_book_receipt_future' if future else 't67c_book_receipt_stale'
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            return 't67c_book_clock_invalid'
+    return known.get(message, 't67c_inputs_unavailable:'+type(exc).__name__)
+
+
 def check_signal(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
     from . import regime_worker_bridge as b
     start = int(market.start_time_ms)
     if unit_usdt not in (1, 2, 3) or not start+124000 <= at_ms < start+136000:
         return b.C180Ready(False, 't67c_unit_or_execution_window')
+    snapshot = None
     try:
         snapshot = b.read_c180_book(bridge.signal_db, start)
+        if snapshot is None:
+            return b.C180Ready(False, 't67c_book_missing')
         stamp = bridge._book(snapshot, market, at_ms)
         if at_ms-stamp > 1000:
             return b.C180Ready(False, 't67c_fresh_book_required')
@@ -42,6 +84,8 @@ def check_signal(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
             d = _persist_selection(bridge, market, unit_usdt, at_ms, snapshot)
             guard = d['core_guard']
         if not d['selected']:
+            if d.get('execution_denials'):
+                return b.C180Ready(False, d['execution_denials'][0])
             return b.C180Ready(False, 't67c_no_live_candidate:'+guard['reason'])
         if at_ms < d['selected_at_ms']:
             return b.C180Ready(False, 't67c_frozen_selection_future')
@@ -66,7 +110,7 @@ def check_signal(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
     except _FeaturesMissing:
         return b.C180Ready(False, 't67c_features_missing')
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
-        return b.C180Ready(False, 't67c_inputs_unavailable:'+type(exc).__name__)
+        return b.C180Ready(False, _refusal(exc, snapshot, at_ms))
 
 
 def _identity(d, bridge, market, unit, snapshot):
@@ -108,11 +152,13 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
         if not d['selected'] and guard.get('verified') and at_ms <= start+134500:
             choices = additions(snapshot, guard['features'], unit_usdt) if guard['empty'] else guard['candidates']
             d['eligible_branches'] = [c['branch'] for c in choices]
+            d['execution_denials'] = []
             for candidate in choices:
                 try:
                     ex = (new_execution(snapshot, candidate['side'], unit_usdt, lower=candidate['lower'], cap=candidate['cap'])
                           if guard['empty'] else eligible_execution(candidate, snapshot, unit_usdt))
-                except (ValueError, KeyError, TypeError, ArithmeticError):
+                except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                    d['execution_denials'].append(_refusal(exc, snapshot, at_ms))
                     continue
                 d.update(candidate, selected=True, selected_at_ms=at_ms,
                          expires_at_ms=start+136000 if not guard['empty'] else min(start+136000, at_ms+POLICY['quote_ttl_ms']))

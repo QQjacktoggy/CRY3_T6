@@ -73,6 +73,33 @@ def entry_http_guard_scope(guard):
 
 
 _REQUEST_ADMISSION_GUARD = ContextVar('prediction_request_admission_guard', default=None)
+_REQUEST_TIMING = ContextVar('prediction_request_timing', default=None)
+
+
+@contextmanager
+def request_timing_scope(callback):
+    """Optional buffered telemetry; contains no request parameters or URLs."""
+    token = _REQUEST_TIMING.set(callback)
+    try:
+        yield
+    finally:
+        _REQUEST_TIMING.reset(token)
+
+
+@contextmanager
+def request_stage(stage):
+    callback = _REQUEST_TIMING.get()
+    if callback is None:
+        yield
+        return
+    started = time.monotonic_ns()
+    try:
+        yield
+    finally:
+        try:
+            callback(stage, time.monotonic_ns()-started)
+        except Exception:
+            pass  # Diagnostics cannot replace admission or its exception.
 
 
 @contextmanager
@@ -476,7 +503,8 @@ class BinancePredictionClient:
         for attempt in range(attempts):
             # A prepaid execution bundle covers this original call only. A
             # retry must reserve its own HTTP weight, and can be deferred.
-            self._before_http(use_prepaid=attempt == 0)
+            with request_stage('shared_weight_admission'):
+                self._before_http(use_prepaid=attempt == 0)
             pairs = list(base_pairs)
             signed_at = None
             if signed:
@@ -485,7 +513,9 @@ class BinancePredictionClient:
                 if self.recv_window is not None and not any(key == "recvWindow" for key, _ in pairs):
                     pairs.append(("recvWindow", self.recv_window))
                 canonical = _form_encode(pairs, raw_brackets=raw_brackets)
-                pairs.append(("signature", hmac_sha256_signature(self.api_secret, canonical)))
+                with request_stage('request_signing'):
+                    signature = hmac_sha256_signature(self.api_secret, canonical)
+                pairs.append(("signature", signature))
             canonical = _form_encode(pairs, raw_brackets=raw_brackets)
             url = f"{self.base_url}{path}"
             body = None
@@ -537,18 +567,21 @@ class BinancePredictionClient:
 
     def _transport_request(self, *args, **kwargs):
         budget = self.request_budget
-        token = budget.begin_request() if budget else None
+        with request_stage('request_journal'):
+            token = budget.begin_request() if budget else None
         if budget and token is None:
             raise SharedBudgetDeferred(budget.health())
         try:
             admission = _REQUEST_ADMISSION_GUARD.get()
             if admission is not None:
-                admission()
+                with request_stage('transport_cooldown_admission'):
+                    admission()
             if (str(args[0]).upper() == 'POST'
                     and urllib.parse.urlsplit(args[1]).path == PREDICTION_PREFIX + '/trade/place-order-bundle'):
                 guard = _ENTRY_HTTP_GUARD.get()
                 if guard is not None:
-                    guard()  # Journal fsync may consume the deadline or change stop state.
+                    with request_stage('final_http_admission'):
+                        guard()  # Journal fsync may consume the deadline or change stop state.
             response = self.transport.request(*args, **kwargs)
         except BaseException:
             if budget:

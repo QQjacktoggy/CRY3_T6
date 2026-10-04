@@ -100,6 +100,7 @@ _REQUIRED_FIXED_RELEASE_PATHS = (
     'src/gridbot/prediction/migrations/024_c180_live_gate.sql',
     'src/gridbot/prediction/migrations/025_regime_lane.sql',
     'src/gridbot/prediction/migrations/026_loop_market.sql',
+    'src/gridbot/prediction/migrations/027_campaign_market_buy_lookup.sql',
     'src/gridbot/prediction/loop_market.py',
     'src/gridbot/prediction/loop_market_worker.py',
     'src/gridbot/prediction/models.py',
