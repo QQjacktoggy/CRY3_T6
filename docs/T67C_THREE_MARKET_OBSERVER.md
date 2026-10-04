@@ -9,7 +9,8 @@
 1秒新鮮度、C的0.65門檻及原優先順序不變。選中後必須在原到期前觀測到下一筆新鮮盤口才能成為模擬候選。
 本觀測為獨立1U報價執行假設，不建模真實掛單排隊、送單延遲、實際fill、帳戶曝險或Live風控。
 
-原有外部先行、Reference兩條Shadow另外計算，不加入七路合計。所有勝方來自既有First觀測器保存的
+原有外部先行、Reference兩條Shadow另外計算，不加入七路合計；以約1秒節拍觀測，
+117–140秒優先保留七路捕捉而暫停兩條研究Shadow。PnL包含交易費但未扣模型呼叫費。所有勝方來自既有First觀測器保存的
 官方結算與market/topic/token/起止/費率身份核對，平局0.5 payout，扣費一次；未結不補零，沒有樣本顯示—。
 研究服務只讀三幣feature/signal/evidence及First觀測DB；既有feature在121秒仍缺漏時，
 各幣最多一次並行公開K線補取（1.2秒timeout、原123秒receipt截止、production freeze_features驗證），

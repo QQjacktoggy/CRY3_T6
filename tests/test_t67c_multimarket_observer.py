@@ -148,3 +148,13 @@ def test_public_feature_fallback_deadline_identity_and_readonly_url():
     times=iter([S+121100,S+123001])
     with patch('urllib.request.urlopen',return_value=Response(json.dumps(candles).encode())),pytest.raises(ValueError):
         fetch_features('BNBUSDT',S,clock=lambda:next(times))
+
+
+def test_shadow_cadence_can_confirm_inside_two_second_trigger_expiry():
+    from operators.t67c_multimarket_observer.service import Collector
+    c=Collector.__new__(Collector);c.last_start=S;c.last_shadow=S+60000;c.last_report=S+60000
+    c.states={s:new_state(s,S) for s in ('BTCUSDT','ETHUSDT','BNBUSDT')}
+    c.paths={s:('unused','unused') for s in c.states};c.market=lambda *args:market();c.errors={}
+    with patch('operators.t67c_multimarket_observer.service.read_inputs',return_value=([],[])),patch('operators.t67c_multimarket_observer.service.observe_shadow') as observe:
+        c.tick(S+61020)
+    assert observe.call_count==3 and c.last_shadow==S+61020

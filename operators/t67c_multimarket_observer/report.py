@@ -64,7 +64,7 @@ def render(p,window=20,asset=None,now_ms=None):
         for b in SHADOW_BRANCHES:lines.append(LABELS[b]+'：'+stats(m['shadow'][b]))
         if m['missing']:lines.append(f"⚠ {m['missing']}場未完成初始判定，保留分母；不視為策略無訊號。")
     lines+=['','核心優先、補充讓位；每幣每場最多一次七路候選。','選中後須在原期限內獲得下一筆新鮮盤口；不代表真實成交。',
-        '官方勝方；扣費一次，WR排除平局，PnL包含平局。','新觀測自啟用開始；無樣本的 — 不是零收益。不自動選幣／開單。']
+        '官方勝方；含交易費、未扣模型費。WR排除平局，PnL包含平局。','新觀測自啟用開始；無樣本的 — 不是零收益。不自動選幣／開單。']
     text='\n'.join(lines)
     if len(text)>3900:raise ValueError('report_length')
     return text

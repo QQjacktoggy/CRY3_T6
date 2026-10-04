@@ -105,7 +105,7 @@ class Collector:
                 self.states[s]=json.loads(r[0]);self.states[s]['observed_since_ms']=at
             self.last_start=start
             self.feature_jobs={k:v for k,v in self.feature_jobs.items() if k[1]>=start};self.feature_cache={k:v for k,v in self.feature_cache.items() if k[1]>=start}
-        shadows=at-self.last_shadow>=2000 and not 117000<=offset<=140000
+        shadows=at-self.last_shadow>=900 and not 117000<=offset<=140000
         for s,state in self.states.items():
             try:
                 if not 60000<=offset<270000:continue
