@@ -56,7 +56,7 @@ def setup(tmp_path):
 
 def test_overlay_fingerprint_matches_stage_build(setup):
     repo, vm, (a, b, new, op) = setup
-    overlay, candidate, out, report = cand.build(repo.root, 'HEAD', manifest(vm), vm[REL])
+    overlay, candidate, out, report = cand.build(repo.root, 'HEAD', manifest(vm), vm[REL], add=(op,))
     assert sorted(overlay) == sorted([REL, a, new, op]) and report['added'] == [new, op]
     assert overlay[REL].startswith(b'X = 1\n') and overlay[REL].endswith(b'    return X\n')
     stage = dict(vm, **overlay)  # the tree the VM session would build
@@ -66,11 +66,13 @@ def test_overlay_fingerprint_matches_stage_build(setup):
         REL: sha(vm[REL]), a: sha(vm[a]), new: None, op: None}
 
 
-def test_keep_out_leaves_existing_vm_file_out_of_inventory(setup):
+def test_only_new_runtime_modules_are_added_by_default(setup):
     repo, vm, (a, b, new, op) = setup
-    overlay, candidate, out, report = cand.build(repo.root, 'HEAD', manifest(vm), vm[REL], keep_out=(op,))
+    overlay, candidate, out, report = cand.build(repo.root, 'HEAD', manifest(vm), vm[REL])
     assert op not in overlay and op not in {r['path'] for r in out['files']}
-    assert cand.inventory(overlay[REL])[0] == [REL, a, b, new]
+    assert cand.inventory(overlay[REL])[0] == [REL, a, b, new] and report['not_added'] == [op]
+    overlay, *_ = cand.build(repo.root, 'HEAD', manifest(vm), vm[REL], keep_out=(new,))
+    assert REL not in overlay  # nothing added, release.py unchanged
     with pytest.raises(RuntimeError, match='keep-out'):
         cand.build(repo.root, 'HEAD', manifest(vm), vm[REL], keep_out=(a,))
 

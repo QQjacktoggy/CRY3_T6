@@ -4,10 +4,14 @@ Inputs are the VM's live ``prediction/release-manifest.json`` (paths and
 sha256 only) and its ``src/gridbot/prediction/release.py`` (copied read-only).
 Every manifest path whose VM hash differs from ``--ref`` must match some
 earlier version of that path in ``--ref``'s history, otherwise the VM has an
-unreviewed local edit and this refuses. The VM ``release.py`` stays the base:
-only paths ``--ref`` lists and the VM does not are appended to its inventory,
-minus any ``--keep-out`` path (for example a file that already exists on the
-VM outside the manifest, which the installer would refuse to overwrite).
+unreviewed local edit and this refuses. The VM ``release.py`` stays the base.
+Of the paths ``--ref`` lists and the VM does not, only new runtime modules under
+``src/gridbot/prediction/`` are appended by default (the VM verifier rejects any
+unlisted runtime file there). Others, such as the c180 experiment directory that
+already exists on the VM outside the manifest and that the installer would
+refuse to overwrite, are reported as ``not_added`` unless named with ``--add``.
+``--keep-out`` drops a runtime module. ``report.json`` lists every path that
+differs between the VM and ``--ref`` for per-file review before approval.
 
 The output is the overlay, ``candidate.json`` and the expected manifest and
 fingerprint. The VM session builds STAGE from the same overlay and computes the
@@ -25,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deploy'))
 from release_verifier import RELEASE, safe_path  # noqa: E402
 
 VERSION = '6.9.2'
+RUNTIME = 'src/gridbot/prediction/'
 
 
 def sha(content):
@@ -81,7 +86,7 @@ def patch_release(source, additions):
     return patched
 
 
-def build(repo, ref, vm_manifest, vm_release, keep_out=()):
+def build(repo, ref, vm_manifest, vm_release, keep_out=(), add=()):
     rows = vm_manifest['files']
     vm = {row['path']: row['sha256'] for row in rows}
     if len(vm) != len(rows) or RELEASE not in vm:
@@ -92,10 +97,12 @@ def build(repo, ref, vm_manifest, vm_release, keep_out=()):
     if set(vm_inventory) != set(vm):
         raise RuntimeError('VM release.py inventory differs from the VM manifest paths')
     main_inventory, _ = inventory(git(repo, 'show', f'{ref}:{RELEASE}'))
-    unknown = sorted(set(keep_out) - (set(main_inventory) - set(vm)))
+    fresh = [p for p in main_inventory if p not in vm]
+    unknown = sorted((set(keep_out) | set(add)) - set(fresh))
     if unknown:
-        raise RuntimeError('--keep-out must name paths new in the ref: ' + ', '.join(unknown))
-    additions = [p for p in main_inventory if p not in vm and p not in keep_out]
+        raise RuntimeError('--keep-out/--add must name paths new in the ref: ' + ', '.join(unknown))
+    additions = [p for p in fresh if p not in keep_out and (p.startswith(RUNTIME) or p in add)]
+    not_added = [p for p in fresh if p not in additions]
     overlay, problems, vm_only = {}, [], []
     for path in vm_inventory + additions:
         safe_path(repo, path)
@@ -125,7 +132,7 @@ def build(repo, ref, vm_manifest, vm_release, keep_out=()):
                  'files': [{'path': p, 'before': vm.get(p), 'after': new[p]} for p in changed]}
     report = {'ref': git(repo, 'rev-parse', ref).decode().strip(), 'parent': candidate['parent'],
               'fingerprint': manifest['release_fingerprint'], 'files': len(entries), 'changed': changed,
-              'added': additions, 'kept_out': sorted(keep_out), 'vm_only': vm_only}
+              'added': additions, 'not_added': not_added, 'vm_only': vm_only}
     return {p: overlay[p] for p in changed}, candidate, manifest, report
 
 
@@ -135,12 +142,13 @@ def main(argv=None):
     parser.add_argument('--vm-release', required=True, help="Copy of the VM's src/gridbot/prediction/release.py")
     parser.add_argument('--output', required=True, help='New directory for overlay/, candidate.json and the manifest')
     parser.add_argument('--ref', default='origin/main')
-    parser.add_argument('--keep-out', action='append', default=[])
+    parser.add_argument('--keep-out', action='append', default=[], help='New ref path not to add')
+    parser.add_argument('--add', action='append', default=[], help='New ref path outside src/gridbot/prediction to add')
     args = parser.parse_args(argv)
     repo = Path(__file__).resolve().parents[1]
     overlay, candidate, manifest, report = build(
         repo, args.ref, json.loads(Path(args.vm_manifest).read_text()), Path(args.vm_release).read_bytes(),
-        tuple(args.keep_out))
+        tuple(args.keep_out), tuple(args.add))
     out = Path(args.output)
     out.mkdir(parents=True)
     for path, content in overlay.items():

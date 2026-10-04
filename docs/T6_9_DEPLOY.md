@@ -49,19 +49,22 @@ $PY $OP/t69_rollback.py --backup $OP/runs/<毫秒> --apply    # 回到父版本
 
 VM 上沒有建立 STAGE 的腳本或說明（2026-10-04 唯讀調查）。以下步驟依 T6.7d 的 STAGE 結構（現行完整 release 的副本加上 overlay）和 `scripts/build_t65_vm_overlay.py` 保留 VM inventory 的做法，還沒在 VM 上跑過。重點是 overlay 和指紋由雲端用 `scripts/build_t69_candidate.py` 離線算出，VM 只負責複製和獨立重算。
 
-1. **VM 唯讀交出兩個檔**：VM session 把現行 `prediction/release-manifest.json`（只有路徑和 sha256）和 `src/gridbot/prediction/release.py` 複製回雲端。同時唯讀回報：main inventory 裡有、VM manifest 裡沒有的路徑，哪些已經存在於 VM（例如 `operators/t67c_multimarket_observer/*`，觀測器正在用）。
-2. **雲端先唯讀比對再決定 inventory**：已存在的路徑若加進 inventory，installer 會以 "New release path already exists" 拒絕（`deploy/release_verifier.py:125`）。依第 1 步結果決定：
-   - VM 已有、內容等於 main → 用 `--keep-out` 排除，這次不納入（觀測器服務本來就不重載）。
-   - VM 已有、內容不等於 main → 停下來問 jack。
-   - VM 沒有 → 照 main 加入。
-3. **雲端計算 overlay**：
+1. **VM 唯讀交出兩個檔**：VM session 把現行 `prediction/release-manifest.json`（只有路徑和 sha256）和 `src/gridbot/prediction/release.py` 複製回雲端。10/04 唯讀調查：VM `release.py` 349 行（sha256 `d67d78d1…edada5b`），inventory 153 檔，已含三個 `operators/t67c_multimarket_observer/*`，不含 `operators/first_multimarket_observer/*`（first 觀測器在 release 外獨立執行）。
+2. **雲端計算 overlay**：
    ```sh
    python scripts/build_t69_candidate.py --vm-manifest vm-manifest.json --vm-release vm-release.py \
-       --ref origin/main --output out/ [--keep-out <path> ...]
+       --ref origin/main --output out/ [--add <path> ...] [--keep-out <path> ...]
    ```
-   比對範圍是 VM manifest 的**每一個**檔，不只 T6.9 改過的：凡是 VM 的 sha 不等於 main 的檔都換成 main 的版本，所以 main 上其他還沒部署的修改也會一起進來，不會新舊混合。換之前會確認 VM 那份是 main 歷史中的某一版；找不到就拒絕，因為那代表 VM 有未審查的本地修改。VM 有、main 沒有的路徑保留 VM 原樣，列在 `report.json` 的 `vm_only`。
-4. **`release.py` 的唯一寫法**：以 VM 那份為底，只在 `_REQUIRED_FIXED_RELEASE_PATHS` 尾端加入第 2 步決定要加的路徑，不換成 repo 版本。腳本會確認改完的 inventory 剛好是「VM 原有加上新增」。overlay 裡的 `release.py` 就是這份，其他檔都是 main 的原始位元組。
-5. **雲端跑測試**：overlay 之外的檔都和 main 相同，所以測試在 repo 端跑：在 main 的 checkout 把 `release.py` 換成 overlay 那份，跑全套 pytest 和 `python -m scripts.build_t6_release`（`tests/`、`pyproject.toml` 不在 release inventory，STAGE 裡沒有，也不需要在 VM 跑）。
+   - 比對範圍是 VM manifest 的**每一個**檔，不只 T6.9 改過的：凡是 VM 的 sha 不等於 main 的檔都換成 main 的版本，所以 main 上其他還沒部署的修改也會一起進來，不會新舊混合。換之前會確認 VM 那份是 main 歷史中的某一版；找不到就拒絕，因為那代表 VM 有未審查的本地修改。
+   - VM 有、main 沒有的路徑（調查約 28 個，例如 `control_main.py`、`src/gridbot/prediction/` 的 `control_*`、`moe*`、`official_*`、`wss*`、`maintenance.py`）保留 VM 原樣，列在 `report.json` 的 `vm_only`。這些檔從未進過 repo。
+   - main 有、VM 沒有的路徑（調查約 36 個），預設只把 `src/gridbot/prediction/` 底下的新模組加進 inventory（T6.9 的 6 個模組；VM verifier 會拒絕沒列入的 runtime 檔）。其他路徑，例如 `prediction/experiments/c180-original-mix75-v1-…/`（c180 訊號正在用，檔案應已存在於 VM、只是不在 manifest 裡）、`scripts/build_t6_release.py`、`src/gridbot/__init__.py`，列在 `not_added`，不加入。已存在的檔若加進 inventory，installer 會以 "New release path already exists" 拒絕（`deploy/release_verifier.py:125`）。真的要加，用 `--add`，並先唯讀確認 VM 上沒有這個檔。
+3. **逐檔審查（部署前必做）**：把 `report.json` 的 `changed`、`added`、`not_added`、`vm_only` 四份清單全部交給審查複核，逐檔確認：
+   - `changed` 裡每個非 T6.9 的檔，是 main 上哪個已合併 PR 改的，換上去是否安全。
+   - `vm_only` 裡 `src/gridbot/prediction/` 的模組，是否被 VM 上任何仍在執行的程式 import；若有，它們依賴的函式在 main 版本中是否還在（在 VM 唯讀 grep）。
+   - `not_added` 每一項都確認不需要。
+   審查沒有逐檔過完，不進下一步。
+4. **`release.py` 的唯一寫法**：以 VM 那份為底，只在 `_REQUIRED_FIXED_RELEASE_PATHS` 尾端加入第 2 步的 `added`，不換成 repo 版本。腳本會確認改完的 inventory 剛好是「VM 原有加上新增」。overlay 裡的 `release.py` 就是這份，其他檔都是 main 的原始位元組。VM 版沒有 main 版的 symlink 和非 canonical 路徑檢查；這次沿用 VM 版，可信的 `deploy/release_verifier.py` 本身有這兩項檢查。
+5. **雲端跑測試**：overlay 裡除了 `release.py` 都是 main 的位元組，所以測試在 repo 端跑：在 main 的 checkout 跑全套 pytest，再把 `release.py` 換成 overlay 那份，確認它能 import、`inventory` 解析正確（`tests/`、`pyproject.toml` 不在 release inventory，STAGE 裡沒有，也不需要在 VM 跑）。`vm_only` 的模組雲端測不到，靠第 3 步審查。
 6. **VM 建立 STAGE**：先 `du` 現行 release，系統碟剩餘空間要大於它加 128 MB。依現行 manifest 用 `cp -p` 把每個檔複製到 `prediction/t69-release-staged-v1-YYYYMMDD/`，再把雲端交來的 `overlay/` 疊上去。
 7. **VM 獨立重算指紋**：在 STAGE 用 STAGE 自己的 `release.py` 執行 `build_release_manifest(STAGE)`，寫出 `prediction/release-manifest.json` 和 `prediction/release-pin.env`（格式同 `scripts/build_t6_release.py`），用 `verify_release_manifest` 確認回傳空。
 8. **兩邊比對**：VM 算出的 manifest 必須和雲端 `out/release-manifest.json` 逐字相同（`cmp`），fingerprint 也相同。不同就停，不交給 jack。
