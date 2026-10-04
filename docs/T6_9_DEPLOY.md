@@ -6,7 +6,7 @@
 
 | # | 誰 | 做什麼 | 通過的樣子 |
 |---|---|---|---|
-| 0 | VM session | 把下面五個檔案放到 `$OP`。依下面「建立候選目錄」建立 `prediction/t69-release-staged-*`。取得新 release fingerprint，交給你核准 | 你拿到一個 64 位 `FP` |
+| 0 | 雲端＋VM session | 把下面五個 `deploy/` 檔案放到 `$OP`。依下面「建立候選目錄」建立 `prediction/t69-release-staged-*`，雲端和 VM 各算一次 fingerprint，相同才交給你核准 | 你拿到一個兩邊一致的 64 位 `FP` |
 | 1 | VM session | 唯讀 preflight（指令 1） | `READ_ONLY_PREFLIGHT_PASSED` |
 | 2 | 你 | 確認沒有 RUNNING loop、官方零持倉零掛單，然後同意安裝 | — |
 | 3 | VM session | 安裝（指令 2） | `CODE_INSTALLED_LIVE_NOT_ACTIVATED`，並印出 backup 路徑 |
@@ -47,26 +47,26 @@ $PY $OP/t69_rollback.py --backup $OP/runs/<毫秒> --apply    # 回到父版本
 
 ## 建立候選目錄（待確認，請審查複核）
 
-VM 上沒有建立 STAGE 的腳本或說明（2026-10-04 唯讀調查）。以下步驟依 T6.7d 的 STAGE 結構，以及 repo 既有的 release 工具（`release.py` 的 `build_release_manifest`、`scripts/build_t65_vm_overlay.py` 保留 VM inventory 的做法）推出，還沒在 VM 上跑過。T6.7d 的結構是：現行完整 release 的副本、疊上 PR20 的 13 檔 overlay、manifest 由 141 檔變 145 檔。
+VM 上沒有建立 STAGE 的腳本或說明（2026-10-04 唯讀調查）。以下步驟依 T6.7d 的 STAGE 結構（現行完整 release 的副本加上 overlay）和 `scripts/build_t65_vm_overlay.py` 保留 VM inventory 的做法，還沒在 VM 上跑過。重點是 overlay 和指紋由雲端用 `scripts/build_t69_candidate.py` 離線算出，VM 只負責複製和獨立重算。
 
-1. **先看空間**：STAGE 在 `/home/jack_shih/cry3/prediction/` 底下（系統碟），是一份完整 release 副本。先 `du` 現行 release 的大小，系統碟剩餘空間要大於它加 128 MB。
-2. **複製父版本**：以現行 `prediction/release-manifest.json` 列出的每個檔案為準，用 `cp -p` 保留權限複製到 `prediction/t69-release-staged-v1-YYYYMMDD/` 的相同相對路徑；manifest 和 pin 也一起複製。
-3. **列出 overlay**：取 repo 已合併的 main（含 T6.9，PR #24／#25／#26）中，T6.9 新增或改過的 runtime 檔。凡是 VM 父版本有、而 repo 的對應檔不同的路徑，都先用 `git log --format=%H -- <path>` 對每個歷史版本算 sha256，確認 VM 那份是 repo 歷史裡的某一版。找不到就停：那代表 VM 有未審查的本地修改，覆蓋會遺失它。
-4. **疊上 overlay**：只複製步驟 3 確認過的檔案到 STAGE。VM 有、repo 沒有的檔案保留不動。
-5. **更新 inventory**：STAGE 的 `src/gridbot/prediction/release.py` 以 VM 父版本那份為底，只在 `_REQUIRED_FIXED_RELEASE_PATHS` 加入 T6.9 新增的路徑，不整份換成 repo 版本。這和 `build_t65_vm_overlay.py` 的做法相同。
-6. **重建 manifest 和 pin**：在 STAGE 目錄用 STAGE 自己的 `release.py` 執行 `build_release_manifest(STAGE)`，寫出 `prediction/release-manifest.json` 和 `prediction/release-pin.env`（格式同 `scripts/build_t6_release.py`），再用 `verify_release_manifest` 確認回傳空。
-7. **在 STAGE 跑測試**：`cd STAGE && nice -n 19 $PY -m pytest -q tests/test_t69*.py`，暫存目錄放資料碟。
-8. **寫 `candidate.json`**：
-   - `version`：`6.9.2`。
-   - `parent`：現行 manifest 的 fingerprint。
-   - `expected_fingerprint`：步驟 6 的 fingerprint。
-   - `files`：所有內容和父版本不同的路徑，各有 `path`、`before`（父版本 sha256，新檔為 null）、`after`。必須剛好等於 manifest 差異，installer 會用 `validate_candidate` 檢查。
-9. **寫 `validation.json`**：
-   - `status`：`STAGED_VERIFIED_NOT_DEPLOYED`。
-   - `parent`、`fingerprint`。
-   - 步驟 7 的測試結果。
-   - `service_restart: false`、`live_activation: false`。
-10. **交給 jack 核准**：把 fingerprint 交給 jack。他核准的值就是部署步驟裡的 `FP`。
+1. **VM 唯讀交出兩個檔**：VM session 把現行 `prediction/release-manifest.json`（只有路徑和 sha256）和 `src/gridbot/prediction/release.py` 複製回雲端。同時唯讀回報：main inventory 裡有、VM manifest 裡沒有的路徑，哪些已經存在於 VM（例如 `operators/t67c_multimarket_observer/*`，觀測器正在用）。
+2. **雲端先唯讀比對再決定 inventory**：已存在的路徑若加進 inventory，installer 會以 "New release path already exists" 拒絕（`deploy/release_verifier.py:125`）。依第 1 步結果決定：
+   - VM 已有、內容等於 main → 用 `--keep-out` 排除，這次不納入（觀測器服務本來就不重載）。
+   - VM 已有、內容不等於 main → 停下來問 jack。
+   - VM 沒有 → 照 main 加入。
+3. **雲端計算 overlay**：
+   ```sh
+   python scripts/build_t69_candidate.py --vm-manifest vm-manifest.json --vm-release vm-release.py \
+       --ref origin/main --output out/ [--keep-out <path> ...]
+   ```
+   比對範圍是 VM manifest 的**每一個**檔，不只 T6.9 改過的：凡是 VM 的 sha 不等於 main 的檔都換成 main 的版本，所以 main 上其他還沒部署的修改也會一起進來，不會新舊混合。換之前會確認 VM 那份是 main 歷史中的某一版；找不到就拒絕，因為那代表 VM 有未審查的本地修改。VM 有、main 沒有的路徑保留 VM 原樣，列在 `report.json` 的 `vm_only`。
+4. **`release.py` 的唯一寫法**：以 VM 那份為底，只在 `_REQUIRED_FIXED_RELEASE_PATHS` 尾端加入第 2 步決定要加的路徑，不換成 repo 版本。腳本會確認改完的 inventory 剛好是「VM 原有加上新增」。overlay 裡的 `release.py` 就是這份，其他檔都是 main 的原始位元組。
+5. **雲端跑測試**：overlay 之外的檔都和 main 相同，所以測試在 repo 端跑：在 main 的 checkout 把 `release.py` 換成 overlay 那份，跑全套 pytest 和 `python -m scripts.build_t6_release`（`tests/`、`pyproject.toml` 不在 release inventory，STAGE 裡沒有，也不需要在 VM 跑）。
+6. **VM 建立 STAGE**：先 `du` 現行 release，系統碟剩餘空間要大於它加 128 MB。依現行 manifest 用 `cp -p` 把每個檔複製到 `prediction/t69-release-staged-v1-YYYYMMDD/`，再把雲端交來的 `overlay/` 疊上去。
+7. **VM 獨立重算指紋**：在 STAGE 用 STAGE 自己的 `release.py` 執行 `build_release_manifest(STAGE)`，寫出 `prediction/release-manifest.json` 和 `prediction/release-pin.env`（格式同 `scripts/build_t6_release.py`），用 `verify_release_manifest` 確認回傳空。
+8. **兩邊比對**：VM 算出的 manifest 必須和雲端 `out/release-manifest.json` 逐字相同（`cmp`），fingerprint 也相同。不同就停，不交給 jack。
+9. **寫 `candidate.json` 和 `validation.json`**：`candidate.json` 直接用雲端的 `out/candidate.json`（`version` 6.9.2、`parent`、`expected_fingerprint`、`files` 各有 `path`／`before`／`after`，剛好等於 manifest 差異，installer 用 `validate_candidate` 再查一次）。`validation.json`：`status` 為 `STAGED_VERIFIED_NOT_DEPLOYED`、`parent`、`fingerprint`、第 5 步的測試結果和 main commit、`service_restart: false`、`live_activation: false`。
+10. **交給 jack 核准**：把雲端和 VM 兩邊各自算出、而且相同的 fingerprint 交給 jack。他核准的值就是部署步驟裡的 `FP`。
 
 ## 冷載入哪些服務
 
@@ -90,6 +90,7 @@ ETH／BNB 的四個服務名稱和角色來自 2026-10-04 的 VM 唯讀調查。
 | `deploy/t69_manual_install.py` | 安裝；預設唯讀 |
 | `deploy/t69_verify.py` | 唯讀驗證，隨時可跑 |
 | `deploy/t69_rollback.py` | 回退；預設唯讀 |
+| `scripts/build_t69_candidate.py` | 雲端用：從 VM manifest 和 main 算出 overlay、`candidate.json` 和預期 fingerprint；不上 VM |
 
 ## 安裝做了哪些檢查
 
@@ -99,7 +100,8 @@ ETH／BNB 的四個服務名稱和角色來自 2026-10-04 的 VM 唯讀調查。
   - 最後一輪 DONE 100/100，或你授權的 CANCELLED 輪。
   - 沒有 RUNNING loop，沒有未終結或 UNKNOWN 的 intent／order，沒有 `pending_unknown` 或 `pending_intent_id` 的 campaign，沒有風控鎖。
   - 官方零持倉零掛單。
-  - 8 張帳本表雜湊和受保護設定不變。
+  - 11 張帳本表雜湊和受保護設定不變，和 VM 上 10/04 entry-budget installer 相同（多了 campaigns、loop_market_bindings、position_snapshots，以及 `prediction_market_symbol`、`prediction_pending_market_symbol`）。雜湊逐列計算，記憶體只留每列 32 bytes。
+  - 目標 loop 自己的 `<profile>_loop_risk:<loop>` 鎖也要是解除的；舊 loop 的鎖受保護但不擋。
   - autoarm／autoloop 維持 false。
 - **指紋**：stage manifest、`validation.fingerprint`、`candidate.expected_fingerprint` 和 `--expected-fingerprint` 四者必須相等。新舊兩邊先用 STAGE 外的 verifier 驗證，再各自用自己的 `release.py` 驗證；逐檔核對 `before`／`after`。
 - **安裝**：

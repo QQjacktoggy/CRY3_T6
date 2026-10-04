@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from contextlib import closing
 from itertools import count
 from pathlib import Path
 from unittest.mock import Mock
@@ -421,3 +422,30 @@ def test_hangup_handler_raises_interrupted():
     finally:
         signal.signal(signal.SIGHUP, old[0])
         signal.signal(signal.SIGTERM, old[1])
+
+
+def test_snapshot_matches_latest_vm_boundary_on_migrated_db(tmp_path, monkeypatch):
+    import sqlite3
+    ops = module('t69_ops')
+    repo = Path(__file__).resolve().parents[1]
+    (tmp_path / 'prediction/data').mkdir(parents=True)
+    path = tmp_path / 'prediction/data/prediction.sqlite3'
+    with closing(sqlite3.connect(path)) as db:
+        for sql in sorted((repo / 'src/gridbot/prediction/migrations').glob('*.sql')):
+            db.executescript(sql.read_text())
+        loop = 'loop:1'
+        db.execute("INSERT INTO prediction_loops(loop_id,state,target,completed,created_at_ms,updated_at_ms,"
+                   "strategy_profile) VALUES (?, 'DONE', 100, 100, 1, 1, 'regime_target6_9_v1')", (loop,))
+        db.execute("INSERT INTO prediction_runtime_config VALUES ('prediction_market_symbol','\"ETHUSDT\"',1)")
+        db.execute("INSERT INTO prediction_runtime_config VALUES ('regime_target6_8a_loop_risk:old','{\"latched\":true}',1)")
+        db.commit()
+    monkeypatch.setattr(ops, 'ROOT', tmp_path)
+    state = ops.snapshot(loop)
+    assert set(state['ledger']) == set(ops.LEDGER_TABLES) and len(ops.LEDGER_TABLES) == 11
+    # An archived loop's stop is protected (unchanged) but does not block.
+    assert set(state['protected']) == {'prediction_market_symbol', 'regime_target6_8a_loop_risk:old'}
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("INSERT INTO prediction_runtime_config VALUES ('regime_target6_9_loop_risk:loop:1','{\"latched\":true}',1)")
+        db.commit()
+    with pytest.raises(RuntimeError, match='Risk latch'):
+        ops.snapshot(loop)

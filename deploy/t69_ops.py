@@ -34,9 +34,14 @@ FEATURE_DBS = {'BTCUSDT': 'prediction/data/regime-target6/features.sqlite3',
                'ETHUSDT': 'prediction/data/t67c-multimarket/ETHUSDT/features.sqlite3',
                'BNBUSDT': 'prediction/data/t67c-multimarket/BNBUSDT/features.sqlite3'}
 TERMINAL = "('FILLED','CLOSED','CANCELLED','CANCELED','EXPIRED','FAILED','REJECTED')"
-LEDGER_TABLES = ('prediction_loops', 'prediction_fills', 'prediction_order_intents', 'prediction_orders',
-                 'prediction_risk_ledger', 'prediction_settlements', 'prediction_regime_entry_claims',
-                 'prediction_regime_settlement_observations')
+# Same 11 tables and protected keys as the VM's 10/04 entry-budget installer.
+LEDGER_TABLES = ('prediction_loops', 'prediction_campaigns', 'prediction_fills', 'prediction_order_intents',
+                 'prediction_orders', 'prediction_risk_ledger', 'prediction_settlements',
+                 'prediction_regime_entry_claims', 'prediction_regime_settlement_observations',
+                 'prediction_loop_market_bindings', 'prediction_position_snapshots')
+PROTECTED_KEYS = ('prediction_hard_stop_latched', 'prediction_risk_state', 'prediction_selected_strategy',
+                  'prediction_selected_order_unit', 'prediction_pending_strategy', 'prediction_market_symbol',
+                  'prediction_pending_market_symbol')
 
 
 def digest(path):
@@ -62,14 +67,14 @@ def ledger(db):
     """Order-independent hashes of trading records plus protected runtime config."""
     hashes = {}
     for table in LEDGER_TABLES:
-        rows = [dict(r) for r in db.execute('SELECT * FROM ' + table)]
-        canonical = json.dumps(sorted(rows, key=lambda r: json.dumps(r, sort_keys=True)),
-                               sort_keys=True, separators=(',', ':'))
-        hashes[table] = hashlib.sha256(canonical.encode()).hexdigest()
+        # Sorted per-row digests keep memory at ~32 bytes per row on the small VM
+        # instead of holding every row (position snapshots are large).
+        rows = sorted(hashlib.sha256(json.dumps(dict(r), sort_keys=True, separators=(',', ':')).encode()).digest()
+                      for r in db.execute('SELECT * FROM ' + table))
+        hashes[table] = hashlib.sha256(b''.join(rows)).hexdigest()
     protected = {r[0]: r[1] for r in db.execute(
-        "SELECT config_key,config_value_json FROM prediction_runtime_config WHERE "
-        "config_key IN ('prediction_hard_stop_latched','prediction_risk_state','prediction_selected_strategy',"
-        "'prediction_selected_order_unit','prediction_pending_strategy') OR config_key LIKE 'regime_target6%risk%'")}
+        "SELECT config_key,config_value_json FROM prediction_runtime_config WHERE config_key IN ("
+        + ','.join('?' * len(PROTECTED_KEYS)) + ") OR config_key LIKE 'regime_target6%risk%'", PROTECTED_KEYS)}
     return hashes, protected
 
 
@@ -97,7 +102,9 @@ def snapshot(loop_id, *, allow_cancelled=False, allow_historical_closed=False):
                       "(buy_count>0 AND NOT EXISTS(SELECT 1 FROM prediction_settlements s WHERE s.campaign_id=c.campaign_id AND s.status='SETTLED')"
                       + closed_exception + ")", params).fetchone():
             raise RuntimeError('Unsettled campaign')
-        for key in ('prediction_hard_stop_latched', 'prediction_risk_state', 'regime_target6_risk_v1'):
+        # Archived per-loop stops stay protected; only the target loop's own guard blocks.
+        loop_risk = (row['strategy_profile'] or '').removesuffix('_v1') + '_loop_risk:' + loop_id
+        for key in ('prediction_hard_stop_latched', 'prediction_risk_state', 'regime_target6_risk_v1', loop_risk):
             risk_row = db.execute('SELECT config_value_json FROM prediction_runtime_config WHERE config_key=?', (key,)).fetchone()
             if risk_row:
                 risk = json.loads(risk_row[0])

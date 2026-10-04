@@ -77,9 +77,10 @@ def main(argv=None):
                               files=len(candidate['files']), services=list(services), live_activated=False)))
         return
     ops.raise_on_hangup()
-    for name in services:
-        ops.service('stop', name)
     try:
+        # Inside try so a hangup while stopping still reports which state it left.
+        for name in services:
+            ops.service('stop', name)
         if take() != state:
             raise RuntimeError('Trading records changed after stopping services')
         ops.official_clear()
