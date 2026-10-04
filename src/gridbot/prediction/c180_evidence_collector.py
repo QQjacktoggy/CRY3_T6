@@ -56,11 +56,14 @@ class C180EvidenceCollector:
         self,
         *,
         tape: Any,
+        symbol: str = "BTCUSDT",
         feed_factory: Callable[[Callable[[Mapping[str, Any]], None]], Any],
         clock_ms: Callable[[], int] | None = None,
         on_raw_event: Callable[[Mapping[str, Any]], None] | None = None,
         on_frozen: Callable[[FrozenEvidence], None] | None = None,
     ) -> None:
+        from .loop_market import symbol as valid_symbol
+        self.symbol = valid_symbol(symbol)
         self.tape = tape
         self._feed_factory = feed_factory
         self._clock = clock_ms or (lambda: int(time.time() * 1000))
@@ -90,7 +93,7 @@ class C180EvidenceCollector:
         self.feeds = self._feed_factory(self.ingest_book)
         self._session = aiohttp.ClientSession()
         for source, url in TRADE_URLS.items():
-            task = asyncio.create_task(self._trade_loop(source, url), name=f"c180-{source}-aggtrade")
+            task = asyncio.create_task(self._trade_loop(source, url.replace("btcusdt", self.symbol.lower())), name=f"c180-{source}-aggtrade")
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
@@ -175,6 +178,8 @@ class C180EvidenceCollector:
             return
         if source not in TRADE_URLS:
             raise ValueError("unknown C180 trade source")
+        if body.get("s", "BTCUSDT") != self.symbol:
+            raise ValueError("trade asset mismatch")
         at = self._clock() if received_at_ms is None else int(received_at_ms)
         self._capture_due(at)
         event = {"received_at": at, "kind": f"binance_{source}_aggTrade", "body": dict(body)}

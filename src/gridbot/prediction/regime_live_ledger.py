@@ -783,6 +783,23 @@ class RegimeLiveLedger:
                     "SELECT * FROM prediction_regime_slots WHERE loop_id=? AND market_start_ms=?",
                     (loop, start),
                 )
+                from .loop_market import PROFILE as MULTI_PROFILE
+                if self.profile == MULTI_PROFILE:
+                    binding = await self._row(conn, "SELECT * FROM prediction_loop_market_bindings WHERE loop_id=?", (loop,))
+                    if binding:
+                        from .loop_market import market_matches, execution_fingerprint
+                        from types import SimpleNamespace
+                        try:
+                            m = json.loads(campaign["payload_json"])["market"]
+                            valid = (market_matches(SimpleNamespace(**m), binding["symbol"])
+                                     and binding["profile"] == self.profile
+                                     and binding["execution_fingerprint"] == execution_fingerprint(binding["symbol"])
+                                     and binding["unit"] == str(unit))
+                        except (ValueError, KeyError, TypeError, AttributeError):
+                            valid = False
+                        if not valid:
+                            await conn.rollback()
+                            return C180ClaimResult(False, "loop_market_binding_mismatch")
                 if not _campaign_matches_slot(campaign, slot, loop, start):
                     await conn.rollback()
                     return C180ClaimResult(False, "market_identity_not_verified")

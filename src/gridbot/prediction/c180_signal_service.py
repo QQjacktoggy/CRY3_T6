@@ -51,11 +51,14 @@ class C180SignalService:
         self,
         *,
         frozen_logic: Any,
+        symbol: str = "BTCUSDT",
         api_key: str,
         unit_provider: Callable[[], Decimal],
         persist_result: Callable[[C180Signal], Awaitable[None]],
         clock_ms: Callable[[], int] | None = None,
     ) -> None:
+        from .loop_market import symbol as valid_symbol
+        self.symbol = valid_symbol(symbol)
         self._logic = frozen_logic
         self._api_key = api_key
         self._unit_provider = unit_provider
@@ -178,9 +181,11 @@ class C180SignalService:
             if session is None:
                 return
             frozen_state = self._logic.model_state(packet, "Original")
+            if self.symbol != "BTCUSDT":
+                frozen_state["contract"]["symbol"] = self.symbol
             model = await infer_original_jev_p_up(
                 session, api_key=self._api_key, frozen_state=frozen_state,
-                now_ms=self._clock,
+                now_ms=self._clock, **({"symbol": self.symbol} if self.symbol != "BTCUSDT" else {}),
             )
             if model.status != "ok" or model.p_up is None:
                 await finish("model_" + model.status, input_hash=model.input_sha256,

@@ -125,9 +125,11 @@ def selectable_lanes_for_market(market_symbol: str | None) -> tuple[tuple[str, s
     is_eth = sym.startswith("ETH")
     lanes: list[tuple[str, str]] = []
     for profile, label in SELECTABLE_LANES:
+        if sym in {"ETHUSDT", "BNBUSDT"} and profile != REGIME_T67C_PROFILE:
+            continue
         if profile in ETH_ONLY_LANE_PROFILES and not is_eth:
             continue
-        if profile in BTC_ONLY_LANE_PROFILES and not sym.startswith("BTC"):
+        if profile in BTC_ONLY_LANE_PROFILES and not sym.startswith("BTC") and not (profile == REGIME_T67C_PROFILE and sym in {"ETHUSDT", "BNBUSDT"}):
             continue
         lanes.append((profile, label))
     return tuple(lanes)
@@ -1061,7 +1063,16 @@ def format_runtime_result(title: str, result: Any) -> str:
 
     if isinstance(result, Mapping):
         value = _redact(result)
-        if title == "系統狀態" or title.endswith("狀態") and "風控" not in title:
+        if title == "T6.7c 整輪市場":
+            lines = ["目前市場："+str(value.get("market_symbol", "未知")),
+                     "下一輪市場："+str(value.get("next_market_symbol", value.get("market_symbol", "未知")))]
+            if value.get("action_denied"):
+                lines += ["尚未套用："+str(value.get("reason", "條件未通過"))]
+            elif value.get("market_queued"):
+                lines += ["已排下一輪；目前 Loop 維持原幣種。", "本輪結束、持倉與訂單清空後，再點選該幣套用。"]
+            else:
+                lines += ["已選定；尚未建立新 Loop。", "確認 /predict_live on 後，用 /predict_loop 20 開始20場。"]
+        elif title == "系統狀態" or title.endswith("狀態") and "風控" not in title:
             lines = _compact_status(value)
         elif "Loop PnL" in title:
             lines = _compact_pnl(value)
@@ -1423,6 +1434,22 @@ class PredictionTelegramService:
         if await self._deny_if_unauthorized(update):
             return
         await self._call_and_reply(update, "Loop PnL 總覽", ("loop_pnl", "get_loop_pnl_summary", "pnl"))
+
+    async def cmd_predict_market(self, update, context):
+        if await self._deny_if_unauthorized(update):
+            return
+        args = getattr(context, 'args', None) or []
+        if args:
+            asset = str(args[0]).upper()
+            if asset in ('BTC', 'ETH', 'BNB'):
+                asset += 'USDT'
+            await self._call_and_reply(update, 'T6.7c 整輪市場', ('select_market',), asset)
+            return
+        current = await self._invoke(('status', 'predict_status'))
+        await self._reply(update, '【T6.7c 下一輪市場】\n目前：'+str(current.get('market_symbol', '未知'))+
+            '\n下一輪：'+str(current.get('next_market_symbol', current.get('market_symbol', '未知')))+
+            '\n每輪鎖定一幣；執行中只排下一輪，結束後再點選套用。換幣後重新確認 Live，再用 /predict_loop 20 啟動。',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(a, callback_data='predict_market:'+a+'USDT') for a in ('BTC','ETH','BNB')]]))
 
     async def cmd_predict_lane(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show the operator-approved strategies as one compact picker."""
@@ -2040,6 +2067,9 @@ class PredictionTelegramService:
                     await result
             except Exception as exc:  # noqa: BLE001 - continue to handle the callback
                 LOGGER.warning("prediction_telegram_callback_answer_failed error_type=%s", type(exc).__name__)
+        if data.startswith("predict_market:"):
+            await self._call_and_reply(update, "T6.7c 整輪市場", ("select_market",), data.split(":", 1)[1])
+            return
         if data == f"{MONITOR_CALLBACK_PREFIX}show":
             await self.cmd_predict_monitor(update, context)
             return
@@ -2297,6 +2327,25 @@ class PredictionTelegramService:
         await self._reply(update, "找不到這個操作，請使用選單。")
 
 
+    async def cmd_firstreport(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Read the independent First observer snapshot; no runtime operations."""
+        if await self._deny_if_unauthorized(update):
+            return
+        args = list(getattr(context, "args", None) or [])
+        if len(args) > 1 or (args and args[0] not in ("20", "40", "100")):
+            await self._reply(update, "用法：/firstreport [20|40|100]；預設最近20場。")
+            return
+        window = int(args[0]) if args else 20
+        try:
+            from pathlib import Path
+            root = Path(__file__).resolve().parents[3]
+            text = await asyncio.to_thread(_format_first_observer_report, root, window, now_ms=self._now_ms())
+            await self._reply(update, text, parse_mode=None)
+        except Exception:
+            # Do not expose files, signed URLs or credentials to chat.
+            LOGGER.warning("first_observer_report_unavailable")
+            await self._reply(update, "【First三市場觀測】暫時無法讀取；這不代表沒有訊號或零損益。")
+
     async def cmd_predict_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show the selected T6.7 family; historical lanes stay out of it."""
         if await self._deny_if_unauthorized(update):
@@ -2356,6 +2405,7 @@ def build_prediction_handlers(service: PredictionTelegramService) -> tuple[Any, 
     """Build handlers without constructing an Application or reading config."""
 
     return (
+        CommandHandler("firstreport", service.cmd_firstreport),
         CommandHandler("report", service.cmd_predict_report),
         CommandHandler("predict_report", service.cmd_predict_report),
         CommandHandler("shadow_report", service.cmd_predict_shadow_report),
@@ -2368,6 +2418,7 @@ def build_prediction_handlers(service: PredictionTelegramService) -> tuple[Any, 
         CommandHandler("predict_loop_20", service.cmd_predict_loop_20),
         CommandHandler("predict_loop_100", service.cmd_predict_loop_100),
         CommandHandler("predict_loop_pnl", service.cmd_predict_loop_pnl),
+        CommandHandler("predict_market", service.cmd_predict_market),
         CommandHandler("predict_lane", service.cmd_predict_lane),
         CommandHandler("predict_amount", service.cmd_predict_amount),
         CommandHandler("predict_stop", service.cmd_predict_stop),
@@ -2381,7 +2432,7 @@ def build_prediction_handlers(service: PredictionTelegramService) -> tuple[Any, 
         CommandHandler("predict_live", service.cmd_predict_live),
         CommandHandler("lanes", service.cmd_lanes),
         CommandHandler("predict_lanes", service.cmd_lanes),
-        CallbackQueryHandler(service.handle_callback, pattern=r"^predict_(shadow|lane|amount|hard_stop|cancel|monitor):"),
+        CallbackQueryHandler(service.handle_callback, pattern=r"^predict_(shadow|lane|market|amount|hard_stop|cancel|monitor):"),
     )
 
 
@@ -2903,3 +2954,69 @@ def _format_guard_shadow_supplements(root, *, now_ms=None):
         except Exception:
             messages.append(f'<b>{title}</b>\n⚠️ 暫時無法讀取；其他 lane 報告不受影響。')
     return messages
+
+
+def _format_first_observer_report(root, window=20, *, now_ms=None):
+    """Bounded atomic JSON snapshot from independent observer, no DB writes."""
+    import json
+    from pathlib import Path
+    from datetime import datetime
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+    if window not in (20, 40, 100):
+        raise ValueError("first_report_window")
+    path = Path(root) / "prediction/data/first-multimarket-v1/latest.json"
+    with path.open("rb") as stream:
+        raw = stream.read(2 * 1024 * 1024 + 1)
+    if len(raw) > 2 * 1024 * 1024:
+        raise ValueError("first_report_size")
+    p = json.loads(raw)
+    expected = "5c521aaf03e2f4ec23914a96fe8f643aaa20747be7b85f3147be02b04a234a7f"
+    if p.get("mode") != "QUOTE_SIMULATION_NO_REAL_ORDERS" or p.get("policy") != expected:
+        raise ValueError("first_report_provenance")
+    at = int(p["at_ms"])
+    current = _now_ms() if now_ms is None else now_ms
+    if at > current + 1000:
+        raise ValueError("first_report_future")
+    stamp = datetime.fromtimestamp(at/1000, ZoneInfo("Asia/Taipei")).strftime("%m/%d %H:%M:%S")
+    lines = [f"First 三市場觀測｜最近{window}場", f"更新：{stamp}（台灣）", "1U報價模擬，非真實成交；未套Live風控。", ""]
+    span = p.get("rolling_ranges", {}).get(str(window), {})
+    if span.get("start") is not None and span.get("end") is not None:
+        fmt = lambda ms: datetime.fromtimestamp(ms/1000, ZoneInfo("Asia/Taipei")).strftime("%m/%d %H:%M")
+        lines.insert(2, f"統計區間：{fmt(span['start'])}–{fmt(span['end'])}（已結束市場）")
+    health = p.get("health") or {}
+    if current-at > 120000 or current-int(health.get("at_ms", 0)) > 120000:
+        lines.extend(["⚠ 觀測資料已過期，以下為舊快照，不能視為目前市況。", ""])
+    group = p["rolling"][str(window)]
+    for symbol in ("BTCUSDT", "ETHUSDT", "BNBUSDT"):
+        m = group[symbol]["ALL"]
+        lines.append(f"【{symbol[:-4]}】實際{m['scheduled_windows']}/{window}場｜K線{m['feature_complete']}｜雙向盤口{m['initial_books_complete']}")
+        lines.append(f"訊號{m['signal']} → 趨勢{m['trend_pass']} → 初始{m['initial_quote_eligible']} → 重檢通過{m['quote_candidates']}")
+        rate = "—" if m["quote_candidate_rate"] is None else f"{m['quote_candidate_rate']*100:.1f}%"
+        lines.append(f"報價候選率 {rate}（非fill率）")
+        if "recheck_attempted" in m:
+            lines.append(f"重檢：執行{m['recheck_attempted']}｜通過{m['quote_candidates']}")
+        labels = {'price_above_frozen_cap':'高於凍結限價', 'insufficient_frozen_share_depth':'限價內深度不足',
+                  'recheck_not_attempted':'重檢未執行', 'recheck_data_unavailable':'重檢資料缺漏',
+                  'recheck_window':'超過重檢期限', 'quote_age':'報價過期', 'price_band':'價格帶不符'}
+        reasons = m.get('recheck_reasons', {})
+        if reasons:
+            lines.append('未通過：'+'、'.join(f"{labels.get(k,'其他資料/條件')} {n}" for k,n in sorted(reasons.items())))
+        if not m['quote_candidates']:
+            lines.append('無重檢通過樣本；WR/PnL的「—」不是0收益。')
+        for side, label in (("ALL", "合計"), ("UP", "First UP"), ("DOWN", "First DOWN")):
+            row = group[symbol][side]
+            wr = "—" if row["wr"] is None else f"{row['wr']*100:.1f}%"
+            net = "—" if not row["settled"] else f"{Decimal(row['net_pnl']):+.4f}U"
+            mdd = "—" if not row["settled"] else f"{Decimal(row['mdd']):.4f}U"
+            suffix = "（待結，尚未完整）" if row["pending"] else ""
+            lines.append(f"{label}：{row['wins']}勝{row['losses']}負{row['draws']}平｜待結{row['pending']}")
+            lines.append(f"WR {wr}｜PnL {net}｜MDD {mdd}{suffix}")
+        if m["missing_features"]:
+            lines.append(f"⚠ 缺K線{m['missing_features']}場，保留分母；屬資料缺漏，不算條件不符。")
+        lines.append("")
+    lines.extend(["官方勝方結算；WR排除平局、PnL包含平局。", "ETH/BNB沿用BTC First條件，尚未驗證Live適用性。", "不自動選幣或開單。"])
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        raise ValueError("first_report_length")
+    return text

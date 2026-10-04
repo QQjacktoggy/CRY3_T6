@@ -64,6 +64,14 @@ class OriginalJEVResult:
     http_status: int | None = None
 
 
+def questions_for_symbol(symbol):
+    from .loop_market import symbol as valid_symbol
+    asset = valid_symbol(symbol).removesuffix("USDT")
+    questions = json.loads(json.dumps(ORIGINAL_QUESTIONS))
+    questions["direction"]["instructions"] = questions["direction"]["instructions"].replace("BTC five-minute", asset+" five-minute")
+    return questions
+
+
 def _now_ms() -> int:
     return time.time_ns() // 1_000_000
 
@@ -74,7 +82,7 @@ def _dumps(value: Any) -> str:
                       ensure_ascii=False, allow_nan=False)
 
 
-def _frozen_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], int, str]:
+def _frozen_state(state: Mapping[str, Any], *, symbol="BTCUSDT") -> tuple[dict[str, Any], int, str]:
     """Copy and check the state contract without changing model evidence."""
 
     copied = json.loads(_dumps(state))
@@ -83,6 +91,8 @@ def _frozen_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], int, str]:
     contract = copied.get("contract")
     if not isinstance(contract, dict):
         raise ValueError("contract")
+    if symbol != "BTCUSDT" and contract.get("symbol") != symbol:
+        raise ValueError("Original contract asset mismatch")
     start = contract.get("start")
     end = contract.get("end")
     observed = copied.get("observed_at")
@@ -123,7 +133,7 @@ def _frozen_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], int, str]:
     serialized = _dumps(copied)
     if len(serialized.encode("utf-8")) > MAX_INPUT_BYTES:
         raise ValueError("input too large")
-    envelope = {"model": MODEL_ID, "questions": ORIGINAL_QUESTIONS,
+    envelope = {"model": MODEL_ID, "questions": questions_for_symbol(symbol),
                 "state": copied}
     input_sha256 = hashlib.sha256(_dumps(envelope).encode("utf-8")).hexdigest()
     return copied, observed, input_sha256
@@ -149,6 +159,7 @@ async def infer_original_jev_p_up(
     frozen_state: Mapping[str, Any],
     now_ms: Callable[[], int] = _now_ms,
     user_label: str = "cry3-c180-favorite-hold-live",
+    symbol: str = "BTCUSDT",
 ) -> OriginalJEVResult:
     """Call Original JEV once and return only a validated probability or state.
 
@@ -157,7 +168,7 @@ async def infer_original_jev_p_up(
     """
 
     try:
-        state, cutoff_ms, input_sha256 = _frozen_state(frozen_state)
+        state, cutoff_ms, input_sha256 = _frozen_state(frozen_state, **({"symbol": symbol} if symbol != "BTCUSDT" else {}))
     except (ValueError, TypeError, OverflowError):
         return OriginalJEVResult("invalid_state", None, None, None)
     if not api_key:
@@ -166,7 +177,7 @@ async def infer_original_jev_p_up(
     remaining_ms = deadline_ms - now_ms()
     if remaining_ms <= 0:
         return OriginalJEVResult("deadline_expired", None, None, input_sha256)
-    payload = {"model": MODEL_ID, "questions": ORIGINAL_QUESTIONS,
+    payload = {"model": MODEL_ID, "questions": questions_for_symbol(symbol),
                "state": state, "user": user_label}
     try:
         async with asyncio.timeout(remaining_ms / 1000):

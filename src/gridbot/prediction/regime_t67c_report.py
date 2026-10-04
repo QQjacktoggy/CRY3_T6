@@ -58,7 +58,8 @@ def branch_metrics(root, campaigns, current_ids, fill_ids, events, *, fingerprin
     decisions = {}
     fill_sides = {}
     if filled:
-        path = root/'prediction/data/regime-target6/features.sqlite3'
+        from .loop_market import report_feature_path
+        path = report_feature_path(root, loop_id)
         with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True)) as db:
             db.execute('PRAGMA query_only=ON')
             db.execute('BEGIN')
@@ -149,7 +150,8 @@ def shadow_metrics(root, *, now, loop_id, slots, fingerprint):
     result = {b: dict(quoted=0, known=0, unknown=0, wins=0, losses=0, flats=0,
                       unverified=0, pnl=Decimal(0), wr='—') for b in SHADOW_LABELS}
     starts = tuple(int(s['market_start_ms']) for s in slots)
-    path = root/'prediction/data/regime-target6/features.sqlite3'
+    from .loop_market import report_feature_path
+    path = report_feature_path(root, loop_id)
     if not path.is_file() or not starts:
         return result
     with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True)) as db:
@@ -399,7 +401,9 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
     fill_text = f'{closed_fills/len(ended):.1%}（{closed_fills}/{len(ended)} 已結束登錄市場）' if ended else '—（尚無已結束登錄市場）'
     pnl = _value(metric, events, pending) if events or pending else '—'
     mdd = _value(metric, events, pending, 'mdd') if events or pending else '—'
-    lines = ['📊 T6.7c Report｜七路 Live＋兩路 Shadow', f'截至 {clock}（台灣時間）｜Loop {loop["loop_id"]}',
+    from .loop_market import report_asset
+    asset = report_asset(root, loop['loop_id'])
+    lines = ['📊 T6.7c Report｜七路 Live＋兩路 Shadow', '市場：'+(asset or '歷史未綁定'), f'截至 {clock}（台灣時間）｜Loop {loop["loop_id"]}',
              f'狀態 {loop["state"]}｜完成 {loop["completed"]}/{loop["target"]} 場｜本輪每筆 {units} USDT',
              f'Live fill rate {fill_text}',
              f'本輪 WR {metric["wr"]}（{metric["wins"]}勝/{metric["losses"]}負/{metric["flats"]}平；已結算成交 {len(events)}）',

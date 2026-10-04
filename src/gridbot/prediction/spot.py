@@ -18,7 +18,7 @@ class SpotQuote:
 class BinanceSpotProvider:
     def __init__(self, *, base_url: str = "https://api.binance.com", symbol: str = "BTCUSDT", timeout: float = 5.0, max_age_ms: int = 1500):
         normalized = str(symbol).upper()
-        _ALLOWED = {"BTCUSDT", "ETHUSDT"}
+        _ALLOWED = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
         if normalized not in _ALLOWED:
             raise ValueError(f"Prediction spot feed restricted to {_ALLOWED}")
         self.base_url, self.symbol, self.timeout, self.max_age_ms = base_url.rstrip("/"), normalized, timeout, max_age_ms
@@ -36,6 +36,8 @@ class BinanceSpotProvider:
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+            if payload.get("symbol") != self.symbol:
+                raise ValueError("spot asset mismatch")
             price = str(payload["price"])
             self._last = SpotQuote(price, int(time.time() * 1000))
             self._backoff = 0.0

@@ -322,7 +322,10 @@ class WorkerState(str, Enum):
     FAILED = "failed"
 
 
-class PredictionWorker:
+from .loop_market_worker import LoopMarketWorker
+
+
+class PredictionWorker(LoopMarketWorker):
     """Finite market-loop controller for one isolated Prediction process."""
 
     worker_available = True
@@ -2010,7 +2013,10 @@ class PredictionWorker:
     async def status(self) -> dict[str, Any]:
         await self.restore_order_unit()
         await self.restore_selected_strategy()
+        await self.restore_loop_market()
         result = self._status()
+        pending_market = await self.repository.get_runtime_config("prediction_pending_market", {})
+        result["next_market_symbol"] = pending_market.get("symbol") or self.settings.market_symbol
         if self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1'}:
             from src.gridbot.prediction.regime_lane import STATE_KEY
             result["regime_lane_risk"] = await self.repository.get_runtime_config(STATE_KEY, None)
@@ -2488,9 +2494,13 @@ class PredictionWorker:
         await self.restore_selected_strategy()
         await self._activate_pending_strategy_if_idle()
         await self._activate_pending_order_unit_if_idle()
+        await self.restore_loop_market()
         if self.settings.is_live_requested:
             await self._refresh_live_prerequisites()
         async with self._lock:
+            market_error = await self._loop_market_start_guard(count)
+            if market_error:
+                return {**self._status(), "action_denied": True, "reason": market_error}
             if self._effective_mode is RuntimeMode.SHADOW or self._shadow_lane_experiment_enabled():
                 await self._ensure_shadow_window()
             await self.reconcile()
@@ -2550,6 +2560,7 @@ class PredictionWorker:
                     count,
                     mode=self.mode,
                     strategy_profile=self._selected_strategy_profile,
+                    **self._loop_market_start_kwargs(),
                 )
                 self.heartbeat.markets_completed = int(existing.get("completed", 0))
             else:
@@ -2566,6 +2577,7 @@ class PredictionWorker:
                     count,
                     mode=self.mode,
                     strategy_profile=self._selected_strategy_profile,
+                    **self._loop_market_start_kwargs(),
                 )
                 self._loop_created_at_ms = self._loop_origin_ms(created, loop_id=self._loop_id)
                 self._initial_market_wait_until_ms = None
@@ -5626,11 +5638,17 @@ class PredictionWorker:
         if (profile or self._selected_strategy_profile) in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1'}:
             from src.gridbot.prediction.regime_worker_bridge import RegimeWorkerBridge
             bridge = getattr(self, "_regime_worker_bridge", None)
-            if bridge is None or bridge.profile != (profile or self._selected_strategy_profile):
+            asset = self.settings.market_symbol
+            checked_asset = asset if (profile or self._selected_strategy_profile) == "regime_target6_7c_v1" else None
+            if bridge is None or bridge.profile != (profile or self._selected_strategy_profile) or getattr(bridge, "symbol", None) != checked_asset:
                 path = os.environ.get("PREDICTION_C180_SIGNAL_DB", "").strip()
                 if not path:
                     return None
-                bridge = RegimeWorkerBridge(self.repository, path,
+                from .loop_market import data_paths
+                feature_path, signal_path = data_paths(self.repository.db_path, asset)
+                if asset != "BTCUSDT":
+                    path = str(signal_path)
+                bridge = RegimeWorkerBridge(self.repository, path, feature_db=feature_path, symbol=checked_asset,
                     exposure_checker=self._c180_recovery_exposure_clear,
                     profile=(profile or self._selected_strategy_profile))
                 self._regime_worker_bridge = bridge
@@ -7793,6 +7811,10 @@ class PredictionWorker:
         detail_symbol = str((detail_data.get("symbol") if isinstance(detail_data, Mapping) else None) or topic.get("symbol") or "").upper()
         if detail_symbol != target_symbol:
             return False
+        if self._selected_strategy_profile == "regime_target6_7c_v1":
+            from .loop_market import market_matches
+            if not market_matches(market, target_symbol):
+                return False
         variant_data = detail_data.get("variantData", {}) if isinstance(detail_data, Mapping) else {}
         category_values = {
             str((detail_data.get(key) if isinstance(detail_data, Mapping) else None) or topic.get(key) or "").upper().replace("-", "_")

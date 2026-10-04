@@ -226,8 +226,11 @@ def test_evidence_inputs_are_causal_bounded_and_opening_anchor_preserved(tmp_pat
     assert any(s['event_ms'] == S for s in spots)
 
 
-def test_t67_skips_original_paid_signals_and_paper_recovery():
+def test_t67_skips_original_paid_signals_and_paper_recovery(tmp_path):
     runtime = object.__new__(C180SignalRuntime)
+    runtime.prediction_db = tmp_path/"prediction.sqlite3"
+    with sqlite3.connect(runtime.prediction_db):
+        pass
     runtime.signals = SimpleNamespace(on_frozen=Mock())
     with patch.object(runtime, '_t67_active', return_value=True):
         runtime._on_frozen({})

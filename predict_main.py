@@ -274,6 +274,7 @@ def prediction_bot_commands() -> tuple[BotCommand, ...]:
     """Return the command menu exposed by the Prediction control plane."""
 
     return (
+        BotCommand("firstreport", "BTC／ETH／BNB First觀測，參數20/40/100"),
         BotCommand("report", "目前 Lane Live WR／PnL／風控"),
         BotCommand("predict_report", "目前 Lane Live WR／PnL／風控"),
         BotCommand("shadow_report", "查看原 Shadow 報告"),
@@ -291,6 +292,7 @@ def prediction_bot_commands() -> tuple[BotCommand, ...]:
         BotCommand("predict_reconcile", "同步未完成訂單"),
         BotCommand("predict_risk", "查看真正風控狀態"),
         BotCommand("predict_hard_stop_reset", "Hard Stop Reset（不限次數）"),
+        BotCommand("predict_market", "T6.7c 下一輪選 BTC／ETH／BNB"),
         BotCommand("predict_lane", "選擇交易策略"),
         BotCommand("predict_amount", "選擇單筆 1 / 2 USDT"),
     )

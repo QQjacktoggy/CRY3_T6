@@ -402,12 +402,24 @@ def _items(payload: Any) -> list[Mapping[str, Any]]:
 
 
 class C180SignalRuntime:
+    symbol = "BTCUSDT"
+
     def __init__(
         self, *, logic: Any, live: Any, prediction_key: str,
         prediction_secret: str, jev_key: str, db_path: str | Path,
         prediction_db: str | Path,
         feature_db: str | Path | None = None,
+        symbol: str = "BTCUSDT",
     ) -> None:
+        from .loop_market import symbol as valid_symbol, bind_data_db, data_paths
+        self.symbol = valid_symbol(symbol)
+        if self.symbol != "BTCUSDT":
+            expected_feature, expected_signal = data_paths(prediction_db, self.symbol)
+            if Path(db_path).resolve() != expected_signal or feature_db is None or Path(feature_db).resolve() != expected_feature:
+                raise ValueError("non-BTC data paths must be isolated")
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(db_path) as identity_db:
+            bind_data_db(identity_db, self.symbol)
         self.logic = logic
         self.live = live
         self.prediction_db = Path(prediction_db)
@@ -419,14 +431,14 @@ class C180SignalRuntime:
             transport=live.ReadOnlyTransport(), timeout=5,
         )
         self.signals = C180SignalService(
-            frozen_logic=logic, api_key=jev_key,
+            frozen_logic=logic, api_key=jev_key, symbol=self.symbol,
             unit_provider=lambda: read_selected_order_unit(self.prediction_db),
             persist_result=self.store.persist,
         )
         self.evidence = C180EvidenceCollector(
-            tape=logic.Tape(),
+            tape=logic.Tape(), symbol=self.symbol,
             feed_factory=lambda callback: live.Feeds(
-                prediction_key, prediction_secret, callback=callback,
+                prediction_key, prediction_secret, callback=callback, symbol=self.symbol,
             ),
             on_raw_event=self._on_raw_event,
             on_frozen=self._on_frozen,
@@ -467,6 +479,9 @@ class C180SignalRuntime:
     def _on_frozen(self, evidence):
         # T6.7 consumes public evidence, not a paid Original/JEV decision.
         try:
+            from .loop_market import signal_asset_active
+            if not signal_asset_active(self.prediction_db, self.symbol):
+                return
             active = self._t67_active(_now_ms())
             if active is None:
                 return
@@ -596,7 +611,9 @@ class C180SignalRuntime:
         return data
 
     async def _accept(self, raw: Mapping[str, Any], now_ms: int) -> bool:
-        if raw.get("symbol") != "BTCUSDT":
+        if raw.get("symbol") != self.symbol:
+            return False
+        if self.symbol != "BTCUSDT" and raw.get("variantData", {}).get("priceFeedSymbol") != self.symbol:
             return False
         market = self.live.MarketInfo.from_api(raw)
         if (market.end_time_ms - market.start_time_ms != SLOT_MS
@@ -633,7 +650,7 @@ class C180SignalRuntime:
         slot = now_ms // SLOT_MS * SLOT_MS
         if now_ms - self._last_list_ms >= 20_000:
             for raw in await self._list_markets():
-                if raw.get("symbol") != "BTCUSDT":
+                if raw.get("symbol") != self.symbol:
                     continue
                 for item in raw.get("timeline", ()):
                     if (isinstance(item, Mapping)
@@ -657,7 +674,7 @@ class C180SignalRuntime:
     async def recovery_scan_once(self) -> None:
         """Settle at most one paper market per pass from post-halt evidence."""
         now = _now_ms()
-        if self._t67_active(now) is not False:
+        if self.symbol != "BTCUSDT" or self._t67_active(now) is not False:
             return
         if now - self._last_recovery_scan_ms < 20_000:
             return
@@ -730,7 +747,7 @@ class C180SignalRuntime:
             await resolve_t68(db, now, self._detail)
             from .regime_t68a_shadow import resolve_once as resolve_t68a
             await resolve_t68a(db, now, self._detail)
-            if self._t67_active(now) is False:
+            if self.symbol == "BTCUSDT" and self._t67_active(now) is False:
                 from .regime_t65_shadow import resolve_outcome_once
                 from .regime_t66_observer import resolve_once
                 await resolve_outcome_once(db, now, self._detail)
@@ -777,6 +794,7 @@ def main() -> None:
     parser.add_argument("--prediction-key-env", default="PREDICTION_BINANCE_API_KEY")
     parser.add_argument("--prediction-secret-env", default="PREDICTION_BINANCE_API_SECRET")
     parser.add_argument("--jev-key-env", default="OPENROUTER_API_KEY")
+    parser.add_argument("--symbol", default="BTCUSDT", choices=("BTCUSDT", "ETHUSDT", "BNBUSDT"))
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -790,7 +808,7 @@ def main() -> None:
     runtime = C180SignalRuntime(
         logic=logic, live=live, prediction_key=prediction_key,
         prediction_secret=prediction_secret, jev_key=jev_key,
-        db_path=args.signal_db, prediction_db=args.prediction_db, feature_db=args.feature_db,
+        db_path=args.signal_db, prediction_db=args.prediction_db, feature_db=args.feature_db, symbol=args.symbol,
     )
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
