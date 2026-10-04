@@ -88,7 +88,7 @@ async def test_t69_final_atomic_buy_gate_rechecks_loop_asset(repo, asset, raw_as
     await ledger.verify_market(loop_id='loop', market_start_ms=S, market_topic_id='topic',
                                market_id='up', verified_at_ms=S+120000)
     intent = dict(intent_id='intent', campaign_id='campaign', action='BUY_INITIAL', outcome='UP',
-                  order_side='BUY', amount='1', limit_price='.78', created_at_ms=S+128000, ttl_ms=1000,
+                  order_side='BUY', amount='1', limit_price='.74', created_at_ms=S+128000, ttl_ms=1000,
                   attempt=1, status='PENDING', tier=TIER, payload={})
     with patch('src.gridbot.prediction.regime_live_ledger._now_ms', return_value=S+128000):
         result = await ledger.reserve_c180_intent(loop_id='loop', market_start_ms=S, campaign_id='campaign',

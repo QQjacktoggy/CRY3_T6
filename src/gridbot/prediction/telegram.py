@@ -100,7 +100,7 @@ HARD_STOP_CALLBACK_PREFIX = "predict_hard_stop:"
 CANCEL_LOOP_CALLBACK_PREFIX = "predict_cancel:"
 MONITOR_CALLBACK_PREFIX = "predict_monitor:"
 SELECTABLE_LANES = (
-    ('regime_target6_9_v1', 'T6.9 T6.8a＋Flat補位 Live（BTC／ETH／BNB；1/2/3U）'),
+    ('regime_target6_9_v1', 'T6.9 T6.8a Live＋Flat Shadow（BTC／ETH／BNB；1/2/3U）'),
     ('regime_target6_7d_v1', 'T6.7d 原七路＋Flat補位 Live（1/2/3U）'),
     ('regime_target6_8a_v1', 'T6.8a First UP≥5bp＋Reference 180s Live（1/2/3U）'),
     ('regime_target6_8_v1', 'T6.8 核心＋Reference 180s Live（1/2/3U）'),
@@ -139,7 +139,7 @@ def selectable_lanes_for_market(market_symbol: str | None) -> tuple[tuple[str, s
 
 
 WR_MONITOR_LANE_LABELS = {
-    "regime_target6_9_v1": "T6.9 T6.8a＋Flat補位 Live／每20 run總結",
+    "regime_target6_9_v1": "T6.9 T6.8a Live＋Flat Shadow／每20 run總結",
     "regime_target6_8_v1": "T6.8 核心＋Reference 180s Live／每20 run總結",
     "regime_target6_8a_v1": "T6.8a First UP≥5bp＋Reference 180s Live／每20 run總結",
     "regime_target6_7d_v1": "T6.7d 原七路＋Flat補位 Live／每20 run總結",

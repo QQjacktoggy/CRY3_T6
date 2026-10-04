@@ -52,13 +52,13 @@ def late(obj, *, offset=180000, current=None, spots=None, seen=0, unit=D(1)):
         return obj.check_signal(market=MARKET, unit_usdt=unit, at_ms=S+offset, last_seen_book_at_ms=seen)
 
 
-def test_ninth_live_lane_fresh_reference_180_preserves_core_and_original_risk(tmp_path):
+def test_eighth_live_lane_fresh_reference_180_preserves_core_and_original_risk(tmp_path):
     obj = build(tmp_path)
     before = state(obj)
     result = late(obj)
     assert result.allowed, result.reason
     d = state(obj)
-    assert len(LIVE_BRANCHES) == 9 and len(SHADOW_BRANCHES) == 5
+    assert len(LIVE_BRANCHES) == 8 and len(SHADOW_BRANCHES) == 6
     assert d['branch'] == 'reference_180_mid'
     assert d['core_guard'] == before['core_guard']
     assert result.signal.cutoff_ms == S+180000

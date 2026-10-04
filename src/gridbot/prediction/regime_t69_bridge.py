@@ -71,9 +71,6 @@ def _check_early(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
             raise ValueError('decision_payload_invalid')
         if not d['selected']:
             if guard.get('verified') is True and guard.get('empty') is True:
-                flat = d.get('flat_guard') or {}
-                if not flat.get('terminal'):
-                    return b.C180Ready(False, 't69_wait_flat_confirmation')
                 return b.C180Ready(False, 't69_wait_reference_checkpoint')
             if d.get('rejected_branches'):
                 return b.C180Ready(False, 't69_first_up_prior_below_5bp')
@@ -173,99 +170,11 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
                                      at_ms, 'regime_frozen_entry', entry, p, FINGERPRINT, None, dec(d['fee_bps']))
                 d['signal'] = b._signal_json(signal)
                 break
-        # Flat follows the original additions and uses immutable checkpoints.
-        if not d['selected'] and guard.get('verified') is True and guard.get('empty') is True:
-            candidate = _flat_candidate(bridge, market, d, at_ms, unit_usdt)
-            if candidate is not None:
-                selected_at, candidate, ex = candidate
-                d.update(candidate, selected=True, selected_at_ms=selected_at,
-                         expires_at_ms=min(start+136000, selected_at+POLICY['flat_favorite']['ttl_ms']))
-                entry = b.C180EntryDecision(d['side'], 'regime_entry', d['side'], unit_usdt,
-                                            ex['net_shares'], None)
-                signal = b.C180Signal(start, market.market_topic_id, market.up_market_id, start+120000,
-                                     selected_at, 'regime_frozen_entry', entry, None, FINGERPRINT, None, dec(d['fee_bps']))
-                d['signal'] = b._signal_json(signal)
         d['last_evaluated_ms'] = at_ms
         db.execute('INSERT INTO t69_decisions VALUES(?,?) ON CONFLICT(start) DO UPDATE SET payload=excluded.payload',
                    (start, json.dumps(d, sort_keys=True, allow_nan=False)))
         db.commit()
         return d
-
-
-def _favorite(snapshot):
-    asks = {}
-    for side in ('UP', 'DOWN'):
-        ask = dec(snapshot['quote'][side]['ask'])
-        if ask != dec(snapshot['quote'][side]['ask_levels'][0][0]):
-            raise ValueError('actual_ask_depth_mismatch')
-        asks[side] = ask
-    if asks['UP'] == asks['DOWN']:
-        raise ValueError('favorite_tie')
-    return 'UP' if asks['UP'] > asks['DOWN'] else 'DOWN'
-
-
-def _checkpoint(bridge, market, at_ms, beginning, ending):
-    """Read the first valid fresh sample; price/depth eligibility is tested once."""
-    start = int(market.start_time_ms)
-    with closing(sqlite3.connect(bridge.signal_db.resolve().as_uri()+'?mode=ro', uri=True, timeout=1)) as db:
-        db.execute('PRAGMA query_only=ON')
-        rows = db.execute('SELECT snapshot_json FROM c180_book_events WHERE market_start_ms=? '
-                          'AND captured_at_ms>=? AND captured_at_ms<=? ORDER BY captured_at_ms,book_at_ms',
-                          (start, start+beginning, min(at_ms, start+ending)))
-        for row in rows:
-            sample = json.loads(row[0])
-            try:
-                cutoff = int(sample['captured_at_ms'])
-                stamp = bridge._book(sample, market, cutoff)
-                if not start+beginning <= cutoff <= min(at_ms, start+ending) or cutoff-stamp > 1000:
-                    continue
-                return sample
-            except (ValueError, KeyError, TypeError):
-                continue
-    return None
-
-
-def _flat_candidate(bridge, market, d, at_ms, unit):
-    """T6.7d Flat rule. Freeze rejection or approval at the first confirmation."""
-    start = int(market.start_time_ms)
-    rule = POLICY['flat_favorite']
-    status = d.setdefault('flat_guard', {})
-    if status.get('terminal'):
-        return None
-    features = d['core_guard']['features']
-    if (not abs(dec(features['first_bp'])) < dec(rule['first_abs_max_exclusive_bp'])
-            or not abs(dec(features['last_bp'])) < dec(rule['last_abs_max_exclusive_bp'])):
-        status.update(terminal=True, reason='non_flat')
-        return None
-    begin, end = rule['confirmation_ms']
-    if at_ms < start+begin:
-        status['reason'] = 'awaiting_confirmation'
-        return None
-    initial = _checkpoint(bridge, market, at_ms, 124000, 126000)
-    confirmation = _checkpoint(bridge, market, at_ms, begin, end)
-    if confirmation is None:
-        if at_ms > start+end:
-            status.update(terminal=True, reason='confirmation_missing')
-        return None
-    status.update(terminal=True, initial=initial, confirmation=confirmation,
-                  reason='checkpoint_rejected')
-    lower, upper = rule['price_band']
-    try:
-        if initial is None or int(initial['captured_at_ms']) != d['core_guard']['initial_captured_at_ms']:
-            raise ValueError('initial_checkpoint_mismatch')
-        if dec(initial['fee_bps']) != dec(d['fee_bps']) or dec(confirmation['fee_bps']) != dec(d['fee_bps']):
-            raise ValueError('checkpoint_fee_changed')
-        side = _favorite(initial)
-        if side != _favorite(confirmation):
-            raise ValueError('favorite_changed')
-        ex = new_execution(confirmation, side, unit, lower=lower, cap=upper)
-        selected_at = int(confirmation['captured_at_ms'])
-        status.update(reason='flat_verified', side=side, selected_at_ms=selected_at)
-        return selected_at, dict(branch='flat_favorite', side=side, action='flat_favorite',
-                                 probability=None, lower=lower, cap=str(ex['limit']), upper=upper), ex
-    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
-        status['reason'] = str(exc)
-        return None
 
 
 def _reason_code(exc):
@@ -310,7 +219,7 @@ def _reason_code(exc):
 
 
 def check_signal(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
-    """Keep the seven original lanes and Flat, then consider one sticky late candidate."""
+    """Keep the seven original lanes, then consider one sticky late candidate."""
     start = int(market.start_time_ms)
     if start+124000 <= at_ms < start+136000:
         return _check_early(bridge, market=market, unit_usdt=unit_usdt, at_ms=at_ms,

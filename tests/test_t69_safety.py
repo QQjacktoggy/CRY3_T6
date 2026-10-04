@@ -226,8 +226,7 @@ def test_structural_core_retains_old_initial_age_and_ignores_opposite_thin_depth
     (136000, False, '.40', False),
     (240000, False, '.40', False),
     (124000, True, '.40', False),
-    (124000, False, '.80', True),
-    (124000, False, '.8001', False),
+    (124000, False, '.7501', False),
 ])
 async def test_t69_atomic_window_hs_cap_and_duplicate_buy(tmp_path, offset, halt, price, allowed):
     repo = PredictionRepository(tmp_path/'db')

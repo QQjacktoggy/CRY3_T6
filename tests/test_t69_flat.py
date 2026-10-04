@@ -1,4 +1,4 @@
-"""T6.9 Flat favorite: T6.7d checkpoints after T6.8a routing, then Reference 180s."""
+"""T6.9 Live never selects Flat; flat markets keep the T6.8a Reference 180s backfill."""
 import json
 import sqlite3
 from contextlib import closing
@@ -89,113 +89,36 @@ class Flat:
             return json.loads(db.execute('SELECT payload FROM t69_decisions').fetchone()[0])
 
 
-def test_live_inventory_places_flat_before_reference():
-    assert len(LIVE_BRANCHES) == 9
-    assert LIVE_BRANCHES[-2:] == ('flat_favorite', 'reference_180_mid')
-
-
-def test_before_confirmation_waits_for_flat_not_reference(tmp_path):
-    obj = Flat(tmp_path)
-    assert obj.check(quote(at=126000)).reason == 't69_wait_flat_confirmation'
-    assert obj.state()['flat_guard']['reason'] == 'awaiting_confirmation'
+def test_live_inventory_has_no_flat_lane():
+    assert len(LIVE_BRANCHES) == 8
+    assert 'flat_favorite' not in LIVE_BRANCHES and LIVE_BRANCHES[-1] == 'reference_180_mid'
 
 
 @pytest.mark.parametrize('side,unit', [('UP', D(1)), ('DOWN', D(1)), ('UP', D(2)), ('DOWN', D(3))])
-def test_flat_fixed_checkpoint_side_and_unit(tmp_path, side, unit):
+def test_stable_flat_favorite_is_never_a_live_entry(tmp_path, side, unit):
     up, down = ('.7', '.3') if side == 'UP' else ('.3', '.7')
     obj = Flat(tmp_path, initial=quote(up, down, 124000))
-    q = quote(up, down)
-    obj.put(q)
-    # Freeze at the selected unit, rather than silently changing an existing guard.
     with sqlite3.connect(obj.feature_db) as db:
         db.execute('DELETE FROM t69_decisions')
     assert not obj.check(obj.initial, unit=unit).allowed
-    ready = obj.check(q, unit=unit)
-    assert ready.allowed, ready.reason
-    assert ready.reason == 't69_ready:flat_favorite'
-    assert ready.signal.entry.side == side and ready.signal.entry.stake_usdt == unit
-    assert ready.signal.original_input_sha256 == FINGERPRINT
-    assert ready.signal.completed_at_ms == S+128000
-    assert ready.execution.expires_at_ms == S+130000
-    assert ready.execution.worst_ask_limit == D('.7')
-    assert obj.state()['branch'] == 'flat_favorite'
-
-
-@pytest.mark.parametrize('failure', ['below', 'above', 'thin', 'flip', 'tie', 'fee', 'ask_mismatch'])
-def test_first_confirmation_failure_cannot_search_later_quote(tmp_path, failure):
-    obj = Flat(tmp_path)
-    q = quote()
-    if failure == 'below': q = quote('.64', '.36')
-    if failure == 'above': q = quote('.81', '.19')
-    if failure == 'thin': q['quote']['UP']['ask_levels'][0][1] = '.01'
-    if failure == 'flip': q = quote('.3', '.7')
-    if failure == 'tie': q = quote('.5', '.5')
-    if failure == 'fee': q['fee_bps'] = 300
-    if failure == 'ask_mismatch': q['quote']['UP']['ask'] = '.72'
-    obj.put(q)
-    assert not obj.check(q).allowed
-    later = quote(at=128500)
-    obj.put(later)
-    assert not obj.check(later).allowed
+    for at in (126000, 128000, 129000):
+        q = quote(up, down, at)
+        obj.put(q)
+        ready = obj.check(q, unit=unit)
+        assert not ready.allowed and ready.reason == 't69_wait_reference_checkpoint'
     d = obj.state()
-    assert d['flat_guard']['terminal'] and not d['selected']
+    assert d['selected'] is False and 'flat_guard' not in d
+    assert d['core_guard']['empty'] is True
 
 
-@pytest.mark.parametrize('first,last', [('.5', '0'), ('-.5', '.1'), ('.1', '.5'), ('.1', '-.5')])
-def test_nonflat_boundaries_never_select_flat(tmp_path, first, last):
-    obj = Flat(tmp_path, first, last, initial=quote('.3', '.7', 124000))
-    q = quote()
-    obj.put(q)
-    assert not obj.check(q).allowed
-    d = obj.state()
-    assert d.get('branch') != 'flat_favorite'
-    if d['core_guard'].get('empty'):
-        assert d['flat_guard']['reason'] == 'non_flat'
-
-
-def test_missing_confirmation_never_uses_later_quote(tmp_path):
-    obj = Flat(tmp_path)
-    q = quote(at=129501)
-    obj.put(q)
-    assert not obj.check(q).allowed
-    assert obj.state()['flat_guard']['reason'] == 'confirmation_missing'
-
-
-def test_selected_flat_is_readonly_and_expires(tmp_path):
+def test_flat_market_still_uses_reference_180(tmp_path):
     obj = Flat(tmp_path)
     q = quote()
     obj.put(q)
-    first = obj.check(q)
-    assert first.allowed
-    with patch.object(b, 'connect', side_effect=AssertionError('selected path must be readonly')):
-        again = obj.check(quote('.69', '.31', 128800))
-    assert again.allowed and again.signal == first.signal
-    assert not obj.check(quote(at=130000)).allowed
-    assert not obj.check(quote(at=128500), unit=D(2)).allowed
-
-
-def test_selected_flat_blocks_reference_180(tmp_path):
-    obj = Flat(tmp_path)
-    q = quote()
-    obj.put(q)
-    assert obj.check(q).allowed
-    late = obj.late()
-    assert not late.allowed
-    assert obj.state()['branch'] == 'flat_favorite'
-    assert 'reference_attempt' not in obj.state()
-
-
-def test_rejected_flat_still_allows_reference_180(tmp_path):
-    obj = Flat(tmp_path)
-    q = quote('.85', '.15')
-    obj.put(q)
     assert not obj.check(q).allowed
-    assert obj.check(quote(at=130000)).reason == 't69_wait_reference_checkpoint'
     late = obj.late()
     assert late.allowed, late.reason
-    d = obj.state()
-    assert d['branch'] == 'reference_180_mid'
-    assert d['flat_guard']['terminal'] and d['flat_guard']['reason'] != 'flat_verified'
+    assert obj.state()['branch'] == 'reference_180_mid'
 
 
 def test_flat_requires_valid_original_for_empty_core(tmp_path):
@@ -210,12 +133,11 @@ def test_flat_requires_valid_original_for_empty_core(tmp_path):
 
 
 @pytest.mark.parametrize('asset', SYMBOLS)
-def test_flat_selects_on_each_bound_asset(tmp_path, asset):
+def test_flat_is_not_live_on_any_bound_asset(tmp_path, asset):
     obj = Flat(tmp_path, asset=asset)
     obj.bridge.symbol = asset
     q = quote(asset=asset)
     obj.put(q)
-    ready = obj.check(q)
-    assert ready.allowed, ready.reason
+    assert not obj.check(q).allowed
     d = obj.state()
-    assert d['branch'] == 'flat_favorite' and d['core_guard']['features']['symbol'] == asset
+    assert d['selected'] is False and d['core_guard']['features']['symbol'] == asset

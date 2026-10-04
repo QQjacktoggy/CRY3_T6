@@ -15,12 +15,12 @@ LIVE_LABELS = {
     'core_continuation_original': 'continuation Original',
     'c_mirror_up_prior': 'C-UP 前趨勢鏡像',
     'shallow_retracement': '淺回撤',
-    'flat_favorite': 'Flat 熱門方補位',
     'reference_180_mid': 'Reference 180s補位',
 }
 SHADOW_LABELS = {
     'external_lead_lag': '外部先行',
     'reference_value': 'Reference 校正',
+    'flat_favorite': 'F1 Flat 熱門方',
     'flat_quiet_favorite': 'F2 安靜熱門方',
     'flat_cheap_prior': 'F3 便宜方順前趨勢',
     'flat_hold_180': 'F4 180s 續橫盤熱門方',
@@ -28,18 +28,17 @@ SHADOW_LABELS = {
 LIVE_GROUPS = (
     ('核心', ('core_first_down', 'core_first_up', 'core_stall_down', 'core_c_down', 'core_continuation_original')),
     ('增量', ('c_mirror_up_prior', 'shallow_retracement')),
-    ('Flat', ('flat_favorite',)),
     ('180s 補位', ('reference_180_mid',)),
 )
 SHADOW_GROUPS = (
     ('研究', ('external_lead_lag', 'reference_value')),
-    ('Flat F2–F4', ('flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')),
+    ('Flat F1–F4', ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')),
 )
-HEADER = '📊 T6.9 Report｜九路 Live＋五路 Shadow'
+HEADER = '📊 T6.9 Report｜八路 Live＋六路 Shadow'
 LIVE_SIDES = {
     'core_first_down': {'DOWN'}, 'core_first_up': {'UP'}, 'core_stall_down': {'DOWN'},
     'core_c_down': {'DOWN'}, 'core_continuation_original': {'UP', 'DOWN'},
-    'c_mirror_up_prior': {'UP'}, 'shallow_retracement': {'UP', 'DOWN'}, 'flat_favorite': {'UP', 'DOWN'},
+    'c_mirror_up_prior': {'UP'}, 'shallow_retracement': {'UP', 'DOWN'},
     'reference_180_mid': {'UP', 'DOWN'},
 }
 REFERENCE_CHECKPOINTS = (60000, 120000, 180000, 240000)
