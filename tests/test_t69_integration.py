@@ -198,8 +198,8 @@ def test_t69_live_composition_keeps_parent_and_adds_only_flat():
     from src.gridbot.prediction.regime_t67c_policy import LIVE_BRANCHES as retained
     from src.gridbot.prediction.regime_t69_policy import LIVE_BRANCHES, SHADOW_BRANCHES
     assert LIVE_BRANCHES == retained + ('flat_favorite', 'reference_180_mid')
-    assert SHADOW_BRANCHES == ('external_lead_lag', 'reference_value')
-    assert len(LIVE_BRANCHES) == 9 and len(SHADOW_BRANCHES) == 2
+    assert SHADOW_BRANCHES == ('external_lead_lag', 'reference_value', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
+    assert len(LIVE_BRANCHES) == 9 and len(SHADOW_BRANCHES) == 5
 
 
 @pytest.mark.parametrize('profile,offset,attempted,pending,expected', [

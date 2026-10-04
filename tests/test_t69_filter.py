@@ -65,7 +65,7 @@ def test_policy_diff_is_only_version_lineage_flat_and_markets():
     from src.gridbot.prediction.regime_t67d_policy import POLICY as flat_parent, FINGERPRINT as flat_fp
     changed={k for k in POLICY.keys()|parent.keys() if POLICY.get(k)!=parent.get(k)}
     assert changed=={'profile','parent_fingerprint','live','validation_mode','flat_favorite',
-                     'flat_source_fingerprint','markets','market_binding'}
+                     'flat_source_fingerprint','markets','market_binding','shadow_branches','flat_shadow'}
     assert POLICY['parent_fingerprint']==parent_fp and POLICY['flat_source_fingerprint']==flat_fp
     assert POLICY['first_up_prior_min_bp']=='5'
     rule=dict(POLICY['flat_favorite']);source=dict(flat_parent['flat_favorite'])

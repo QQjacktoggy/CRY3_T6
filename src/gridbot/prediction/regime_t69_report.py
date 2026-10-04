@@ -21,7 +21,21 @@ LIVE_LABELS = {
 SHADOW_LABELS = {
     'external_lead_lag': '外部先行',
     'reference_value': 'Reference 校正',
+    'flat_quiet_favorite': 'F2 安靜熱門方',
+    'flat_cheap_prior': 'F3 便宜方順前趨勢',
+    'flat_hold_180': 'F4 180s 續橫盤熱門方',
 }
+LIVE_GROUPS = (
+    ('核心', ('core_first_down', 'core_first_up', 'core_stall_down', 'core_c_down', 'core_continuation_original')),
+    ('增量', ('c_mirror_up_prior', 'shallow_retracement')),
+    ('Flat', ('flat_favorite',)),
+    ('180s 補位', ('reference_180_mid',)),
+)
+SHADOW_GROUPS = (
+    ('研究', ('external_lead_lag', 'reference_value')),
+    ('Flat F2–F4', ('flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')),
+)
+HEADER = '📊 T6.9 Report｜九路 Live＋五路 Shadow'
 LIVE_SIDES = {
     'core_first_down': {'DOWN'}, 'core_first_up': {'UP'}, 'core_stall_down': {'DOWN'},
     'core_c_down': {'DOWN'}, 'core_continuation_original': {'UP', 'DOWN'},
@@ -159,7 +173,8 @@ def _official_winners(root, loop_id, slots):
 def shadow_metrics(root, *, now, loop_id, slots, fingerprint):
     from .live_report import _decimal
     result = {b: dict(quoted=0, known=0, unknown=0, wins=0, losses=0, flats=0,
-                      unverified=0, pnl=Decimal(0), wr='—') for b in SHADOW_LABELS}
+                      unverified=0, pnl=Decimal(0), wr='—', cash=Decimal(0), shares=Decimal(0),
+                      breakeven='—') for b in SHADOW_LABELS}
     slots = [s for s in slots if s.get('loop_id') == loop_id
              and s.get('verified_at_ms') is not None and int(s['verified_at_ms']) <= now
              and int(s['market_start_ms']) <= now]
@@ -197,6 +212,8 @@ def shadow_metrics(root, *, now, loop_id, slots, fingerprint):
                     or not 0 <= _decimal(quote['fee_bps']) <= 10000):
                 raise ValueError('paper quote amounts invalid')
             metric['quoted'] += 1
+            metric['cash'] += cash
+            metric['shares'] += shares
             outcome = outcomes.get(start)
             if not outcome or outcome.get('complete') is not True or int(outcome.get('known_at_ms', now+1)) > now:
                 metric['unknown'] += 1
@@ -224,6 +241,8 @@ def shadow_metrics(root, *, now, loop_id, slots, fingerprint):
         metric['unknown'] = metric['quoted']-metric['known']
         decisive = metric['wins']+metric['losses']
         metric['wr'] = f"{metric['wins']/decisive:.1%}" if decisive else '—'
+        # Fee-net cost per share is the win rate at which paper PnL is zero.
+        metric['breakeven'] = f"{metric['cash']/metric['shares']:.1%}" if metric['shares'] > 0 else '—'
     return result
 
 
@@ -317,15 +336,23 @@ def checkpoint_summary(root, *, now, loop_id, slots, fingerprint):
     return lines
 
 
+def _grouped(groups, line):
+    result = []
+    for title, branches in groups:
+        result.append(f'〔{title}〕')
+        result += [line(branch) for branch in branches]
+    return result
+
+
 def empty_report(now):
     from .live_report import TZ
     clock = datetime.fromtimestamp(now/1000, TZ).strftime('%m/%d %H:%M:%S')
-    lines = ['📊 T6.9 Report｜九路 Live＋兩路 Shadow', f'截至 {clock}（台灣時間）',
+    lines = [HEADER, f'截至 {clock}（台灣時間）',
              '尚未建立 T6.9 Live 輪次；尚未開跑。',
              'Live fill rate／WR／PnL：—（尚無本輪資料）', '', 'Live 子策略（本輪）：']
-    lines += [f'{title}｜成交 0｜已知WR —｜已知PnL —｜待結算 0' for title in LIVE_LABELS.values()]
+    lines += _grouped(LIVE_GROUPS, lambda branch: f'{LIVE_LABELS[branch]}｜成交 0｜已知WR —｜已知PnL —｜待結算 0')
     lines += ['', 'Shadow（本輪報價研究）：']
-    lines += [f'{title}｜報價 0｜已知paper WR —｜假設paper PnL —｜未知 0' for title in SHADOW_LABELS.values()]
+    lines += _grouped(SHADOW_GROUPS, lambda branch: f'{SHADOW_LABELS[branch]}｜報價 0｜已知paper WR —｜假設paper PnL —｜未知 0')
     lines.append('Shadow報價不等於實際成交；假設收益不併入Live。')
     lines += ['', 'Reference檢查點：60/120/180/240s 尚無本輪登錄資料。']
     return '\n'.join(lines)
@@ -509,7 +536,7 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
     mdd = _value(metric, events, pending, 'mdd') if events or pending else '—'
     from .loop_market import report_asset
     asset = report_asset(root, loop['loop_id'])
-    lines = ['📊 T6.9 Report｜九路 Live＋兩路 Shadow', '市場：'+(asset or '歷史未綁定'), f'截至 {clock}（台灣時間）｜Loop {loop["loop_id"]}',
+    lines = [HEADER, '市場：'+(asset or '歷史未綁定'), f'截至 {clock}（台灣時間）｜Loop {loop["loop_id"]}',
              f'狀態 {loop["state"]}｜完成 {loop["completed"]}/{loop["target"]} 場｜本輪每筆 {units} USDT',
              f'Live fill rate {fill_text}',
              f'本輪 WR {metric["wr"]}（{metric["wins"]}勝/{metric["losses"]}負/{metric["flats"]}平；已結算成交 {len(events)}）',
@@ -520,10 +547,11 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
     try:
         branches = branch_metrics(root, campaigns, current_ids, verified_fills, events,
                                   fingerprint=FINGERPRINT, slots=slots, loop_id=loop['loop_id'])
-        for branch, title in LIVE_LABELS.items():
+        def live_line(branch):
             m = branches[branch]
             branch_pnl = f'{m["pnl"]:+.4f}' if m['wins']+m['losses']+m['flats'] else '—'
-            lines.append(f'{title}｜成交 {m["fills"]}｜已知WR {m["wr"]}｜已知PnL {branch_pnl} USDT｜待結算 {m["pending"]}')
+            return f'{LIVE_LABELS[branch]}｜成交 {m["fills"]}｜已知WR {m["wr"]}｜已知PnL {branch_pnl} USDT｜待結算 {m["pending"]}'
+        lines += _grouped(LIVE_GROUPS, live_line)
         if branches['unattributed']:
             lines.append(f'子策略歸因待核對 {branches["unattributed"]} 筆；保留官方Live總PnL。')
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError):
@@ -534,12 +562,16 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
     lines += ['', 'Shadow（本輪報價研究）：']
     try:
         shadows = shadow_metrics(root, now=now, loop_id=loop['loop_id'], slots=slots, fingerprint=FINGERPRINT)
-        for branch, title in SHADOW_LABELS.items():
-            m = shadows[branch]
-            paper_pnl = f'{m["pnl"]:+.4f} USDT' if m['known'] else '—'
-            lines.append(f'{title}｜報價 {m["quoted"]}｜已知paper WR {m["wr"]}｜假設paper PnL {paper_pnl}｜未知 {m["unknown"]}')
-            if m['unverified']:
-                lines.append(f'  報價/官方勝方待核對 {m["unverified"]}；未核對結果不列收益。')
+        for group, members in SHADOW_GROUPS:
+            lines.append(f'〔{group}〕')
+            for branch in members:
+                m = shadows[branch]
+                paper_pnl = f'{m["pnl"]:+.4f} USDT' if m['known'] else '—'
+                lines.append(f'{SHADOW_LABELS[branch]}｜報價 {m["quoted"]}｜已知paper WR {m["wr"]}｜假設paper PnL {paper_pnl}｜未知 {m["unknown"]}')
+                if m['quoted']:
+                    lines.append(f'  兩平WR {m["breakeven"]}（含費平均成本）')
+                if m['unverified']:
+                    lines.append(f'  報價/官方勝方待核對 {m["unverified"]}；未核對結果不列收益。')
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError):
         lines += [f'{title}｜報價待核對｜已知paper WR —｜假設paper PnL —' for title in SHADOW_LABELS.values()]
     lines.append('Shadow報價不等於實際成交；假設收益不併入Live。')
