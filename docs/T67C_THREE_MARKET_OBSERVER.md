@@ -11,7 +11,9 @@
 
 原有外部先行、Reference兩條Shadow另外計算，不加入七路合計。所有勝方來自既有First觀測器保存的
 官方結算與market/topic/token/起止/費率身份核對，平局0.5 payout，扣費一次；未結不補零，沒有樣本顯示—。
-研究服務只讀三幣feature/signal/evidence及First觀測DB；只寫`prediction/data/t67c-multimarket-observer/observer.sqlite3`
+研究服務只讀三幣feature/signal/evidence及First觀測DB；既有feature在121秒仍缺漏時，
+各幣最多一次並行公開K線補取（1.2秒timeout、原123秒receipt截止、production freeze_features驗證），
+原始17根K線與收到時間保存在研究DB，不寫回feature來源、不事後回填候選；只寫`prediction/data/t67c-multimarket-observer/observer.sqlite3`
 與`latest.json`，不建立Live repository/client、不開單／arm／selector、不改交易帳本。
 
 使用者明確接受三幣Original費用後，在三個既有signal producer加入

@@ -129,3 +129,22 @@ async def test_telegram_auth_and_pure_read_path():
     svc._reply.assert_not_called();svc._deny_if_unauthorized.return_value=False
     with patch('operators.t67c_multimarket_observer.report.load_render',return_value='report') as reader:await svc.cmd_t67creport(None,SimpleNamespace(args=['40','bnb']))
     assert reader.call_args.args[1:]==(40,'BNBUSDT',S);svc._reply.assert_awaited_once_with(None,'report',parse_mode=None)
+
+
+def test_public_feature_fallback_deadline_identity_and_readonly_url():
+    from operators.t67c_multimarket_observer.service import fetch_features
+    from io import BytesIO
+    candles=[]
+    for i in range(17):
+        t=S-900000+i*60000;candles.append([t,'100','101','99','100','1',t+59999])
+    class Response(BytesIO):headers={}
+    with patch('urllib.request.urlopen',return_value=Response(json.dumps(candles).encode())) as req:
+        f,raw=fetch_features('ETHUSDT',S,clock=lambda:S+121100)
+        assert f['symbol']=='ETHUSDT' and f['received_at_ms']==S+121100 and raw==candles
+        assert req.call_args.args[0].startswith('https://api.binance.com/api/v3/klines?symbol=ETHUSDT&')
+        assert 'signature' not in req.call_args.args[0] and req.call_args.kwargs['timeout']==1.2
+    with pytest.raises(ValueError):fetch_features('WRONG',S,clock=lambda:S+121000)
+    with pytest.raises(ValueError):fetch_features('BTCUSDT',S,clock=lambda:S+122000)
+    times=iter([S+121100,S+123001])
+    with patch('urllib.request.urlopen',return_value=Response(json.dumps(candles).encode())),pytest.raises(ValueError):
+        fetch_features('BNBUSDT',S,clock=lambda:next(times))
