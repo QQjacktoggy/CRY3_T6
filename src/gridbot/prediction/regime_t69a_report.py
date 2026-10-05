@@ -1,4 +1,4 @@
-"""Current-loop T6.9a Live ledger and separate verified Shadow quotes."""
+"""Current-loop T6.9b Live ledger and separate verified Shadow quotes."""
 from __future__ import annotations
 
 import json
@@ -29,7 +29,7 @@ LIVE_GROUPS = (
 SHADOW_GROUPS = (
     ('Flat F1–F4', ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')),
 )
-HEADER = '📊 T6.9a Report｜七路 Live（T6.7c＋First UP 5bp）＋四路 Flat Shadow'
+HEADER = '📊 T6.9b Report｜七路 Live（T6.7c＋First UP 5bp）＋四路 Flat Shadow'
 LIVE_SIDES = {
     'core_first_down': {'DOWN'}, 'core_first_up': {'UP'}, 'core_stall_down': {'DOWN'},
     'core_c_down': {'DOWN'}, 'core_continuation_original': {'UP', 'DOWN'},
@@ -249,7 +249,7 @@ def empty_report(now):
     from .live_report import TZ
     clock = datetime.fromtimestamp(now/1000, TZ).strftime('%m/%d %H:%M:%S')
     lines = [HEADER, f'截至 {clock}（台灣時間）',
-             '尚未建立 T6.9a Live 輪次；尚未開跑。',
+             '尚未建立 T6.9b Live 輪次；尚未開跑。',
              'Live fill rate／WR／PnL：—（尚無本輪資料）', '', 'Live 子策略（本輪）：']
     lines += _grouped(LIVE_GROUPS, lambda branch: f'{LIVE_LABELS[branch]}｜成交 0｜已知WR —｜已知PnL —｜待結算 0')
     lines += ['', 'Shadow（本輪報價研究）：']
@@ -399,7 +399,7 @@ def scheduled_run_summary(root, *, now, slots, campaigns, current_ids, fill_ids,
             else:
                 rm = _metrics(risk_batch)
                 lines.append(f'  共用風控已知MDD {_value(rm,risk_batch,risk_pending,"mdd")} / 3.5U（1U等值）')
-        lines.append('本輪績效僅含T6.9a此loop；共用風控MDD含同區段其他T6 Live，Shadow不計入。')
+        lines.append('本輪績效僅含T6.9b此loop；共用風控MDD含同區段其他T6 Live，Shadow不計入。')
         if shared_pending or unverified:
             lines.append(f'區段共用風控待結算{len(shared_pending)}｜待核對{len(unverified)}；未知結果不補零。')
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError):
@@ -458,7 +458,7 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
             lines.append(f'子策略歸因待核對 {branches["unattributed"]} 筆；保留官方Live總PnL。')
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError):
         lines += [f'{title}｜成交待核對｜已知WR —｜已知PnL —' for title in LIVE_LABELS.values()]
-        lines.append('T6.9a 子策略歸因待核對；保留官方Live總PnL。')
+        lines.append('T6.9b 子策略歸因待核對；保留官方Live總PnL。')
     lines += scheduled_run_summary(root, now=now, slots=slots, campaigns=campaigns,
                                    current_ids=current_ids, fill_ids=fill_ids, events=events, gate=gate)
     lines += ['', 'Shadow（本輪報價研究）：']

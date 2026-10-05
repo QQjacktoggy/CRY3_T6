@@ -70,7 +70,7 @@ def _regime_risk_text(profile: str, unit: Any) -> str:
     loop_note = (f"本輪MDD≥{Decimal('3.5') * stake} USDT（1U等值3.5）停新進場｜"
                  "跨Loop停單不自動解鎖；整輪回撤鎖僅限該輪"
                  if profile in (REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE, REGIME_T67D_PROFILE, REGIME_T68_PROFILE, REGIME_T68A_PROFILE, REGIME_T69_PROFILE, REGIME_T69A_PROFILE) else "停單跨Loop保存、不自動解鎖")
-    return (f"T6.2／T6.3／T6.3a／T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c／T6.7d／T6.8／T6.8a／T6.9／T6.9a 每筆{amount} USDT｜純{amount}U成交時：固定20場MDD≥{Decimal('3.5') * stake} USDT、"
+    return (f"T6.2／T6.3／T6.3a／T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c／T6.7d／T6.8／T6.8a／T6.9／T6.9b 每筆{amount} USDT｜純{amount}U成交時：固定20場MDD≥{Decimal('3.5') * stake} USDT、"
             f"跨Loop累計PnL≤-{6 * amount} USDT 停新進場｜"
             "混合1/2/3U成交時按每筆實際投入折算1U等值（20場MDD≥3.5、累計PnL≤-6）；"
             + loop_note)
@@ -101,7 +101,7 @@ HARD_STOP_CALLBACK_PREFIX = "predict_hard_stop:"
 CANCEL_LOOP_CALLBACK_PREFIX = "predict_cancel:"
 MONITOR_CALLBACK_PREFIX = "predict_monitor:"
 SELECTABLE_LANES = (
-    ('regime_target6_9a_v1', 'T6.9a T6.7c七路＋First UP≥5bp Live＋Flat Shadow（BTC／ETH／BNB；1/2/3U）'),
+    ('regime_target6_9a_v1', 'T6.9b T6.7c七路＋First UP≥5bp Live＋Flat Shadow（BTC／ETH／BNB；1/2/3U）'),
     ('regime_target6_9_v1', 'T6.9 T6.8a Live＋Flat Shadow（BTC／ETH／BNB；1/2/3U）'),
     ('regime_target6_7d_v1', 'T6.7d 原七路＋Flat補位 Live（1/2/3U）'),
     ('regime_target6_8a_v1', 'T6.8a First UP≥5bp＋Reference 180s Live（1/2/3U）'),
@@ -141,7 +141,7 @@ def selectable_lanes_for_market(market_symbol: str | None) -> tuple[tuple[str, s
 
 
 WR_MONITOR_LANE_LABELS = {
-    "regime_target6_9a_v1": "T6.9a T6.7c七路＋First UP≥5bp Live＋Flat Shadow／每20 run總結",
+    "regime_target6_9a_v1": "T6.9b T6.7c七路＋First UP≥5bp Live＋Flat Shadow／每20 run總結",
     "regime_target6_9_v1": "T6.9 T6.8a Live＋Flat Shadow／每20 run總結",
     "regime_target6_8_v1": "T6.8 核心＋Reference 180s Live／每20 run總結",
     "regime_target6_8a_v1": "T6.8a First UP≥5bp＋Reference 180s Live／每20 run總結",
@@ -1450,10 +1450,10 @@ class PredictionTelegramService:
             asset = str(args[0]).upper()
             if asset in ('BTC', 'ETH', 'BNB'):
                 asset += 'USDT'
-            await self._call_and_reply(update, 'T6.7c／T6.9／T6.9a 整輪市場', ('select_market',), asset)
+            await self._call_and_reply(update, 'T6.7c／T6.9／T6.9b 整輪市場', ('select_market',), asset)
             return
         current = await self._invoke(('status', 'predict_status'))
-        await self._reply(update, '【T6.7c／T6.9／T6.9a 下一輪市場】\n目前：'+str(current.get('market_symbol', '未知'))+
+        await self._reply(update, '【T6.7c／T6.9／T6.9b 下一輪市場】\n目前：'+str(current.get('market_symbol', '未知'))+
             '\n下一輪：'+str(current.get('next_market_symbol', current.get('market_symbol', '未知')))+
             '\n每輪鎖定一幣；執行中只排下一輪，結束後再點選套用。換幣後重新確認 Live，再用 /predict_loop 20 啟動。',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(a, callback_data='predict_market:'+a+'USDT') for a in ('BTC','ETH','BNB')]]))
@@ -1490,7 +1490,7 @@ class PredictionTelegramService:
             f"下一個 Loop：{next_label}\n"
             "目前提供 T6 系列策略；選定後依原流程確認 Live 與金額。\n"
             "執行中點選會排到下一個 Loop；先停止 Loop 再點選，會在安全同步後結束舊 Loop 並立即套用。\n" +
-            ("T6.2／T6.3／T6.3a／T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c／T6.7d／T6.8／T6.8a／T6.9／T6.9a 每筆可選 1／2／3 USDT，不加倉；切換策略不會自動啟動 Loop。"
+            ("T6.2／T6.3／T6.3a／T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c／T6.7d／T6.8／T6.8a／T6.9／T6.9b 每筆可選 1／2／3 USDT，不加倉；切換策略不會自動啟動 Loop。"
              if str(next_profile or current_profile).lower() in (REGIME_T62_PROFILE, REGIME_T63_PROFILE, REGIME_T63A_PROFILE, REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE, REGIME_T67D_PROFILE, REGIME_T68_PROFILE, REGIME_T68A_PROFILE, REGIME_T69_PROFILE, REGIME_T69A_PROFILE) else
              "金額固定每筆 1 USDT，不加倉；切換策略不會自動啟動 Loop。"),
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -1529,7 +1529,7 @@ class PredictionTelegramService:
             f"下一個 Loop：{_human_scalar(next_amount)} USDT｜{mdd_label} {displayed_mdd(next_amount)}\n"
             + ("C180 每 20-run 區段超過 MDD 門檻後停新進場，下一段重設。\n" if c180 else
                "T6.2／T6.3／T6.3a／T6.3b 純1/2/3U成交：固定20場MDD≥3.5/7/10.5U，跨Loop累計PnL≤-6/-12/-18U 停新進場。混合金額按每筆實際投入折算1U等值；停單跨Loop保留。\n"
-               + ("T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c／T6.7d／T6.8／T6.8a／T6.9／T6.9a 額外整輪高點回撤：1U等值達3.5停新進場；純1/2/3U約為3.5/7/10.5U，僅鎖該輪。\n" if profile in (REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE, REGIME_T67D_PROFILE, REGIME_T68_PROFILE) else "") if t62 else
+               + ("T6.3b／T6.5／T6.7／T6.7a／T6.7b／T6.7c／T6.7d／T6.8／T6.8a／T6.9／T6.9b 額外整輪高點回撤：1U等值達3.5停新進場；純1/2/3U約為3.5/7/10.5U，僅鎖該輪。\n" if profile in (REGIME_T63B_PROFILE, REGIME_T65_PROFILE, REGIME_T67_PROFILE, REGIME_T67A_PROFILE, REGIME_T67B_PROFILE, REGIME_T67C_PROFILE, REGIME_T67D_PROFILE, REGIME_T68_PROFILE) else "") if t62 else
                "1/2/3 USDT 對應 Loop MDD -2, REGIME_T68A_PROFILE.5/-5.0/-7.5。\n")
             + 
             "同市場最多一筆。進行中點選會排到下一個 Loop；金額變更後需重新確認 Live。",
@@ -2075,7 +2075,7 @@ class PredictionTelegramService:
             except Exception as exc:  # noqa: BLE001 - continue to handle the callback
                 LOGGER.warning("prediction_telegram_callback_answer_failed error_type=%s", type(exc).__name__)
         if data.startswith("predict_market:"):
-            await self._call_and_reply(update, "T6.7c／T6.9／T6.9a 整輪市場", ("select_market",), data.split(":", 1)[1])
+            await self._call_and_reply(update, "T6.7c／T6.9／T6.9b 整輪市場", ("select_market",), data.split(":", 1)[1])
             return
         if data == f"{MONITOR_CALLBACK_PREFIX}show":
             await self.cmd_predict_monitor(update, context)
