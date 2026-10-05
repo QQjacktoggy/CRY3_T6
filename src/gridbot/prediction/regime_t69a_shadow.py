@@ -3,12 +3,10 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from types import SimpleNamespace
 
 from .regime_lane import dec
 from .regime_t67_evidence import read_inputs
-from .regime_t67_lane import candidates, execution
-from .regime_t69a_policy import PROFILE, FINGERPRINT, SHADOW_BRANCHES
+from .regime_t69a_policy import PROFILE, FINGERPRINT
 
 
 def schema(db):
@@ -38,8 +36,7 @@ def _usable_depth(book):
 
 
 def observe(db, prediction_db, signal_db, at_ms, symbol='BTCUSDT'):
-    """First causal executable quote per branch, even when Live is filled/held."""
-    from .regime_worker_bridge import RegimeWorkerBridge
+    """Flat F1-F4 paper quotes, recorded even when Live is filled/held."""
     start = at_ms//300000*300000
     if not start+60000 <= at_ms < start+270000:
         return 'outside_shadow_window'
@@ -75,57 +72,16 @@ def observe(db, prediction_db, signal_db, at_ms, symbol='BTCUSDT'):
         core_decision = json.loads(stored[0]) if stored else None
     except sqlite3.Error:
         core_decision = None
-    if identity['fee_bps'] is not None:
-        from .regime_t69a_flat_shadow import observe as observe_flat
-        schema(db)
-        try:
-            observe_flat(db, identity, books, spots, at_ms, unit, core_decision)
-        except (ValueError, KeyError, TypeError, ArithmeticError):
-            # A Flat paper route failure must not hide the other Shadow quotes.
-            db.rollback()
-    if not books:
+    if identity['fee_bps'] is None:
         return 'shadow_book_missing'
-    book = books[-1]
-    market = SimpleNamespace(start_time_ms=start, market_topic_id=row[1], up_market_id=row[2])
-    stamp = RegimeWorkerBridge._book(book, market, at_ms)
-    if at_ms-stamp > 1000 or int(book['reference_received_ms']) > at_ms or dec(book['reference']) <= 0:
-        raise ValueError('shadow_reference_or_book_stale')
-    if not _usable_depth(book):
-        return 'shadow_book_depth_unavailable'
-    # Invalid historical depth is missing evidence, never a manufactured
-    # trigger or confirmation. Keep the valid book clocks unchanged.
-    prior_books = [snapshot for snapshot in books[:-1] if _usable_depth(snapshot)]
+    # Only Flat F1-F4 are observed; the T6.7 research routes are retired here.
+    from .regime_t69a_flat_shadow import observe as observe_flat
     schema(db)
-    prior = db.execute('SELECT payload FROM t69a_shadow_states WHERE start=?', (start,)).fetchone()
-    state = json.loads(prior[0]) if prior else dict(
-        fingerprint=FINGERPRINT, loop_id=row[0], market_topic=row[1], market_id=row[2],
-        market_start_ms=start, market_end_ms=start+300000, end_ms=start+300000,
-        unit_usdt=str(unit), fee_bps=str(book['fee_bps']))
-    if (state['fingerprint'] != FINGERPRINT or state['loop_id'] != row[0]
-            or state['market_topic'] != row[1] or state['market_id'] != row[2]
-            or dec(state['unit_usdt']) != unit or dec(state['fee_bps']) != dec(book['fee_bps'])):
-        raise ValueError('shadow_frozen_identity_unit_fee_mismatch')
-    # No feature input means the public-model observer cannot manufacture any
-    # old core, shallow, C-UP or Live eligibility.
-    choices = candidates(book, spots, None, state, at_ms, unit, prior_books)
-    with db:
-        for c in choices:
-            if c['branch'] not in SHADOW_BRANCHES:
-                continue
-            ex = execution(book, c['side'], unit, c['probability'], cap=c['cap'], lower=c['lower'])
-            quote = dict(fingerprint=FINGERPRINT, loop_id=row[0], branch=c['branch'],
-                         market_topic=row[1], market_id=row[2], market_start_ms=start,
-                         market_end_ms=start+300000, end_ms=start+300000, unit_usdt=str(unit),
-                         side=c['side'], quoted_at_ms=at_ms, book_at_ms=stamp,
-                         source_receive_ms=int(book['received_at_ms']), captured_at_ms=int(book['captured_at_ms']),
-                         reference=str(book['reference']), fee_bps=str(book['fee_bps']),
-                         cash=str(ex['cash']), net_shares=str(ex['net_shares']), cap=c['cap'],
-                         probability=c['probability'], model=c.get('model'), fill_status='PAPER_QUOTE_ONLY')
-            db.execute('INSERT OR IGNORE INTO t69a_shadow_quotes VALUES(?,?,?)',
-                       (start, c['branch'], json.dumps(quote, sort_keys=True, allow_nan=False)))
-        state['last_evaluated_ms'] = at_ms
-        db.execute('INSERT INTO t69a_shadow_states VALUES(?,?) ON CONFLICT(start) DO UPDATE SET payload=excluded.payload',
-                   (start, json.dumps(state, sort_keys=True, allow_nan=False)))
+    try:
+        observe_flat(db, identity, books, spots, at_ms, unit, core_decision)
+    except (ValueError, KeyError, TypeError, ArithmeticError):
+        db.rollback()
+        return 'flat_shadow_rejected'
     return 'shadow_observed'
 
 

@@ -57,7 +57,8 @@ def test_policy_is_t67c_lanes_plus_first_up_floor_on_t69_packaging():
                 'quote_ttl_ms', 'core_expiry_ms', 'original_input_ms', 'book_max_age_ms', 'units',
                 'c_mirror_up_prior', 'shallow_retracement', 'risk_state_key', 'loop_mdd_1u'):
         assert POLICY[key] == t67c[key], key
-    assert POLICY['shadow_branches'] == t69['shadow_branches']
+    assert POLICY['shadow_branches'] == t69['shadow_branches'][2:]
+    assert POLICY['shadow_retired'] == ('external_lead_lag', 'reference_value')
     assert POLICY['markets'] == ('BTCUSDT', 'ETHUSDT', 'BNBUSDT')
     assert FINGERPRINT not in (t67c_fp, t69_fp)
 
@@ -135,11 +136,13 @@ def test_entry_window_and_menu_wiring():
     assert RegimeLiveLedger(None, profile=PROFILE).tier == 'REGIME_T69A'
 
 
-def test_empty_report_lists_seven_live_lanes_and_six_shadow_routes():
+def test_empty_report_lists_seven_live_lanes_and_four_flat_shadow_routes():
     from src.gridbot.prediction.regime_t69a_report import empty_report, LIVE_LABELS, SHADOW_LABELS
     text = empty_report(S)
     assert text.startswith('📊 T6.9a Report')
-    assert tuple(LIVE_LABELS) == LIVE_BRANCHES and len(SHADOW_LABELS) == 6
+    assert tuple(LIVE_LABELS) == LIVE_BRANCHES
+    assert tuple(SHADOW_LABELS) == ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
+    assert '外部先行' not in text and 'Reference 校正' not in text
     assert 'Reference 180s' not in text and '檢查點' not in text
     assert sum(label in text for label in LIVE_LABELS.values()) == 7
 

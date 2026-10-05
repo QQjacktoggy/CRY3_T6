@@ -1,4 +1,4 @@
-"""T6.9a: T6.7c seven Live lanes with the T6.8a First UP 5bp floor; T6.9 Shadow."""
+"""T6.9a: T6.7c seven Live lanes with the T6.8a First UP 5bp floor; Flat F1-F4 Shadow."""
 import hashlib
 import json
 
@@ -16,7 +16,7 @@ NEW_BRANCHES = ('c_mirror_up_prior', 'shallow_retracement')
 LIVE_BRANCHES = CORE_BRANCHES + NEW_BRANCHES
 MARKETS = ('BTCUSDT', 'ETHUSDT', 'BNBUSDT')
 FLAT_SHADOW_BRANCHES = ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
-SHADOW_BRANCHES = ('external_lead_lag', 'reference_value') + FLAT_SHADOW_BRANCHES
+SHADOW_BRANCHES = FLAT_SHADOW_BRANCHES
 POLICY = dict(
     profile=PROFILE, version=1, parent_fingerprint=PARENT_FINGERPRINT,
     report_revision='pr12_verified_fixed_20run_v1', execution_revision='pr9_atomic_claim_selected_readonly_v1', core_fingerprint=CORE_FINGERPRINT,
@@ -61,6 +61,7 @@ POLICY = dict(
                            price_band=['0.70', '0.85'], after='core_entry_window'),
     ),
     risk_state_key='regime_target6_risk_v1', loop_mdd_1u='3.5',
+    shadow_retired=('external_lead_lag', 'reference_value'),
     validation_mode='t67c_seven_live; first_up_prior_5bp; no_reference_180_backfill; flat_f1_f4_shadow_only; no_profit_or_fill_forecast',
 )
 FINGERPRINT = hashlib.sha256(json.dumps(POLICY, sort_keys=True).encode()).hexdigest()

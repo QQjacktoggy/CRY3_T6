@@ -17,8 +17,6 @@ LIVE_LABELS = {
     'shallow_retracement': '淺回撤',
 }
 SHADOW_LABELS = {
-    'external_lead_lag': '外部先行',
-    'reference_value': 'Reference 校正',
     'flat_favorite': 'F1 Flat 熱門方',
     'flat_quiet_favorite': 'F2 安靜熱門方',
     'flat_cheap_prior': 'F3 便宜方順前趨勢',
@@ -29,10 +27,9 @@ LIVE_GROUPS = (
     ('增量', ('c_mirror_up_prior', 'shallow_retracement')),
 )
 SHADOW_GROUPS = (
-    ('研究', ('external_lead_lag', 'reference_value')),
     ('Flat F1–F4', ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')),
 )
-HEADER = '📊 T6.9a Report｜七路 Live（T6.7c＋First UP 5bp）＋六路 Shadow'
+HEADER = '📊 T6.9a Report｜七路 Live（T6.7c＋First UP 5bp）＋四路 Flat Shadow'
 LIVE_SIDES = {
     'core_first_down': {'DOWN'}, 'core_first_up': {'UP'}, 'core_stall_down': {'DOWN'},
     'core_c_down': {'DOWN'}, 'core_continuation_original': {'UP', 'DOWN'},
