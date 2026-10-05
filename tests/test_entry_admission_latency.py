@@ -1,5 +1,7 @@
 """Pre-HTTP durable admission must not age a fresh entry book past its limit."""
 import json
+
+import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -8,13 +10,28 @@ from src.gridbot.prediction.client import (
 )
 from src.gridbot.prediction.models import ActionType, Campaign, CampaignState, OrderSide, OutcomeSide
 from src.gridbot.prediction.regime_live_ledger import RISK_PROFILES, RegimeLiveLedger
-from src.gridbot.prediction.repository import MIGRATIONS_DIR
+from src.gridbot.prediction.repository import MIGRATIONS_DIR, PredictionRepository
 from src.gridbot.prediction.strategy import StrategyDecision
 from src.gridbot.prediction.worker import PredictionWorker, durable_admission_sql
 from test_t6_entry_critical_path import EntryHarness, LedgerFixture, START, D
 
 COLD_READ_MS = 1100  # Observed cold reads on the VM were 720-1160 ms.
 T67C = 'regime_target6_7c_v1'
+
+
+EXPECTED_SCANS = ['SCAN c USING COVERING INDEX idx_prediction_campaigns_pending_unknown',
+                  'SCAN i USING COVERING INDEX idx_prediction_intents_unknown']
+
+
+async def admission_plan(conn):
+    args = (*RISK_PROFILES, *RISK_PROFILES, 'lane', 'guard', 'loop1')
+    plans = await conn.execute_fetchall('EXPLAIN QUERY PLAN '+durable_admission_sql(len(RISK_PROFILES)), args)
+    return [r[3] for r in plans]
+
+
+def scans(details):
+    # The only scans allowed are of the partial indexes, which hold unknown rows only.
+    return [d for d in details if d.startswith('SCAN ')]
 
 
 class SlowAdmissionHarness(EntryHarness):
@@ -112,16 +129,8 @@ class AdmissionLatencyTests(LedgerFixture):
         worker._entry_durable_http_guard('loop2', self.ledger.profile)
 
     async def test_unknown_lookups_use_partial_indexes(self):
-        conn = self.repo._require_conn()
-        args = (*RISK_PROFILES, *RISK_PROFILES, 'lane', 'guard', 'loop1')
-        plans = await conn.execute_fetchall('EXPLAIN QUERY PLAN '+durable_admission_sql(len(RISK_PROFILES)), args)
-        details = [r[3] for r in plans]
-        self.assertTrue(any('idx_prediction_campaigns_pending_unknown' in d for d in details), details)
-        self.assertTrue(any('idx_prediction_intents_unknown' in d for d in details), details)
-        # The only scans left are of the partial indexes, which hold unknown rows only.
-        scans = [d for d in details if d.startswith('SCAN ')]
-        self.assertEqual(scans, ['SCAN c USING COVERING INDEX idx_prediction_campaigns_pending_unknown',
-                                 'SCAN i USING COVERING INDEX idx_prediction_intents_unknown'])
+        details = await admission_plan(self.repo._require_conn())
+        self.assertEqual(scans(details), EXPECTED_SCANS, details)
 
 
 class PreSendErrorCodeTests(LedgerFixture):
@@ -185,3 +194,30 @@ class ApiErrorLabelTests(LedgerFixture):
             await PredictionWorker._call_api(worker, 'query_order_history', _fallback_statuses={400, 404, 500})
         [event] = [f for n, _, f in worker._observability_events if n == 'api_error']
         self.assertEqual(event['status_code'], 503)
+
+
+@pytest.mark.asyncio
+async def test_full_schema_plan_starts_from_unknown_indexes_with_live_history(tmp_path):
+    """Real migrations (incl. idx_prediction_campaign_loop), many LIVE campaigns, ANALYZE."""
+    repo = PredictionRepository(tmp_path/'prediction.sqlite3')
+    await repo.initialize()
+    try:
+        conn = repo._require_conn()
+        for n in range(20):
+            await conn.execute("INSERT INTO prediction_loops(loop_id,target,state,mode,strategy_profile,"
+                               "created_at_ms,updated_at_ms) VALUES(?,20,'DONE','LIVE',?,1,1)",
+                               (f'loop{n}', RISK_PROFILES[n % len(RISK_PROFILES)]))
+        for n in range(2000):
+            await conn.execute("INSERT INTO prediction_campaigns(campaign_id,loop_id,market_topic_id,market_id,"
+                               "start_time_ms,end_time_ms,state,payload_json,created_at_ms,updated_at_ms) "
+                               "VALUES(?,?,?,?,?,?,'DONE','{}',1,1)",
+                               (f'c{n}', f'loop{n % 20}', f't{n}', f'u{n}', n*300000, n*300000+300000))
+            await conn.execute("INSERT INTO prediction_order_intents(intent_id,campaign_id,action,outcome,order_side,"
+                               "amount,limit_price,created_at_ms,ttl_ms,status,payload_json) "
+                               "VALUES(?,?,'BUY_INITIAL','UP','BUY','1','.5',1,1,'FILLED','{}')", (f'i{n}', f'c{n}'))
+        await conn.commit()
+        await conn.execute('ANALYZE')
+        details = await admission_plan(conn)
+        assert scans(details) == EXPECTED_SCANS, details
+    finally:
+        await repo.close()

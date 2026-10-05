@@ -109,18 +109,21 @@ HISTORY_STATUS_FALLBACK = frozenset({400, 404, 500})
 
 
 def durable_admission_sql(profile_count):
-    """Pre-HTTP admission row; unknown-execution lookups use migration 028."""
+    """Pre-HTTP admission row; unknown-execution lookups use migration 028.
+
+    CROSS JOIN fixes the join order so both lookups start from the partial
+    unknown indexes; otherwise SQLite walks every LIVE campaign by loop.
+    """
     placeholders = ",".join("?" for _ in range(profile_count))
     return f"""SELECT l.state,l.mode,l.strategy_profile,l.new_entries_stopped,l.hard_stop_latched,
                       r.config_value_json,lane.config_value_json,guard.config_value_json,
                       EXISTS(SELECT 1 FROM prediction_campaigns c
-                        JOIN prediction_loops h ON h.loop_id=c.loop_id
-                        WHERE c.pending_unknown=1
+                        CROSS JOIN prediction_loops h
+                        WHERE c.pending_unknown=1 AND h.loop_id=c.loop_id
                           AND h.mode='LIVE' AND h.strategy_profile IN ({placeholders}))
                       OR EXISTS(SELECT 1 FROM prediction_order_intents i
-                        JOIN prediction_campaigns c ON c.campaign_id=i.campaign_id
-                        JOIN prediction_loops h ON h.loop_id=c.loop_id
-                        WHERE i.unknown=1
+                        CROSS JOIN prediction_campaigns c CROSS JOIN prediction_loops h
+                        WHERE i.unknown=1 AND c.campaign_id=i.campaign_id AND h.loop_id=c.loop_id
                           AND h.mode='LIVE' AND h.strategy_profile IN ({placeholders})),
                       legacy.config_value_json
                FROM prediction_loops l LEFT JOIN prediction_runtime_config r
