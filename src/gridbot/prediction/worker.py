@@ -103,6 +103,38 @@ from .strategy import (
 
 LIVE_PREFLIGHT_MAX_AGE_MS = 300_000
 SIGNED_MUTATING_ENDPOINTS = frozenset({"place_order", "batch_cancel_orders", "batch_redeem"})
+# Status-filtered order history can return these for some accounts; the
+# caller then falls back to unfiltered pages (see _history_rows).
+HISTORY_STATUS_FALLBACK = frozenset({400, 404, 500})
+
+
+def durable_admission_sql(profile_count):
+    """Pre-HTTP admission row; unknown-execution lookups use migration 028.
+
+    CROSS JOIN fixes the join order so both lookups start from the partial
+    unknown indexes; otherwise SQLite walks every LIVE campaign by loop.
+    """
+    placeholders = ",".join("?" for _ in range(profile_count))
+    return f"""SELECT l.state,l.mode,l.strategy_profile,l.new_entries_stopped,l.hard_stop_latched,
+                      r.config_value_json,lane.config_value_json,guard.config_value_json,
+                      EXISTS(SELECT 1 FROM prediction_campaigns c
+                        CROSS JOIN prediction_loops h
+                        WHERE c.pending_unknown=1 AND h.loop_id=c.loop_id
+                          AND h.mode='LIVE' AND h.strategy_profile IN ({placeholders}))
+                      OR EXISTS(SELECT 1 FROM prediction_order_intents i
+                        CROSS JOIN prediction_campaigns c CROSS JOIN prediction_loops h
+                        WHERE i.unknown=1 AND c.campaign_id=i.campaign_id AND h.loop_id=c.loop_id
+                          AND h.mode='LIVE' AND h.strategy_profile IN ({placeholders})),
+                      legacy.config_value_json
+               FROM prediction_loops l LEFT JOIN prediction_runtime_config r
+                 ON r.config_key='prediction_risk_state'
+               LEFT JOIN prediction_runtime_config legacy
+                 ON legacy.config_key='prediction_hard_stop_latched'
+               LEFT JOIN prediction_runtime_config lane ON lane.config_key=?
+               LEFT JOIN prediction_runtime_config guard ON guard.config_key=?
+               WHERE l.loop_id=?"""
+
+
 ALLOWED_ORDER_UNITS_USDT = frozenset({Decimal("1"), Decimal("2"), Decimal("3")})
 ORDER_UNIT_RISK_MULTIPLIER = Decimal("2")
 REGIME_SENSITIVE_LANE_BREAK_EVEN_WR = {
@@ -1532,25 +1564,11 @@ class PredictionWorker(LoopMarketWorker):
         regime_entry = profile in RISK_PROFILES
         guard_key = profile.removesuffix("_v1")+"_loop_risk:"+str(loop_id) if regime_entry else ""
         try:
-            placeholders = ",".join("?" for _ in RISK_PROFILES)
             with closing(sqlite3.connect(self.repository.db_path.resolve().as_uri()+"?mode=ro",
                                          uri=True, timeout=0.05)) as db:
-                row = db.execute(
-                    f"""SELECT l.state,l.mode,l.strategy_profile,l.new_entries_stopped,l.hard_stop_latched,
-                              r.config_value_json,lane.config_value_json,guard.config_value_json,
-                              EXISTS(SELECT 1 FROM prediction_campaigns c
-                                JOIN prediction_loops h ON h.loop_id=c.loop_id
-                                WHERE h.mode='LIVE' AND h.strategy_profile IN ({placeholders})
-                                  AND (c.pending_unknown=1 OR EXISTS(SELECT 1 FROM prediction_order_intents i
-                                    WHERE i.campaign_id=c.campaign_id AND i.unknown=1))),
-                              legacy.config_value_json
-                       FROM prediction_loops l LEFT JOIN prediction_runtime_config r
-                         ON r.config_key='prediction_risk_state'
-                       LEFT JOIN prediction_runtime_config legacy
-                         ON legacy.config_key='prediction_hard_stop_latched'
-                       LEFT JOIN prediction_runtime_config lane ON lane.config_key=?
-                       LEFT JOIN prediction_runtime_config guard ON guard.config_key=?
-                       WHERE l.loop_id=?""", (*RISK_PROFILES, lane_key if regime_entry else "", guard_key, loop_id)).fetchone()
+                row = db.execute(durable_admission_sql(len(RISK_PROFILES)),
+                    (*RISK_PROFILES, *RISK_PROFILES, lane_key if regime_entry else "",
+                     guard_key, loop_id)).fetchone()
                 if (not row or row[:3] != ("RUNNING", "LIVE", profile) or row[3] or row[4]
                         or (row[5] and json.loads(row[5]).get("hard_stop_latched"))
                         or (row[9] and json.loads(row[9]).get("latched"))
@@ -1714,6 +1732,7 @@ class PredictionWorker(LoopMarketWorker):
         if method_name in ("query_active_orders", "query_positions"):
             trace_cid = trace_cid or getattr(self, "_entry_exposure_campaign_id", None)
         trace_iid = kwargs.pop('_trace_intent_id', None)
+        fallback_statuses = frozenset(kwargs.pop('_fallback_statuses', ()))
         trace_attempt = getattr(self, "_entry_attempts", {}).get(trace_cid)
         trace_fields = {"attempt_id": trace_attempt["id"]} if trace_attempt else {}
         entry_book_at = kwargs.pop('_entry_book_at_ms', None)
@@ -1749,9 +1768,15 @@ class PredictionWorker(LoopMarketWorker):
                         or self._loop_id != entry_loop or self._selected_strategy_profile != entry_profile):
                     raise PredictionEntryNotSubmitted("entry_control_changed_before_http")
                 clock_now = self._now_ms()
-                if entry_deadline is not None and (clock_now >= entry_deadline
-                        or entry_book_at is None or not 0 <= clock_now-entry_book_at <= book_max_age_ms):
-                    raise PredictionEntryNotSubmitted("entry_expired_or_control_changed_before_http")
+                if entry_deadline is None:
+                    return
+                if clock_now >= entry_deadline:
+                    raise PredictionEntryNotSubmitted(
+                        f"entry_deadline_expired_before_http late_ms={clock_now-entry_deadline}")
+                if entry_book_at is None or not 0 <= clock_now-entry_book_at <= book_max_age_ms:
+                    age = None if entry_book_at is None else clock_now-entry_book_at
+                    raise PredictionEntryNotSubmitted(
+                        f"entry_book_stale_before_http book_age_ms={age} max_ms={book_max_age_ms}")
             def admission_guard():
                 entry_guard()
                 if entry_buy:
@@ -1783,8 +1808,16 @@ class PredictionWorker(LoopMarketWorker):
                               error_type='SharedBudgetDeferred', **trace_fields)
             raise PredictionRateLimitDeferred(method_name, exc.health) from exc
         except Exception as exc:
-            self._trace_event('api_error',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,error_type=type(exc).__name__,**trace_fields)
             status = getattr(exc, "status_code", None)
+            # A local pre-send refusal and an expected history-filter fallback
+            # are not exchange API failures; keep api_error for real ones.
+            if isinstance(exc, PredictionEntryNotSubmitted):
+                event, extra = 'entry_not_submitted', {"reason": str(exc)}
+            elif status is not None and status in fallback_statuses:
+                event, extra = 'history_fallback', {"status_code": status}
+            else:
+                event, extra = 'api_error', {"status_code": status}
+            self._trace_event(event,campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,error_type=type(exc).__name__,**extra,**trace_fields)
             if status in (418, 429):
                 self._rate_limiter.note_response(status, getattr(exc, "headers", None), error=str(exc))
             elif "429" in str(exc) or "rate limit" in str(exc).lower():
@@ -8519,6 +8552,16 @@ class PredictionWorker(LoopMarketWorker):
                                                       "execution_expired_after_claim")
                 return
         if c180_buy:
+            # Run the durable pre-HTTP admission read before the final book
+            # refresh. A cold SQLite page cache made this read take ~1s after
+            # the refresh, which aged a fresh book past book_max_age_ms. The
+            # same read still runs again at the HTTP boundary.
+            try:
+                with self._entry_stage(campaign.campaign_id, "durable_admission_prefetch"):
+                    await asyncio.to_thread(self._entry_durable_http_guard, entry_loop, entry_profile)
+            except PredictionEntryNotSubmitted as exc:
+                await self._reject_unsubmitted_entry(campaign, intent, pre_submit_state, str(exc))
+                return
             final_book = await self._entry_refresh_within_deadline(bridge, campaign, ready,
                 attempts=8 if self._selected_strategy_profile in ("regime_target6_7c_v1", "regime_target6_9_v1") else 1)
             if (not final_book.allowed or final_book.signal != ready.signal
@@ -8852,6 +8895,7 @@ class PredictionWorker(LoopMarketWorker):
                 "query_order_history",
                 _emergency=intent.order_side is OrderSide.SELL,
                 _management=intent.order_side is OrderSide.BUY,
+                _fallback_statuses=HISTORY_STATUS_FALLBACK if status is not None else (),
                 **filters,
             )
 
@@ -8870,7 +8914,7 @@ class PredictionWorker(LoopMarketWorker):
                     # Defer reconciliation without another fallback request.
                     raise
                 except PredictionAPIError as exc:
-                    if exc.status_code not in {400, 404, 500}:
+                    if exc.status_code not in HISTORY_STATUS_FALLBACK:
                         raise
                     fallback_all = True
                     break
