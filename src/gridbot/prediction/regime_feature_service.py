@@ -107,6 +107,12 @@ def main():
                     status += ';t69a:' + observe(db, prediction_db, args.signal_db, time.time_ns()//1000000, args.symbol)
                 except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
                     status += ';t69a_shadow_unavailable:' + type(exc).__name__
+                # Record-only post-entry books and First DOWN deep-stop Shadow.
+                from .regime_t69a_post_entry import observe as observe_post_entry
+                try:
+                    status += ';t69a_post:' + observe_post_entry(db, prediction_db, args.signal_db, time.time_ns()//1000000, args.symbol)
+                except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                    status += ';t69a_post_unavailable:' + type(exc).__name__
             if profile == 'regime_target6_8a_v1':
                 from .regime_t68a_shadow import observe
                 try:

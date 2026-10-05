@@ -535,7 +535,15 @@ class C180SignalRuntime:
                 cash += Decimal(str(price))*Decimal(str(quantity))
                 if cash >= Decimal('3.000001'):
                     break
-            selected[side] = {'ask_levels': levels, 'ask': quote[side].get('ask'), 'bid': quote[side].get('bid')}
+            # Top bids too, so post-entry Shadow can size a hypothetical sale.
+            bids, size = [], Decimal(0)
+            for price, quantity in quote[side].get('bid_levels') or ():
+                bids.append([str(price), str(quantity)])
+                size += Decimal(str(quantity))
+                if size >= 30 or len(bids) >= 8:
+                    break
+            selected[side] = {'ask_levels': levels, 'ask': quote[side].get('ask'), 'bid': quote[side].get('bid'),
+                              'bid_levels': bids}
         self._t67_store.book(dict(
             market_start_ms=int(market['start']), market_topic=str(market['topic']), market_id=str(market['market_id']),
             fee_bps=market['fee_bps'], reference=str(market['reference']),
