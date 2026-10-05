@@ -139,7 +139,7 @@ def test_entry_window_and_menu_wiring():
 def test_empty_report_lists_seven_live_lanes_and_four_flat_shadow_routes():
     from src.gridbot.prediction.regime_t69a_report import empty_report, LIVE_LABELS, SHADOW_LABELS
     text = empty_report(S)
-    assert text.startswith('📊 T6.9a Report')
+    assert text.startswith('📊 T6.9b Report')
     assert tuple(LIVE_LABELS) == LIVE_BRANCHES
     assert tuple(SHADOW_LABELS) == ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
     assert '外部先行' not in text and 'Reference 校正' not in text
