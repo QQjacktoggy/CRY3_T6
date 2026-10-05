@@ -1,7 +1,7 @@
 [project]
 name = "cry3-t6"
-version = "6.9.2"
-description = "T6.9 eight-lane Live (T6.8a) plus six Shadow routes including Flat F1-F4, BTC/ETH/BNB whole-loop market binding, isolated reports and shared risk"
+version = "6.9.3"
+description = "T6.9a: T6.7c seven-lane Live with the First UP 5bp floor; T6.9 eight-lane Live; six Shadow routes including Flat F1-F4, BTC/ETH/BNB whole-loop market binding, isolated reports and shared risk"
 requires-python = ">=3.11"
 dependencies = ["aiohttp>=3.9", "aiosqlite>=0.20", "python-dotenv>=1.0", "python-telegram-bot>=21.0", "requests>=2.31", "websockets>=12", "tzdata>=2024.1"]
 

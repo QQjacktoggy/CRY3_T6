@@ -17,7 +17,7 @@ async def start(repo, name='loop', asset='BNBUSDT', count=20, profile=PROFILE):
 
 
 def test_t69_is_a_loop_market_profile_with_distinct_fingerprint():
-    assert PROFILES == (T67C_PROFILE, PROFILE)
+    assert PROFILES == (T67C_PROFILE, PROFILE, 'regime_target6_9a_v1')
     for asset in SYMBOLS:
         assert execution_fingerprint(asset, PROFILE) != execution_fingerprint(asset, T67C_PROFILE)
         assert execution_fingerprint(asset) == execution_fingerprint(asset, T67C_PROFILE)
@@ -103,7 +103,7 @@ def test_t69_menu_and_shadow_follow_bound_asset(tmp_path):
     from src.gridbot.prediction.telegram import selectable_lanes_for_market
     for asset in ('ETHUSDT', 'BNBUSDT'):
         lanes = dict(selectable_lanes_for_market(asset))
-        assert set(lanes) == {PROFILE, T67C_PROFILE}
+        assert set(lanes) == {PROFILE, T67C_PROFILE, 'regime_target6_9a_v1'}
     pred = tmp_path/'prediction.sqlite3'
     with sqlite3.connect(pred) as db:
         db.executescript("""

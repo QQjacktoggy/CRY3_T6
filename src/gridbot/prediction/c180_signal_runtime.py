@@ -471,7 +471,7 @@ class C180SignalRuntime:
             self._t67_selected_profile = None
             try:
                 self._t67_selected_profile = selected_profile(self.prediction_db)
-                self._t67_selected = self._t67_selected_profile in (PROFILE, 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1', 'regime_target6_9_v1')
+                self._t67_selected = self._t67_selected_profile in (PROFILE, 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1', 'regime_target6_9_v1', 'regime_target6_9a_v1')
             except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
                 if now-self._t67_last_error_ms >= 10000:
                     LOGGER.warning('Strategy selection unavailable: %s', type(exc).__name__)
@@ -492,7 +492,7 @@ class C180SignalRuntime:
             active = self._t67_active(_now_ms())
             if active is None:
                 return
-            if active is not False and getattr(self, '_t67_selected_profile', None) not in ('regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1', 'regime_target6_9_v1'):
+            if active is not False and getattr(self, '_t67_selected_profile', None) not in ('regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1', 'regime_target6_9_v1', 'regime_target6_9a_v1'):
                 return
         except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
             return
@@ -756,6 +756,8 @@ class C180SignalRuntime:
             await resolve_t68a(db, now, self._detail)
             from .regime_t69_shadow import resolve_once as resolve_t69
             await resolve_t69(db, now, self._detail)
+            from .regime_t69a_shadow import resolve_once as resolve_t69a
+            await resolve_t69a(db, now, self._detail)
             if self.symbol == "BTCUSDT" and self._t67_active(now) is False:
                 from .regime_t65_shadow import resolve_outcome_once
                 from .regime_t66_observer import resolve_once
