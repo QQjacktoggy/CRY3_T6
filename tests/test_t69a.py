@@ -169,3 +169,86 @@ def test_shadow_observer_follows_its_own_profile_and_asset(tmp_path):
         db.execute("INSERT INTO prediction_loop_market_bindings VALUES('loop','ETHUSDT')")
     assert observe(feature_db, pred, tmp_path/'signals.sqlite3', S+70000, 'BTCUSDT') == 'other_asset_loop'
     assert observe(feature_db, pred, tmp_path/'signals.sqlite3', S+70000, 'ETHUSDT') == 'shadow_unit_missing'
+
+
+BOOK_FAILURES = ['missing', 'receipt_future', 'receipt_stale', 'source_future', 'freshness']
+
+
+def broken_book(failure, current, at):
+    if failure == 'missing': current = None
+    elif failure == 'receipt_future': current['received_at_ms'] += 1
+    elif failure == 'receipt_stale': at += 2001
+    elif failure == 'source_future': current['book_at_ms'] = current['received_at'] = at+1
+    elif failure == 'freshness': at += 1001
+    return current, at
+
+
+@pytest.mark.parametrize('selected', [False, True])
+@pytest.mark.parametrize('failure', BOOK_FAILURES)
+def test_book_refusals_match_t67c_and_share_its_retry_set(tmp_path, failure, selected):
+    from src.gridbot.prediction.regime_t67c_bridge import TRANSIENT_BOOK_REASONS as T67C_TRANSIENT
+    from src.gridbot.prediction.regime_t69a_bridge import TRANSIENT_BOOK_REASONS
+    assert {r.replace('t67c_', 't69a_') for r in T67C_TRANSIENT} == TRANSIENT_BOOK_REASONS
+    reasons = {}
+    for profile, prefix in ((T67C, 't67c_'), (PROFILE, 't69a_')):
+        bridge, check = setup(tmp_path, feature(2, -1, 5), book('.30', '.70', 124000),
+                              profile=profile, orig=original())
+        seen = 0
+        if selected:
+            first = check()
+            assert first.allowed, first.reason
+            seen = first.book_at_ms
+        current, at = broken_book(failure, book('.29', '.71', 125000), S+125000)
+        result = check(current, at=at, seen=seen)
+        assert not result.allowed
+        reasons[prefix] = result.reason
+        assert result.reason.startswith(prefix), result.reason
+        assert (result.reason in (T67C_TRANSIENT | TRANSIENT_BOOK_REASONS)) == (failure != 'receipt_future' and failure != 'source_future')
+    assert reasons['t69a_'] == reasons['t67c_'].replace('t67c_', 't69a_')
+
+
+def worker_harness(clock):
+    from src.gridbot.prediction.worker import PredictionWorker
+    worker = PredictionWorker.__new__(PredictionWorker)
+    worker.clock = clock
+    worker._now_ms = lambda: worker.clock
+    worker._selected_strategy_profile = PROFILE
+    worker._selected_order_unit_usdt = 1
+    campaign = SimpleNamespace(market=SimpleNamespace(start_time_ms=S,
+        market_topic_id='topic', up_market_id='up'))
+    return worker, campaign
+
+
+@pytest.mark.asyncio
+async def test_worker_retries_a_missing_initial_book_inside_the_window(tmp_path):
+    worker, campaign = worker_harness(S+124998)
+    initial = book('.30', '.70', 125183)
+    bridge, _ = setup(tmp_path, feature(2, -1, 5), initial, orig=original())
+    times = []
+    def read(*args):
+        times.append(worker.clock)
+        return initial if worker.clock >= S+125183 else None
+    async def sleep(seconds): worker.clock += round(seconds*1000)
+    with patch.object(b, 'read_c180_book', side_effect=read), patch.object(
+            bridge, '_first_book', return_value=initial), patch.object(
+            b, 'read_c180_signal', return_value=original()), patch(
+            'src.gridbot.prediction.worker.asyncio.sleep', side_effect=sleep):
+        ready = await worker._entry_signal_within_window(bridge, campaign, S)
+    assert ready.allowed and ready.signal.entry.side == 'UP'
+    assert times == [S+124998, S+125098, S+125198]
+
+
+@pytest.mark.asyncio
+async def test_worker_refreshes_a_stale_book_after_selection(tmp_path):
+    worker, campaign = worker_harness(S+125100)
+    bridge, check = setup(tmp_path, feature(2, -1, 5), book('.30', '.70', 124000), orig=original())
+    ready = check()
+    assert ready.allowed
+    current = book('.29', '.71', 125183)
+    def read(*args): return current if worker.clock >= S+125183 else book('.30', '.70', 124000)
+    async def sleep(seconds): worker.clock += round(seconds*1000)
+    with patch.object(b, 'read_c180_book', side_effect=read), patch(
+            'src.gridbot.prediction.worker.asyncio.sleep', side_effect=sleep):
+        fresh = await worker._entry_refresh_within_deadline(bridge, campaign, ready)
+    assert fresh.allowed and fresh.signal == ready.signal
+    assert fresh.execution.expires_at_ms == ready.execution.expires_at_ms

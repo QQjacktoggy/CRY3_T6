@@ -15,7 +15,28 @@ from .regime_t67a_bridge import freeze_core, additions
 
 
 # Missing/stale local books inside the initial window are retried by the worker.
-TRANSIENT_BOOK_REASONS = frozenset({'t69a_fresh_book_required'})
+# Same set and same classification as T6.7c (regime_t67c_bridge).
+TRANSIENT_BOOK_REASONS = frozenset({
+    't69a_book_missing', 't69a_book_receipt_stale',
+    't69a_book_source_stale', 't69a_fresh_book_required',
+})
+
+
+def _book_refusal(exc, snapshot, at_ms):
+    """Name stale/future book clocks like T6.7c; None for any other error."""
+    # Exception text is matched locally against constants; never emitted.
+    message = str(exc) if isinstance(exc, ValueError) else ''
+    if message not in ('book receipt stale or future', 'book stale or future'):
+        return None
+    try:
+        book_at = int(snapshot['book_at_ms'])
+        if message == 'book stale or future':
+            return 't69a_book_source_future' if book_at > at_ms else 't69a_book_source_stale'
+        clocks = [int(snapshot[k]) for k in ('received_at', 'received_at_ms', 'captured_at_ms')]
+        future = any(t > at_ms or t < book_at for t in clocks)
+        return 't69a_book_receipt_future' if future else 't69a_book_receipt_stale'
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return 't69a_book_clock_invalid'
 
 
 class _FeaturesMissing(ValueError):
@@ -45,8 +66,11 @@ def _check_early(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
     if unit_usdt not in (1, 2, 3) or not start+124000 <= at_ms < start+136000:
         return b.C180Ready(False, 't69a_unit_or_execution_window')
     phase = 'book'
+    snapshot = None
     try:
         snapshot = b.read_c180_book(bridge.signal_db, start)
+        if snapshot is None:
+            return b.C180Ready(False, 't69a_book_missing')
         stamp = bridge._book(snapshot, market, at_ms)
         if at_ms-stamp > 1000:
             return b.C180Ready(False, 't69a_fresh_book_required')
@@ -99,7 +123,8 @@ def _check_early(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
     except _FeaturesMissing:
         return b.C180Ready(False, 't69a_features_missing')
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
-        return b.C180Ready(False, 't69a_inputs_unavailable:'+phase+':'+_reason_code(exc))
+        reason = _book_refusal(exc, snapshot, at_ms) if phase == 'book' else None
+        return b.C180Ready(False, reason or 't69a_inputs_unavailable:'+phase+':'+_reason_code(exc))
 
 
 def _identity(d, bridge, market, unit, snapshot):
