@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from src.gridbot.prediction.client import (
-    BinancePredictionClient, PredictionEntryNotSubmitted, TransportResponse,
+    BinancePredictionClient, PredictionAPIError, PredictionEntryNotSubmitted, TransportResponse,
 )
 from src.gridbot.prediction.models import ActionType, Campaign, CampaignState, OrderSide, OutcomeSide
 from src.gridbot.prediction.regime_live_ledger import RISK_PROFILES, RegimeLiveLedger
@@ -144,12 +144,15 @@ class PreSendErrorCodeTests(LedgerFixture):
     def events(self, worker, name):
         return [f for n, _, f in worker._observability_events if n == name]
 
-    async def test_stale_book_is_named_with_its_age(self):
+    async def test_stale_book_is_named_with_its_age_and_is_not_api_error(self):
         worker = await self.harness()
         with self.assertRaises(PredictionEntryNotSubmitted) as ctx:
             await self.call(worker, book_at=START+123900)
         self.assertEqual(str(ctx.exception), 'entry_book_stale_before_http book_age_ms=1100 max_ms=1000')
         worker.transport.request.assert_not_called()
+        self.assertEqual(self.events(worker, 'api_error'), [])
+        [event] = self.events(worker, 'entry_not_submitted')
+        self.assertTrue(event['reason'].startswith('entry_book_stale_before_http'))
 
     async def test_deadline_is_named_separately_from_stale_book(self):
         worker = await self.harness()
@@ -159,3 +162,26 @@ class PreSendErrorCodeTests(LedgerFixture):
         self.assertEqual(str(ctx.exception), 'entry_deadline_expired_before_http late_ms=50')
         worker.transport.request.assert_not_called()
 
+
+class ApiErrorLabelTests(LedgerFixture):
+    def harness(self, status):
+        worker = EntryHarness(self.repo, self.ledger)
+        def history(**kwargs):
+            raise PredictionAPIError('history failed', status_code=status, payload={}, headers={})
+        worker.client = SimpleNamespace(request_budget=None, query_order_history=history)
+        return worker
+
+    async def test_expected_status_filter_failure_is_history_fallback(self):
+        worker = self.harness(500)
+        with self.assertRaises(PredictionAPIError):
+            await PredictionWorker._call_api(worker, 'query_order_history', _fallback_statuses={400, 404, 500})
+        names = [n for n, _, _ in worker._observability_events]
+        self.assertIn('history_fallback', names)
+        self.assertNotIn('api_error', names)
+
+    async def test_other_failures_stay_api_error_with_status_code(self):
+        worker = self.harness(503)
+        with self.assertRaises(PredictionAPIError):
+            await PredictionWorker._call_api(worker, 'query_order_history', _fallback_statuses={400, 404, 500})
+        [event] = [f for n, _, f in worker._observability_events if n == 'api_error']
+        self.assertEqual(event['status_code'], 503)

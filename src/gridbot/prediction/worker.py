@@ -103,6 +103,11 @@ from .strategy import (
 
 LIVE_PREFLIGHT_MAX_AGE_MS = 300_000
 SIGNED_MUTATING_ENDPOINTS = frozenset({"place_order", "batch_cancel_orders", "batch_redeem"})
+# Status-filtered order history can return these for some accounts; the
+# caller then falls back to unfiltered pages (see _history_rows).
+HISTORY_STATUS_FALLBACK = frozenset({400, 404, 500})
+
+
 def durable_admission_sql(profile_count):
     """Pre-HTTP admission row; unknown-execution lookups use migration 028."""
     placeholders = ",".join("?" for _ in range(profile_count))
@@ -1724,6 +1729,7 @@ class PredictionWorker(LoopMarketWorker):
         if method_name in ("query_active_orders", "query_positions"):
             trace_cid = trace_cid or getattr(self, "_entry_exposure_campaign_id", None)
         trace_iid = kwargs.pop('_trace_intent_id', None)
+        fallback_statuses = frozenset(kwargs.pop('_fallback_statuses', ()))
         trace_attempt = getattr(self, "_entry_attempts", {}).get(trace_cid)
         trace_fields = {"attempt_id": trace_attempt["id"]} if trace_attempt else {}
         entry_book_at = kwargs.pop('_entry_book_at_ms', None)
@@ -1799,8 +1805,16 @@ class PredictionWorker(LoopMarketWorker):
                               error_type='SharedBudgetDeferred', **trace_fields)
             raise PredictionRateLimitDeferred(method_name, exc.health) from exc
         except Exception as exc:
-            self._trace_event('api_error',campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,error_type=type(exc).__name__,**trace_fields)
             status = getattr(exc, "status_code", None)
+            # A local pre-send refusal and an expected history-filter fallback
+            # are not exchange API failures; keep api_error for real ones.
+            if isinstance(exc, PredictionEntryNotSubmitted):
+                event, extra = 'entry_not_submitted', {"reason": str(exc)}
+            elif status is not None and status in fallback_statuses:
+                event, extra = 'history_fallback', {"status_code": status}
+            else:
+                event, extra = 'api_error', {"status_code": status}
+            self._trace_event(event,campaign_id=trace_cid,method=method_name,intent_id=trace_iid,duration_ns=time.monotonic_ns()-trace_start,error_type=type(exc).__name__,**extra,**trace_fields)
             if status in (418, 429):
                 self._rate_limiter.note_response(status, getattr(exc, "headers", None), error=str(exc))
             elif "429" in str(exc) or "rate limit" in str(exc).lower():
@@ -8878,6 +8892,7 @@ class PredictionWorker(LoopMarketWorker):
                 "query_order_history",
                 _emergency=intent.order_side is OrderSide.SELL,
                 _management=intent.order_side is OrderSide.BUY,
+                _fallback_statuses=HISTORY_STATUS_FALLBACK if status is not None else (),
                 **filters,
             )
 
@@ -8896,7 +8911,7 @@ class PredictionWorker(LoopMarketWorker):
                     # Defer reconciliation without another fallback request.
                     raise
                 except PredictionAPIError as exc:
-                    if exc.status_code not in {400, 404, 500}:
+                    if exc.status_code not in HISTORY_STATUS_FALLBACK:
                         raise
                     fallback_all = True
                     break
