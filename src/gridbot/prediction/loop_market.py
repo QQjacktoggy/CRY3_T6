@@ -1,4 +1,4 @@
-"""T6.7c/T6.9 asset identity. Public data is isolated; the account ledger is shared."""
+"""T6.7c/T6.9/T6.9a asset identity. Public data is isolated; the account ledger is shared."""
 from contextlib import closing
 import hashlib
 import json
@@ -8,7 +8,8 @@ import sqlite3
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
 PROFILE = "regime_target6_7c_v1"
 T69_PROFILE = "regime_target6_9_v1"
-PROFILES = (PROFILE, T69_PROFILE)
+T69A_PROFILE = "regime_target6_9a_v1"
+PROFILES = (PROFILE, T69_PROFILE, T69A_PROFILE)
 
 
 def symbol(value):
@@ -22,6 +23,9 @@ def execution_fingerprint(asset, profile=PROFILE):
     if profile == T69_PROFILE:
         from .regime_t69_policy import FINGERPRINT
         routing = "t69_nine_branches"
+    elif profile == T69A_PROFILE:
+        from .regime_t69a_policy import FINGERPRINT
+        routing = "t69a_seven_branches"
     elif profile == PROFILE:
         from .regime_t67c_policy import FINGERPRINT
         routing = "t67c_seven_branches"

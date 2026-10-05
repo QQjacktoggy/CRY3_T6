@@ -293,7 +293,7 @@ def prediction_bot_commands() -> tuple[BotCommand, ...]:
         BotCommand("predict_reconcile", "同步未完成訂單"),
         BotCommand("predict_risk", "查看真正風控狀態"),
         BotCommand("predict_hard_stop_reset", "Hard Stop Reset（不限次數）"),
-        BotCommand("predict_market", "T6.7c／T6.9 下一輪選 BTC／ETH／BNB"),
+        BotCommand("predict_market", "T6.7c／T6.9／T6.9a 下一輪選 BTC／ETH／BNB"),
         BotCommand("predict_lane", "選擇交易策略"),
         BotCommand("predict_amount", "選擇單筆 1 / 2 USDT"),
     )

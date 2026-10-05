@@ -25,11 +25,11 @@ from test_t67c_report import main_database
 
 def test_t68a_is_selectable_btc_only_with_original_units_and_no_sibling_trades():
     assert PROFILE in PredictionWorker._selectable_strategy_profiles()
-    assert SELECTABLE_LANES[0][0] == 'regime_target6_9_v1'
+    assert SELECTABLE_LANES[0][0] == 'regime_target6_9a_v1'
     assert PROFILE in dict(selectable_lanes_for_market('BTCUSDT'))
     assert PROFILE not in dict(selectable_lanes_for_market('ETHUSDT'))
     assert tuple(RISK_PROFILES) == tuple(live_report.RISK_PROFILES)
-    assert len(RISK_PROFILES) == len(set(RISK_PROFILES)) == 15
+    assert len(RISK_PROFILES) == len(set(RISK_PROFILES)) == 16
     cfg = StrategyConfig.for_profile(PROFILE)
     assert cfg.provenance_payload['regime_policy_fingerprint'] == FINGERPRINT
     assert cfg.provenance_payload['t68a_policy']['profile'] == PROFILE
