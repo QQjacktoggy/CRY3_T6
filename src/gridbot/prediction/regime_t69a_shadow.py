@@ -36,9 +36,12 @@ def _usable_depth(book):
 
 
 def observe(db, prediction_db, signal_db, at_ms, symbol='BTCUSDT'):
-    """Flat F1-F4 paper quotes, recorded even when Live is filled/held."""
+    """Flat F1-F4 and R* paper quotes, recorded even when Live is filled/held."""
+    from .regime_t69a_rstar_shadow import RSTAR_POLICY, in_window
     start = at_ms//300000*300000
-    if not start+60000 <= at_ms < start+270000:
+    flat_window = start+60000 <= at_ms < start+270000
+    rstar_window = in_window(at_ms-start) and symbol in RSTAR_POLICY['markets']
+    if not flat_window and not rstar_window:
         return 'outside_shadow_window'
     with closing(sqlite3.connect(Path(prediction_db).resolve().as_uri()+'?mode=ro', uri=True, timeout=1)) as p:
         p.execute('PRAGMA query_only=ON')
@@ -74,9 +77,20 @@ def observe(db, prediction_db, signal_db, at_ms, symbol='BTCUSDT'):
         core_decision = None
     if identity['fee_bps'] is None:
         return 'shadow_book_missing'
+    schema(db)
+    if not flat_window:
+        # R* late favourite chase: separate policy, paper quote only.
+        from .regime_t69a_rstar_shadow import observe as observe_rstar
+        try:
+            from .regime_t69a_rstar_shadow import read_history
+            observe_rstar(db, identity, books, spots, at_ms, core_decision,
+                          lambda start: read_history(signal_db, start))
+        except (ValueError, KeyError, TypeError, ArithmeticError):
+            db.rollback()
+            return 'rstar_shadow_rejected'
+        return 'rstar_observed'
     # Only Flat F1-F4 are observed; the T6.7 research routes are retired here.
     from .regime_t69a_flat_shadow import observe as observe_flat
-    schema(db)
     try:
         observe_flat(db, identity, books, spots, at_ms, unit, core_decision)
     except (ValueError, KeyError, TypeError, ArithmeticError):

@@ -136,12 +136,13 @@ def test_entry_window_and_menu_wiring():
     assert RegimeLiveLedger(None, profile=PROFILE).tier == 'REGIME_T69A'
 
 
-def test_empty_report_lists_seven_live_lanes_and_four_flat_shadow_routes():
+def test_empty_report_lists_seven_live_lanes_flat_and_rstar_shadow_routes():
     from src.gridbot.prediction.regime_t69a_report import empty_report, LIVE_LABELS, SHADOW_LABELS
     text = empty_report(S)
     assert text.startswith('📊 T6.9a Report')
     assert tuple(LIVE_LABELS) == LIVE_BRANCHES
-    assert tuple(SHADOW_LABELS) == ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
+    assert tuple(SHADOW_LABELS) == ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180',
+                                    'late_favourite_chase')
     assert '外部先行' not in text and 'Reference 校正' not in text
     assert 'Reference 180s' not in text and '檢查點' not in text
     assert sum(label in text for label in LIVE_LABELS.values()) == 7

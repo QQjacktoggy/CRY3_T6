@@ -21,6 +21,7 @@ SHADOW_LABELS = {
     'flat_quiet_favorite': 'F2 安靜熱門方',
     'flat_cheap_prior': 'F3 便宜方順前趨勢',
     'flat_hold_180': 'F4 180s 續橫盤熱門方',
+    'late_favourite_chase': 'R* 尾盤熱門方追價（270-295s）',
 }
 LIVE_GROUPS = (
     ('核心', ('core_first_down', 'core_first_up', 'core_stall_down', 'core_c_down', 'core_continuation_original')),
@@ -28,8 +29,11 @@ LIVE_GROUPS = (
 )
 SHADOW_GROUPS = (
     ('Flat F1–F4', ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')),
+    ('尾盤 R*', ('late_favourite_chase',)),
 )
-HEADER = '📊 T6.9a Report｜七路 Live（T6.7c＋First UP 5bp）＋四路 Flat Shadow'
+# Paper quote clock window per Shadow branch, relative to market start.
+SHADOW_QUOTE_MS = {'late_favourite_chase': (270000, 295001)}
+HEADER = '📊 T6.9a Report｜七路 Live（T6.7c＋First UP 5bp）＋四路 Flat Shadow＋R* Shadow'
 LIVE_SIDES = {
     'core_first_down': {'DOWN'}, 'core_first_up': {'UP'}, 'core_stall_down': {'DOWN'},
     'core_c_down': {'DOWN'}, 'core_continuation_original': {'UP', 'DOWN'},
@@ -195,7 +199,8 @@ def shadow_metrics(root, *, now, loop_id, slots, fingerprint):
             if not _identity(quote, slot, loop_id, fingerprint) or quote.get('side') not in ('UP', 'DOWN'):
                 raise ValueError('paper quote identity mismatch')
             at, book_at, received = (int(quote[k]) for k in ('quoted_at_ms', 'book_at_ms', 'source_receive_ms'))
-            if (not start+60000 <= at < start+270000 or at > now
+            low, high = SHADOW_QUOTE_MS.get(branch, (60000, 270000))
+            if (not start+low <= at < start+high or at > now
                     or not book_at <= received <= at or not 0 <= at-book_at <= 1000):
                 raise ValueError('paper quote clock invalid')
             cash, shares, unit = (_decimal(quote[k]) for k in ('cash', 'net_shares', 'unit_usdt'))
