@@ -21,7 +21,8 @@ SHADOW_LABELS = {
     'flat_quiet_favorite': 'F2 安靜熱門方',
     'flat_cheap_prior': 'F3 便宜方順前趨勢',
     'flat_hold_180': 'F4 180s 續橫盤熱門方',
-    'late_favourite_chase': 'R* 尾盤熱門方追價（270-295s）',
+    'late_favourite_chase': 'R* 尾盤熱門方（.90-.98，z≥3）',
+    'late_favourite_chase_99': 'R*-99 尾盤熱門方（.99，z≥5）',
 }
 LIVE_GROUPS = (
     ('核心', ('core_first_down', 'core_first_up', 'core_stall_down', 'core_c_down', 'core_continuation_original')),
@@ -29,10 +30,10 @@ LIVE_GROUPS = (
 )
 SHADOW_GROUPS = (
     ('Flat F1–F4', ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')),
-    ('尾盤 R*', ('late_favourite_chase',)),
+    ('尾盤 R*', ('late_favourite_chase', 'late_favourite_chase_99')),
 )
 # Paper quote clock window per Shadow branch, relative to market start.
-SHADOW_QUOTE_MS = {'late_favourite_chase': (270000, 295001)}
+SHADOW_QUOTE_MS = {'late_favourite_chase': (270000, 295000), 'late_favourite_chase_99': (270000, 295000)}
 HEADER = '📊 T6.9a Report｜七路 Live（T6.7c＋First UP 5bp）＋四路 Flat Shadow＋R* Shadow'
 LIVE_SIDES = {
     'core_first_down': {'DOWN'}, 'core_first_up': {'UP'}, 'core_stall_down': {'DOWN'},

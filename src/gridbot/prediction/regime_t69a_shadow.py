@@ -82,9 +82,8 @@ def observe(db, prediction_db, signal_db, at_ms, symbol='BTCUSDT'):
         # R* late favourite chase: separate policy, paper quote only.
         from .regime_t69a_rstar_shadow import observe as observe_rstar
         try:
-            from .regime_t69a_rstar_shadow import read_history
-            observe_rstar(db, identity, books, spots, at_ms, core_decision,
-                          lambda start: read_history(signal_db, start))
+            from .regime_t69a_rstar_shadow import fetch_klines
+            observe_rstar(db, identity, books, spots, at_ms, core_decision, fetch_klines)
         except (ValueError, KeyError, TypeError, ArithmeticError):
             db.rollback()
             return 'rstar_shadow_rejected'
