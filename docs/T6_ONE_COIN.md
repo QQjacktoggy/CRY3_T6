@@ -12,7 +12,7 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy_coin_switch.ps1 ETH
 
 省略幣別即為 BTC。腳本依序 `git pull`、把 `t6_coin.sh` 複製到 VM、以 jack_shih 安裝並執行 `use`，任何一步失敗即停止。
 
-或直接在 VM 上在 VM 以 `jack_shih` 執行（OS Login 使用者先 `cd /tmp`）：
+或直接在 VM 以 `jack_shih` 執行（OS Login 使用者先 `cd /tmp`）：
 
 ```bash
 sudo -n -u jack_shih sh -c 'cd /tmp && /home/jack_shih/cry3/scripts/t6_coin.sh use ETH'
