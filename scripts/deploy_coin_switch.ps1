@@ -8,7 +8,9 @@
 param([ValidateSet('BTC', 'ETH', 'BNB')][string]$Coin = 'BTC')
 $ErrorActionPreference = 'Stop'
 
-$Vm = @('cry3jack', '--project=project-f7b56371-5bd7-47cc-ad6', '--zone=asia-east1-a', '--tunnel-through-iap')
+# Each flag is its own array element and is passed by splatting (@Gcloud), so
+# Windows PowerShell 5 hands gcloud separate arguments, never one joined string.
+$Gcloud = @('--project=project-f7b56371-5bd7-47cc-ad6', '--zone=asia-east1-a', '--tunnel-through-iap')
 $Remote = '/home/jack_shih/cry3/scripts/t6_coin.sh'
 $Local = Join-Path $env:TEMP 't6_coin.sh'
 
@@ -22,7 +24,7 @@ Step 'git fetch origin main' { git fetch origin main }
 # cmd redirection keeps the blob's bytes (LF, UTF-8); PowerShell 5's > would not.
 Step 'read main t6_coin.sh' { cmd /c "git show origin/main:scripts/t6_coin.sh > `"$Local`"" }
 if ((Get-Item $Local).Length -lt 1000) { throw "t6_coin.sh from origin/main looks wrong: $Local" }
-Step 'copy to VM' { gcloud compute scp $Local "$($Vm[0]):/tmp/t6_coin.sh" $Vm[1..3] }
+Step 'copy to VM' { gcloud compute scp @Gcloud $Local 'cry3jack:/tmp/t6_coin.sh' }
 Step "install and switch to $Coin" {
-    gcloud compute ssh @Vm --command="cd /tmp && sudo -n -u jack_shih install -m 755 /tmp/t6_coin.sh $Remote && rm -f /tmp/t6_coin.sh && sudo -n -u jack_shih sh -c 'cd /tmp && $Remote use $Coin'"
+    gcloud compute ssh cry3jack @Gcloud --command="cd /tmp && sudo -n -u jack_shih install -m 755 /tmp/t6_coin.sh $Remote && rm -f /tmp/t6_coin.sh && sudo -n -u jack_shih sh -c 'cd /tmp && $Remote use $Coin'"
 }
