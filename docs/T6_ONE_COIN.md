@@ -4,13 +4,13 @@
 
 ## 切換幣別
 
-從 meihan（`~\Desktop\cry3_t6`）一行完成部署與切換：
+從 meihan 的 `cry3_t6` 資料夾（任何分支皆可，不改本地檔案）一行完成部署與切換：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\deploy_coin_switch.ps1 ETH
+git fetch origin main; cmd /c "git show origin/main:scripts/deploy_coin_switch.ps1 > %TEMP%\deploy_coin_switch.ps1"; powershell -ExecutionPolicy Bypass -File $env:TEMP\deploy_coin_switch.ps1
 ```
 
-省略幣別即為 BTC。腳本依序 `git pull`、把 `t6_coin.sh` 複製到 VM、以 jack_shih 安裝並執行 `use`，任何一步失敗即停止。
+預設 BTC；最後加 `ETH` 或 `BNB` 換幣。腳本取 origin/main 的 `t6_coin.sh` 複製到 VM、以 jack_shih 安裝並執行 `use`，任何一步失敗即停止。
 
 或直接在 VM 以 `jack_shih` 執行（OS Login 使用者先 `cd /tmp`）：
 
