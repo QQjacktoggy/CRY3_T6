@@ -111,8 +111,9 @@ def test_decisions_match_t67c_except_weak_first_up(tmp_path, first, last, prior,
 
 
 @pytest.mark.parametrize('up,allowed', [('.65', True), ('.70', True), ('.71', False), ('.75', False)])
-def test_c_mirror_cap_is_070(tmp_path, up, allowed):
-    f = feature(-1, 3, 2)
+@pytest.mark.parametrize('first,last', [(-1, 3), (3, -1)])  # (3, -1) also matches shallow UP
+def test_c_mirror_cap_is_070(tmp_path, up, allowed, first, last):
+    f = feature(first, last, 2)
     initial = book(up, str(1-D(up)), 124000)
     _, t67c_check = setup(tmp_path, f, initial, profile=T67C, orig=original())
     t69a_bridge, t69a_check = setup(tmp_path, f, initial, orig=original())
@@ -124,7 +125,9 @@ def test_c_mirror_cap_is_070(tmp_path, up, allowed):
         assert new.reason == 't69a_ready:c_mirror_up_prior' and d['cap'] == '0.70'
         assert new.execution.worst_ask_limit <= D('.70')
     else:
-        assert d['selected'] is False and 'c_mirror_up_prior' not in d['eligible_branches']
+        # Skipped outright: shallow retracement must not take the same UP entry.
+        assert d['selected'] is False and d['eligible_branches'] == []
+        assert new.reason == 't69a_no_live_candidate:core_verified_empty'
 
 
 @pytest.mark.parametrize('offset', [123999, 136000, 180000, 181500, 183000])

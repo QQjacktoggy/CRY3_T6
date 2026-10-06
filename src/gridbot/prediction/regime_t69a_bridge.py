@@ -40,7 +40,11 @@ def _book_refusal(exc, snapshot, at_ms):
 
 
 def _additions(snapshot, features, unit):
-    """T6.7c additions, with C-UP mirror held to the T6.9a price band (cap .70)."""
+    """T6.7c additions, with C-UP mirror held to the T6.9a price band (cap .70).
+
+    A market where C-UP mirror matched the T6.7c band but fails the .70 cap is
+    skipped outright, so no other addition takes the same entry instead.
+    """
     lower, cap = POLICY['c_mirror_up_prior']['price_band']
     choices = []
     for candidate in additions(snapshot, features, unit):
@@ -48,7 +52,7 @@ def _additions(snapshot, features, unit):
             try:
                 new_execution(snapshot, 'UP', unit, lower=lower, cap=cap)
             except (ValueError, KeyError, TypeError, ArithmeticError):
-                continue
+                return []
             candidate = dict(candidate, lower=lower, cap=cap, upper=cap)
         choices.append(candidate)
     return choices
