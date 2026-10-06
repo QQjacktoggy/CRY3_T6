@@ -28,7 +28,7 @@ exists() { [ -n "$(sc list-unit-files --no-legend "$1" 2>/dev/null)" ]; }
 
 # Prints "<running loop id or -> <bound symbol or -> <selected market or ->".
 loop_state() {
-  "$PYTHON" -B - "$DB" <<'PY'
+  "$PYTHON" -B - "$DB" 2>/dev/null <<'PY'
 import json, sqlite3, sys
 from pathlib import Path
 db = sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
@@ -82,7 +82,8 @@ warn_paid_original() {
 }
 
 status() {
-  set -- $(loop_state)
+  state=$(loop_state) || { echo "讀不到 $DB" >&2; exit 5; }
+  set -- $state
   echo "RUNNING loop：$1  綁定幣：$2  已選市場：$3"
   show_units
   free -m | sed -n '1,2p'
@@ -105,7 +106,8 @@ use() {
     BNB|BNBUSDT) asset=BNBUSDT ;;
     *) echo "用法：$0 use BTC|ETH|BNB" >&2; exit 2 ;;
   esac
-  set -- $(loop_state)
+  state=$(loop_state) || { echo "拒絕：讀不到 $DB，無法確認 loop 狀態，未變更任何服務。" >&2; exit 5; }
+  set -- $state
   if [ "$1" != "-" ] && [ "$2" != "$asset" ]; then
     echo "拒絕：loop $1 正在跑 $2，producer 不能中途切換。等本輪結束或取消後再換。" >&2
     exit 3
@@ -115,8 +117,7 @@ use() {
   for unit in $BTC_UNITS $(coin_units "$asset"); do
     exists "$unit" || { echo "缺少 $unit，無法切到 $asset" >&2; exit 4; }
   done
-  sc start $BTC_UNITS
-  if [ "$asset" != BTCUSDT ]; then sc enable --now $(coin_units "$asset") >/dev/null; fi
+  # Stop the other coin first so three coins never run at once.
   for other in ETHUSDT BNBUSDT; do
     [ "$other" = "$asset" ] && continue
     for unit in $(coin_units "$other"); do
@@ -125,6 +126,11 @@ use() {
       fi
     done
   done
+  sc start $BTC_UNITS
+  if [ "$asset" != BTCUSDT ]; then sc enable --now $(coin_units "$asset") >/dev/null; fi
+  if [ "$3" != "-" ] && [ "$3" != "$asset" ]; then
+    echo "注意：Bot 目前選的是 $3，開輪前務必先 /predict_market ${asset%USDT}，否則會在沒有 producer 的幣上開輪。"
+  fi
   echo "已切到 $asset：只跑 BTC 基準與 $asset 的 producer，觀測器已停。"
   status
   short=${asset%USDT}
