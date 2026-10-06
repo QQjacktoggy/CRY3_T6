@@ -13,7 +13,7 @@ from src.gridbot.prediction.live_report import T69A_PROFILE, format_live_report
 from src.gridbot.prediction.regime_feature_service import connect
 from src.gridbot.prediction.regime_t69a_policy import FINGERPRINT, POLICY
 
-# T6.9a policy fingerprint as merged in PR #29; this Shadow must not move it.
+# T6.9a policy fingerprint after the C-UP mirror cap moved to .70; this Shadow must not move it.
 T69A_FINGERPRINT = '0fa6b801b89fc7b6f2054b21b6749eb518726a4595832759ea48db738cee92be'
 
 
