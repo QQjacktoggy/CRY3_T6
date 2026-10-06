@@ -431,3 +431,10 @@ async def test_btc_switch_has_no_warmup(repo, tmp_path):
     result=await w.select_market('BTCUSDT')
     assert log.read_text().split()==['use','BTC'] and result['producer_warmup_until_ms'] is None
     assert await w._loop_market_start_guard(20) is None
+
+
+def test_producer_ready_is_first_market_starting_60s_after_start():
+    from src.gridbot.prediction.loop_market_worker import producer_ready_at_ms
+    assert producer_ready_at_ms(0) == 300_000
+    assert producer_ready_at_ms(240_000) == 300_000
+    assert producer_ready_at_ms(240_001) == 600_000

@@ -8,9 +8,15 @@ import time
 from .loop_market import PROFILES, symbol, data_paths, execution_fingerprint, verify_data_db
 
 
-# Feature + signal producers must cover two 5-minute market starts before a
-# new coin can open a loop (signal needs >=60s before a market start).
-PRODUCER_WARMUP_MS = 360_000
+# The signal producer skips any market that starts less than 60s after it
+# started (c180_signal_runtime PREOPEN_WARMUP_MS: the Tape needs the pre-open
+# trades). A new coin's loop may start at the first market it can serve.
+PRODUCER_PREOPEN_MS = 60_000
+MARKET_MS = 300_000
+
+
+def producer_ready_at_ms(started_ms):
+    return -(-(started_ms + PRODUCER_PREOPEN_MS) // MARKET_MS) * MARKET_MS
 PRODUCER_SWITCH_TIMEOUT_S = 90
 
 
@@ -111,7 +117,7 @@ class LoopMarketWorker:
             changed = asset != self.settings.market_symbol
             warmup_until = None
             if switch == 'done' and changed and asset != 'BTCUSDT':
-                warmup_until = int(time.time() * 1000) + PRODUCER_WARMUP_MS
+                warmup_until = producer_ready_at_ms(int(time.time() * 1000))
                 await self.repository.set_runtime_config(
                     'prediction_producer_switch', {'symbol': asset, 'ready_at_ms': warmup_until})
             if changed:
@@ -150,7 +156,7 @@ class LoopMarketWorker:
         if warm.get('symbol') == asset:
             left_ms = int(warm.get('ready_at_ms', 0)) - int(time.time() * 1000)
             if left_ms > 0:
-                return f'{asset} 資料程式暖機中，約 {-(-left_ms // 60000)} 分鐘後再開輪'
+                return f'{asset} 資料程式暖機中（訊號需在市場開始前 60 秒就運行），約 {-(-left_ms // 60000)} 分鐘後再開輪'
         if self.settings.is_live_requested and not await self._market_boundary_clear():
             return 'local/official exposure or unknown state prevents a new loop'
         if asset != 'BTCUSDT':
