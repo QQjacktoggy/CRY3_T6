@@ -55,8 +55,12 @@ def test_policy_is_t67c_lanes_plus_first_up_floor_on_t69_packaging():
     # Everything else that decides an early-window entry matches T6.7c.
     for key in ('routing', 'new_priority', 'decision_ms', 'last_selection_ms', 'entry_ms',
                 'quote_ttl_ms', 'core_expiry_ms', 'original_input_ms', 'book_max_age_ms', 'units',
-                'c_mirror_up_prior', 'shallow_retracement', 'risk_state_key', 'loop_mdd_1u'):
+                'shallow_retracement', 'risk_state_key', 'loop_mdd_1u'):
         assert POLICY[key] == t67c[key], key
+    # C-UP mirror keeps the T6.7c rule but its price cap is .70 instead of .75.
+    mirror, base = dict(POLICY['c_mirror_up_prior']), dict(t67c['c_mirror_up_prior'])
+    assert mirror.pop('price_band') == ['0.65', '0.70'] and base.pop('price_band') == ['0.65', '0.75']
+    assert mirror == base
     assert POLICY['shadow_branches'] == t69['shadow_branches'][2:]
     assert POLICY['shadow_retired'] == ('external_lead_lag', 'reference_value')
     assert POLICY['markets'] == ('BTCUSDT', 'ETHUSDT', 'BNBUSDT')
@@ -98,9 +102,32 @@ def test_decisions_match_t67c_except_weak_first_up(tmp_path, first, last, prior,
         assert new.signal.entry.side == old.signal.entry.side
         assert new.signal.entry == old.signal.entry
         for key in ('expires_at_ms', 'worst_ask_limit', 'expected_cash_usdt', 'expected_shares'):
+            if key == 'worst_ask_limit' and new.reason.endswith(':c_mirror_up_prior'):
+                assert new.execution.worst_ask_limit == D('0.70')  # T6.9a cap; T6.7c uses .75
+                continue
             assert getattr(new.execution, key) == getattr(old.execution, key), key
         assert new.reason.split(':', 1)[1] == old.reason.split(':', 1)[1]  # same branch
         assert new.signal.original_input_sha256 == FINGERPRINT
+
+
+@pytest.mark.parametrize('up,allowed', [('.65', True), ('.70', True), ('.71', False), ('.75', False)])
+@pytest.mark.parametrize('first,last', [(-1, 3), (3, -1)])  # (3, -1) also matches shallow UP
+def test_c_mirror_cap_is_070(tmp_path, up, allowed, first, last):
+    f = feature(first, last, 2)
+    initial = book(up, str(1-D(up)), 124000)
+    _, t67c_check = setup(tmp_path, f, initial, profile=T67C, orig=original())
+    t69a_bridge, t69a_check = setup(tmp_path, f, initial, orig=original())
+    old, new = t67c_check(), t69a_check()
+    assert old.allowed and old.reason.endswith(':c_mirror_up_prior')
+    assert new.allowed is allowed, new.reason
+    d = state(t69a_bridge)
+    if allowed:
+        assert new.reason == 't69a_ready:c_mirror_up_prior' and d['cap'] == '0.70'
+        assert new.execution.worst_ask_limit <= D('.70')
+    else:
+        # Skipped outright: shallow retracement must not take the same UP entry.
+        assert d['selected'] is False and d['eligible_branches'] == []
+        assert new.reason == 't69a_no_live_candidate:core_verified_empty'
 
 
 @pytest.mark.parametrize('offset', [123999, 136000, 180000, 181500, 183000])

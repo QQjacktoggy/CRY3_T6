@@ -39,6 +39,25 @@ def _book_refusal(exc, snapshot, at_ms):
         return 't69a_book_clock_invalid'
 
 
+def _additions(snapshot, features, unit):
+    """T6.7c additions, with C-UP mirror held to the T6.9a price band (cap .70).
+
+    A market where C-UP mirror matched the T6.7c band but fails the .70 cap is
+    skipped outright, so no other addition takes the same entry instead.
+    """
+    lower, cap = POLICY['c_mirror_up_prior']['price_band']
+    choices = []
+    for candidate in additions(snapshot, features, unit):
+        if candidate['branch'] == 'c_mirror_up_prior':
+            try:
+                new_execution(snapshot, 'UP', unit, lower=lower, cap=cap)
+            except (ValueError, KeyError, TypeError, ArithmeticError):
+                return []
+            candidate = dict(candidate, lower=lower, cap=cap, upper=cap)
+        choices.append(candidate)
+    return choices
+
+
 class _FeaturesMissing(ValueError):
     pass
 
@@ -169,7 +188,7 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
         if not isinstance(guard, dict):
             raise ValueError('decision_payload_invalid')
         if not d['selected'] and guard.get('verified') is True and at_ms <= start+134500:
-            choices = additions(snapshot, guard['features'], unit_usdt) if guard['empty'] else guard['candidates']
+            choices = _additions(snapshot, guard['features'], unit_usdt) if guard['empty'] else guard['candidates']
             blocked = [c for c in choices if c['branch'] == 'core_first_up'
                        and dec(guard['features']['prior_bp']) < dec(POLICY['first_up_prior_min_bp'])]
             d['rejected_branches'] = [dict(branch=c['branch'], reason='first_up_prior_below_5bp',

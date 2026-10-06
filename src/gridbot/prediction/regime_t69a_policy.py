@@ -33,7 +33,7 @@ POLICY = dict(
     book_max_age_ms=1000, units=[1, 2, 3],
     c_mirror_up_prior=dict(state='reversal', minute_abs_min_bp='0.5',
                            compounded_net_min_bp='1', prior_min_bp='1',
-                           side='UP', price_band=['0.65', '0.75']),
+                           side='UP', price_band=['0.65', '0.70']),
     shallow_retracement=dict(opposite_minute_sign=True, first_abs_min_bp='1',
                              first_abs_to_last_abs_min='2', side='compounded_net',
                              price_band=['0.10', '0.75']),
