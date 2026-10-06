@@ -2431,8 +2431,8 @@ def build_prediction_handlers(service: PredictionTelegramService) -> tuple[Any, 
     """Build handlers without constructing an Application or reading config."""
 
     return (
-        CommandHandler("firstreport", service.cmd_firstreport),
-        CommandHandler("t67creport", service.cmd_t67creport),
+        # Observer reports (/firstreport, /t67creport) are off Telegram: the
+        # VM runs one coin's producers only and no research observers.
         CommandHandler("report", service.cmd_predict_report),
         CommandHandler("predict_report", service.cmd_predict_report),
         CommandHandler("shadow_report", service.cmd_predict_shadow_report),
