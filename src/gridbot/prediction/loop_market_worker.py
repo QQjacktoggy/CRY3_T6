@@ -1,11 +1,43 @@
 """Whole-loop asset selection. No orders, risk reset or implicit Live arming."""
+import asyncio
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
+import time
 
 from .loop_market import PROFILES, symbol, data_paths, execution_fingerprint, verify_data_db
 
 
+# Feature + signal producers must cover two 5-minute market starts before a
+# new coin can open a loop (signal needs >=60s before a market start).
+PRODUCER_WARMUP_MS = 360_000
+PRODUCER_SWITCH_TIMEOUT_S = 90
+
+
 class LoopMarketWorker:
+    async def _switch_producers(self, asset):
+        """Run only this coin's producers via scripts/t6_coin.sh (no observers).
+
+        Returns (state, reason): state is 'done', 'unavailable' (script not
+        installed; producers left as they are) or 'failed'.
+        """
+        script = Path(self.repository.db_path).resolve().parents[2] / 'scripts/t6_coin.sh'
+        if not script.is_file():
+            return 'unavailable', None
+        proc = await asyncio.create_subprocess_exec(
+            'sh', str(script), 'use', asset[:-len('USDT')],
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), PRODUCER_SWITCH_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return 'failed', '資料程式切換逾時'
+        if proc.returncode:
+            lines = [l for l in out.decode(errors='replace').splitlines() if l.strip()]
+            return 'failed', f'資料程式切換失敗（exit {proc.returncode}）：' + (lines[-1] if lines else '')
+        return 'done', None
+
     def _apply_market_context(self, asset):
         asset = symbol(asset)
         if asset == getattr(self.settings, "market_symbol", "BTCUSDT"):
@@ -73,7 +105,15 @@ class LoopMarketWorker:
             if asset != 'BTCUSDT':
                 for path in data_paths(self.repository.db_path, asset):
                     verify_data_db(path, asset)
+            switch, why = await self._switch_producers(asset)
+            if switch == 'failed':
+                return {**self._status(), 'action_denied': True, 'reason': why}
             changed = asset != self.settings.market_symbol
+            warmup_until = None
+            if switch == 'done' and changed and asset != 'BTCUSDT':
+                warmup_until = int(time.time() * 1000) + PRODUCER_WARMUP_MS
+                await self.repository.set_runtime_config(
+                    'prediction_producer_switch', {'symbol': asset, 'ready_at_ms': warmup_until})
             if changed:
                 from .settings import RuntimeMode
                 self._effective_mode = RuntimeMode.SHADOW
@@ -82,6 +122,7 @@ class LoopMarketWorker:
             await self.repository.set_runtime_config('prediction_pending_market', {})
             return {**self._status(), 'market_symbol': asset, 'next_market_symbol': asset,
                     'market_queued': False, 'live_rearm_required': changed,
+                    'producer_switch': switch, 'producer_warmup_until_ms': warmup_until,
                     'reason': 'market selected; confirm Live and start a new loop explicitly'}
 
     async def _loop_market_start_guard(self, count):
@@ -105,6 +146,11 @@ class LoopMarketWorker:
         pending = await self.repository.get_runtime_config('prediction_pending_market', {})
         if pending.get('symbol') and pending['symbol'] != asset:
             return 'apply next market with /predict_market and confirm Live before starting'
+        warm = await self.repository.get_runtime_config('prediction_producer_switch', {})
+        if warm.get('symbol') == asset:
+            left_ms = int(warm.get('ready_at_ms', 0)) - int(time.time() * 1000)
+            if left_ms > 0:
+                return f'{asset} 資料程式暖機中，約 {-(-left_ms // 60000)} 分鐘後再開輪'
         if self.settings.is_live_requested and not await self._market_boundary_clear():
             return 'local/official exposure or unknown state prevents a new loop'
         if asset != 'BTCUSDT':
