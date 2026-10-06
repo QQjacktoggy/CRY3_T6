@@ -61,8 +61,10 @@ async def test_command_routes_readonly_renderer():
 def test_handler_and_command_menu():
     from predict_main import prediction_bot_commands
     service=PredictionTelegramService(object(),['1'])
-    assert any('firstreport' in getattr(h,'commands',()) for h in build_prediction_handlers(service))
-    assert any(c.command=='firstreport' for c in prediction_bot_commands())
+    handlers=build_prediction_handlers(service)
+    for name in ('firstreport','t67creport'):
+        assert not any(name in getattr(h,'commands',()) for h in handlers)
+        assert not any(c.command==name for c in prediction_bot_commands())
 
 
 def test_range_recheck_attempt_and_rejection_explained(tmp_path):

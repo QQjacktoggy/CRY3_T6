@@ -274,8 +274,6 @@ def prediction_bot_commands() -> tuple[BotCommand, ...]:
     """Return the command menu exposed by the Prediction control plane."""
 
     return (
-        BotCommand("t67creport", "T6.7c七路三幣Shadow，參數20/40/100"),
-        BotCommand("firstreport", "BTC／ETH／BNB First觀測，參數20/40/100"),
         BotCommand("report", "目前 Lane Live WR／PnL／風控"),
         BotCommand("predict_report", "目前 Lane Live WR／PnL／風控"),
         BotCommand("shadow_report", "查看原 Shadow 報告"),
