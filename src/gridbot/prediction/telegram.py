@@ -1078,7 +1078,16 @@ def format_runtime_result(title: str, result: Any) -> str:
             elif value.get("market_queued"):
                 lines += ["已排下一輪；目前 Loop 維持原幣種。", "本輪結束、持倉與訂單清空後，再點選該幣套用。"]
             else:
-                lines += ["已選定；尚未建立新 Loop。", "確認 /predict_live on 後，用 /predict_loop 20 開始20場。"]
+                lines += ["已選定；尚未建立新 Loop。"]
+                if value.get("producer_switch") == "done":
+                    lines += ["資料程式已切到此幣（BTC 基準保留，其他幣與觀測器已停）。"]
+                elif value.get("producer_switch") == "unavailable":
+                    lines += ["VM 未安裝 scripts/t6_coin.sh，資料程式未切換。"]
+                ready = value.get("producer_warmup_until_ms")
+                if ready:
+                    left = max(0, int(ready) - int(time.time() * 1000))
+                    lines += [f"資料程式暖機到下一個可交易市場，約 {-(-left // 60000)} 分鐘，期間 /predict_loop 會被擋。"]
+                lines += ["確認 /predict_live on 後，用 /predict_loop 20 開始20場。"]
         elif title == "系統狀態" or title.endswith("狀態") and "風控" not in title:
             lines = _compact_status(value)
         elif "Loop PnL" in title:

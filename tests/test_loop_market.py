@@ -380,3 +380,61 @@ async def test_legacy_closed_snapshot_boundary(repo, case, clear):
         # Admission never rewrites an old position or fabricates settlement.
         assert len(await repo._fetchall('SELECT * FROM prediction_position_snapshots'))==1
         assert not await repo._fetchall('SELECT * FROM prediction_settlements')
+
+
+def _stub_coin_script(root, code=0):
+    script = root/'scripts/t6_coin.sh'
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f'echo "$@" >> "{root}/coin.log"\necho "last line"\nexit {code}\n')
+    return root/'coin.log'
+
+
+@pytest.mark.asyncio
+async def test_telegram_market_switch_runs_producer_script_and_waits_warmup(repo, tmp_path):
+    log = _stub_coin_script(tmp_path)
+    for p in data_paths(repo.db_path,'ETHUSDT'):mark(p,'ETHUSDT')
+    w=Harness(repo)
+    result=await w.select_market('ETHUSDT')
+    assert log.read_text().split() == ['use','ETH']
+    assert result['producer_switch']=='done' and result['producer_warmup_until_ms']
+    assert '暖機' in await w._loop_market_start_guard(20)
+    await repo.set_runtime_config('prediction_producer_switch',{'symbol':'ETHUSDT','ready_at_ms':1})
+    assert await w._loop_market_start_guard(20) is None
+    from src.gridbot.prediction.telegram import format_runtime_result
+    assert '資料程式已切到此幣' in format_runtime_result('T6.7c／T6.9／T6.9b 整輪市場', result)
+
+
+@pytest.mark.asyncio
+async def test_failed_producer_switch_keeps_old_market(repo, tmp_path):
+    _stub_coin_script(tmp_path, code=3)
+    for p in data_paths(repo.db_path,'ETHUSDT'):mark(p,'ETHUSDT')
+    w=Harness(repo)
+    result=await w.select_market('ETHUSDT')
+    assert result['action_denied'] and 'exit 3' in result['reason'] and 'last line' in result['reason']
+    assert w.settings.market_symbol=='BTCUSDT'
+    assert await repo.get_runtime_config('prediction_selected_market',{})=={}
+
+
+@pytest.mark.asyncio
+async def test_queued_choice_never_touches_producers(repo, tmp_path):
+    log = _stub_coin_script(tmp_path)
+    await start(repo)
+    w=Harness(repo)
+    assert (await w.select_market('ETHUSDT'))['market_queued']
+    assert not log.exists()
+
+
+@pytest.mark.asyncio
+async def test_btc_switch_has_no_warmup(repo, tmp_path):
+    log = _stub_coin_script(tmp_path)
+    w=Harness(repo)
+    result=await w.select_market('BTCUSDT')
+    assert log.read_text().split()==['use','BTC'] and result['producer_warmup_until_ms'] is None
+    assert await w._loop_market_start_guard(20) is None
+
+
+def test_producer_ready_is_first_market_starting_60s_after_start():
+    from src.gridbot.prediction.loop_market_worker import producer_ready_at_ms
+    assert producer_ready_at_ms(0) == 300_000
+    assert producer_ready_at_ms(240_000) == 300_000
+    assert producer_ready_at_ms(240_001) == 600_000

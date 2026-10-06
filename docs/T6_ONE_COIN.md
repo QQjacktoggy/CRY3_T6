@@ -48,3 +48,9 @@ producer 跑滿約 10 分鐘（兩個市場，signal 需在市場開始前 60 �
 ## 注意
 
 若 signal producer 設有 `PREDICTION_T67C_OBSERVER_ORIGINAL_ENABLED=1`（三幣觀測用付費 Original），`status` 會提示；觀測器停用後可在無 RUNNING loop 時移除該設定並重啟該 producer，恢復「只替當前交易幣呼叫 Original」的預設。
+
+## 在 Telegram 換幣（下次部署主程式後）
+
+`/predict_market ETH`（或點按鈕）在無 RUNNING loop、帳戶無曝險時，Bot 會以自身的 jack_shih 身分執行 `scripts/t6_coin.sh use ETH`：BTC 基準保留、另一幣與觀測器停掉、ETH producer 啟動。切到 ETH／BNB 後到下一個可交易市場前（1–6 分鐘；signal 需在市場開始前 60 秒已運行）`/predict_loop` 會回「資料程式暖機中」。腳本失敗或逾時（90 秒）時不換幣並回報原因；VM 沒有該腳本時照舊只換 Bot 的市場，並在回覆中註明。執行中選幣仍只排下一輪，不動任何 producer。
+
+前提：`scripts/t6_coin.sh` 已在 VM（用上方一行指令安裝）。主程式與 producer 都是 jack_shih 的 user unit，Bot 直接用 `systemctl --user`，不需 sudo 或 polkit。
