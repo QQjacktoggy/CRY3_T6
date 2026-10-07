@@ -256,6 +256,8 @@ def empty_report(now):
     lines += _grouped(SHADOW_GROUPS, lambda branch: f'{SHADOW_LABELS[branch]}｜報價 0｜已知paper WR —｜假設paper PnL —｜未知 0')
     from .regime_t69a_post_entry import empty_lines
     lines += empty_lines()
+    from .regime_t69a_shallow_filter import empty_lines as shallow_empty_lines
+    lines += shallow_empty_lines()
     lines.append('Shadow報價不等於實際成交；假設收益不併入Live。')
     return '\n'.join(lines)
 
@@ -482,6 +484,12 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
                               official=_official_winners(root, loop['loop_id'], slots))
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError):
         lines.append('First DOWN 深度停損｜待核對；不列收益。')
+    try:
+        from .regime_t69a_shallow_filter import report_lines as shallow_lines
+        lines += shallow_lines(root, now=now, loop_id=loop['loop_id'], slots=slots,
+                               official=_official_winners(root, loop['loop_id'], slots), filled_starts=filled)
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError):
+        lines.append('淺回撤逆勢條件｜待核對；不列收益。')
     lines.append('Shadow報價不等於實際成交；假設收益不併入Live。')
     lines.append('')
     hs_known = isinstance(hs, dict) and isinstance(hs.get('latched'), bool)
