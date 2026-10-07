@@ -98,6 +98,18 @@ class PolicyTests(unittest.TestCase):
         s=json.loads(json.dumps(s))
         self.assertFalse(risk_result(s,[],START+100*SLOT_MS,START+100*SLOT_MS)[0])
 
+    def test_risk_epoch_skips_older_losses_on_original_grid(self):
+        rows=[trade(n,-1) for n in range(1,5)]
+        s={**state(),"risk_epoch_start_ms":START+10*SLOT_MS}
+        self.assertEqual(risk_result(s,rows,START+10*SLOT_MS,START+10*SLOT_MS),(True,"persistent_risk_pass"))
+        self.assertEqual(s["risk_equity_1u"],"0");self.assertEqual(s["net_pnl_usdt"],"-4")
+        self.assertEqual(risk_result({**state(),"risk_epoch_start_ms":START+10*SLOT_MS},[],START+9*SLOT_MS,START+9*SLOT_MS)[1],"market_before_risk_epoch")
+        self.assertEqual(risk_result({**state(),"risk_epoch_start_ms":START+1},[],START+9*SLOT_MS,START+9*SLOT_MS)[1],"risk_epoch_invalid")
+        # Losses after the epoch still latch on the same 20-run grid.
+        later=[LiveSettlement(str(n),START+(9+n)*SLOT_MS,D("-1"),START+(10+n)*SLOT_MS,D(1)) for n in range(1,5)]
+        s={**state(),"risk_epoch_start_ms":START+10*SLOT_MS}
+        self.assertEqual(risk_result(s,later,START+15*SLOT_MS,START+15*SLOT_MS)[1],"scheduled20_mdd_3.5")
+
     def test_cumulative_across_blocks(self):
         rows=[trade(1,-3),trade(21,-3)]
         self.assertEqual(risk_result(state(),rows,START+22*SLOT_MS,START+22*SLOT_MS)[1],"cumulative_loss_6")
@@ -232,6 +244,26 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         s=await self.repo.get_runtime_config(STATE_KEY,None)
         self.assertEqual(s["first_market_start_ms"],START)
         self.assertEqual(s["halt_reason"],"cumulative_loss_6")
+    async def test_operator_reset_clears_only_scheduled20_mdd_with_audit(self):
+        await self.repo.set_runtime_config(STATE_KEY,{**state(),"halt_reason":"cumulative_loss_6"})
+        r=await self.ledger.reset_shared_risk(now_ms=START+50*SLOT_MS+7,reason="t")
+        self.assertEqual(r["reason"],"not_resettable")
+        await self.repo.set_runtime_config(STATE_KEY,{**state(),"halt_reason":"scheduled20_mdd_3.5"})
+        r=await self.ledger.reset_shared_risk(now_ms=START+50*SLOT_MS+7,reason="t")
+        self.assertTrue(r["reset"],r);self.assertEqual(r["risk_epoch_start_ms"],START+51*SLOT_MS)
+        s=await self.repo.get_runtime_config(STATE_KEY,None)
+        self.assertIsNone(s["halt_reason"]);self.assertEqual(s["first_market_start_ms"],START)
+        self.assertEqual(s["risk_resets"][0]["prior_halt_reason"],"scheduled20_mdd_3.5")
+        self.assertEqual((await self.ledger.check_risk("loop1",START+50*SLOT_MS,START+50*SLOT_MS+8))[1],"market_before_risk_epoch")
+        self.assertTrue((await self.ledger.check_risk("loop1",START+51*SLOT_MS,START+51*SLOT_MS))[0])
+        self.assertEqual((await self.ledger.reset_shared_risk(now_ms=START+52*SLOT_MS,reason="t"))["reason"],"not_resettable")
+    async def test_operator_reset_refuses_unknown_order(self):
+        self.assertTrue((await self.claim()).claimed)
+        await self.repo._execute("UPDATE prediction_order_intents SET unknown=1 WHERE intent_id='i1'")
+        await self.repo.set_runtime_config(STATE_KEY,{**state(),"halt_reason":"scheduled20_mdd_3.5"})
+        r=await self.ledger.reset_shared_risk(now_ms=START+50*SLOT_MS,reason="t")
+        self.assertEqual(r["reason"],"unknown_order_reconciliation_required")
+        self.assertEqual((await self.repo.get_runtime_config(STATE_KEY,None))["halt_reason"],"scheduled20_mdd_3.5")
     async def test_unknown_order_latch_survives_reconciliation(self):
         self.assertTrue((await self.claim()).claimed)
         await self.repo._execute("UPDATE prediction_order_intents SET unknown=1 WHERE intent_id='i1'")
