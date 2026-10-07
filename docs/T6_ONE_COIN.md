@@ -22,8 +22,8 @@ sudo -n -u jack_shih sh -c 'cd /tmp && /home/jack_shih/cry3/scripts/t6_coin.sh u
 
 1. 讀正式帳本（唯讀）。若有 RUNNING loop 且綁定的是別的幣，拒絕並不動任何服務。
 2. 停用兩個研究觀測器與觀測 Telegram 發送器（同 `slim`）。
-3. 保持 BTC 基準 producer（`cry3-regime-feature`、`cry3-c180-favorite-signal`）運行。
-4. ETH／BNB 只 enable+start 選定那一幣的 feature／signal producer，另一幣的停用。
+3. 只 enable+start 選定那一幣的 feature／signal producer；其他兩幣（包含 BTC 的 `cry3-regime-feature`、`cry3-c180-favorite-signal`）全部停用。VM 只有 1GB 記憶體，兩套同時跑會拖慢讀取而漏單。
+4. 切回 BTC 時同樣只跑 BTC 那兩個 producer。
 5. 印出服務狀態與記憶體，並提示 Telegram 下一步。
 
 producer 跑滿約 10 分鐘（兩個市場，signal 需在市場開始前 60 秒已啟動）後，在 Telegram：

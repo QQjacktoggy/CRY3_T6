@@ -113,12 +113,12 @@ use() {
     exit 3
   fi
   slim
-  # BTC producers stay up: they are the default market and the monitor's feed.
-  for unit in $BTC_UNITS $(coin_units "$asset"); do
+  for unit in $(coin_units "$asset"); do
     exists "$unit" || { echo "缺少 $unit，無法切到 $asset" >&2; exit 4; }
   done
-  # Stop the other coin first so three coins never run at once.
-  for other in ETHUSDT BNBUSDT; do
+  # Only the selected coin's producers run: the VM is too small for two sets,
+  # and a second set slowed reads enough to miss ETH entries (10-07).
+  for other in BTCUSDT ETHUSDT BNBUSDT; do
     [ "$other" = "$asset" ] && continue
     for unit in $(coin_units "$other"); do
       if exists "$unit"; then
@@ -126,12 +126,11 @@ use() {
       fi
     done
   done
-  sc start $BTC_UNITS
-  if [ "$asset" != BTCUSDT ]; then sc enable --now $(coin_units "$asset") >/dev/null; fi
+  sc enable --now $(coin_units "$asset") >/dev/null
   if [ "$3" != "-" ] && [ "$3" != "$asset" ]; then
     echo "注意：Bot 目前選的是 $3，開輪前務必先 /predict_market ${asset%USDT}，否則會在沒有 producer 的幣上開輪。"
   fi
-  echo "已切到 $asset：只跑 BTC 基準與 $asset 的 producer，觀測器已停。"
+  echo "已切到 $asset：只跑 $asset 的 producer，其他幣與觀測器已停。"
   status
   short=${asset%USDT}
   echo
