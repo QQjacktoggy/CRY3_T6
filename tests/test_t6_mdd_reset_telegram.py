@@ -81,6 +81,8 @@ async def test_worker_reset_requires_zero_exposure_then_stops_loop(monkeypatch):
             pass
 
         async def reset_shared_risk(self, **kw):
+            # The old loop must already be stopped when the halt clears.
+            w.repository.request_operator_stop.assert_awaited_once_with('L1')
             calls.append(kw)
             return {'reset': True, 'risk_epoch_start_ms': 300000}
     monkeypatch.setattr(regime_live_ledger, 'RegimeLiveLedger', FakeLedger)
@@ -92,3 +94,22 @@ async def test_worker_reset_requires_zero_exposure_then_stops_loop(monkeypatch):
     assert result['regime_risk_reset']['reset'] and calls[0]['now_ms'] == 123
     w.repository.request_operator_stop.assert_awaited_once_with('L1')
     assert w.repository.record_risk_event.await_args.args[0] == 'REGIME_T6_MDD_RESET'
+
+
+@pytest.mark.asyncio
+async def test_worker_reset_reports_success_even_if_event_write_fails(monkeypatch):
+    from src.gridbot.prediction import regime_live_ledger
+    from src.gridbot.prediction.worker import PredictionWorker
+
+    class FakeLedger:
+        def __init__(self, repo):
+            pass
+
+        async def reset_shared_risk(self, **kw):
+            return {'reset': True, 'risk_epoch_start_ms': 300000}
+    monkeypatch.setattr(regime_live_ledger, 'RegimeLiveLedger', FakeLedger)
+    w = _worker()
+    w.repository.record_risk_event.side_effect = RuntimeError('db')
+    result = await PredictionWorker.reset_regime_risk(w)
+    assert result['regime_risk_reset']['reset']
+    assert result['regime_risk_reset']['risk_event_recorded'] is False

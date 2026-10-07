@@ -3116,20 +3116,26 @@ class PredictionWorker(LoopMarketWorker):
                     }
             from src.gridbot.prediction.regime_live_ledger import RegimeLiveLedger
 
+            # Stop the old loop before the halt clears so it can never enter
+            # in the window between the reset commit and the stop.
+            active_loop = await self.repository.get_active_loop()
+            if active_loop and hasattr(self.repository, "request_operator_stop"):
+                await self.repository.request_operator_stop(str(active_loop.get("loop_id") or ""))
             result = await RegimeLiveLedger(self.repository).reset_shared_risk(
                 now_ms=self._now_ms(), reason=str(reason))
             if not result.get("reset"):
                 return {**self._status(), "action_denied": True,
                         "reason": str(result.get("reason")), "regime_risk_reset": result}
-            active_loop = await self.repository.get_active_loop()
-            if active_loop and hasattr(self.repository, "request_operator_stop"):
-                await self.repository.request_operator_stop(str(active_loop.get("loop_id") or ""))
-            await self.repository.record_risk_event(
-                "REGIME_T6_MDD_RESET",
-                "WARNING",
-                "operator reset the shared T6 20-run MDD halt after a clean exposure check",
-                payload=result,
-            )
+            try:
+                await self.repository.record_risk_event(
+                    "REGIME_T6_MDD_RESET",
+                    "WARNING",
+                    "operator reset the shared T6 20-run MDD halt after a clean exposure check",
+                    payload=result,
+                )
+            except Exception:  # noqa: BLE001 - reset already committed; audit stays in risk_resets
+                LOGGER.exception("regime_t6_mdd_reset_event_failed")
+                result = {**result, "risk_event_recorded": False}
             return {**self._status(), "regime_risk_reset": result}
 
     async def cancel_loop(self, reason: str = "telegram operator cancelled loop") -> dict[str, Any]:
