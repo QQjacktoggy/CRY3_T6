@@ -56,6 +56,8 @@ def main(argv=None):
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--allow-cancelled-loop', action='store_true')
     parser.add_argument('--allow-historical-closed-ledger', action='store_true')
+    parser.add_argument('--allow-shared-mdd-halt', choices=ops.SHARED_HALTS,
+                        help='Tolerate (never reset) this halt on ' + ops.SHARED_RISK_KEY + ' only')
     args = parser.parse_args(argv)
     if os.getuid() == 0:
         raise RuntimeError('Run as application user jack_shih')
@@ -63,7 +65,8 @@ def main(argv=None):
     backup, before, candidate, old, old_pin, services, current = load(args.backup)
     loop_id = args.loop_id or before['loop_id']
     take = lambda: ops.snapshot(loop_id, allow_cancelled=args.allow_cancelled_loop,
-                                allow_historical_closed=args.allow_historical_closed_ledger)
+                                allow_historical_closed=args.allow_historical_closed_ledger,
+                                allow_shared_halt=args.allow_shared_mdd_halt)
     guard = ops.guard_bytes()
     # Parent code cannot run a T6.9 selection; switch strategy in Telegram first.
     if T69 in (ops.selected_profile(), ops.selected_profile('prediction_pending_strategy')):

@@ -449,3 +449,65 @@ def test_snapshot_matches_latest_vm_boundary_on_migrated_db(tmp_path, monkeypatc
         db.commit()
     with pytest.raises(RuntimeError, match='Risk latch'):
         ops.snapshot(loop)
+
+
+def test_shared_mdd_halt_flag_tolerates_only_that_halt(tmp_path, monkeypatch):
+    import sqlite3
+    ops = module('t69_ops')
+    repo = Path(__file__).resolve().parents[1]
+    (tmp_path / 'prediction/data').mkdir(parents=True)
+    path = tmp_path / 'prediction/data/prediction.sqlite3'
+    loop = 'loop:1'
+    with closing(sqlite3.connect(path)) as db:
+        for sql in sorted((repo / 'src/gridbot/prediction/migrations').glob('*.sql')):
+            db.executescript(sql.read_text())
+        db.execute("INSERT INTO prediction_loops(loop_id,state,target,completed,created_at_ms,updated_at_ms,"
+                   "strategy_profile) VALUES (?, 'DONE', 100, 100, 1, 1, 'regime_target6_9_v1')", (loop,))
+        db.commit()
+    monkeypatch.setattr(ops, 'ROOT', tmp_path)
+
+    def put(key, value):
+        with closing(sqlite3.connect(path)) as db:
+            db.execute('INSERT OR REPLACE INTO prediction_runtime_config VALUES (?,?,1)', (key, json.dumps(value)))
+            db.commit()
+
+    halt = {'halt_reason': 'scheduled20_mdd_3.5', 'fingerprint': 'f'}
+    put('regime_target6_risk_v1', halt)
+    with pytest.raises(RuntimeError, match='Risk latch'):
+        ops.snapshot(loop)  # no flag: still refused
+    before = path.read_bytes()
+    state = ops.snapshot(loop, allow_shared_halt='scheduled20_mdd_3.5')
+    # The halt is reported unchanged and the database is untouched.
+    assert json.loads(state['protected']['regime_target6_risk_v1']) == halt and path.read_bytes() == before
+    for key, value in [('regime_target6_risk_v1', {'halt_reason': 'cumulative_loss_6'}),
+                       ('regime_target6_risk_v1', {'halt_reason': 'unknown_order_reconciliation_required'}),
+                       ('regime_target6_risk_v1', dict(halt, latched=True)),
+                       ('regime_target6_risk_v1', dict(halt, hard_stop_latched=True)),
+                       ('prediction_hard_stop_latched', {'halt_reason': 'scheduled20_mdd_3.5'}),
+                       ('regime_target6_9_loop_risk:loop:1', {'halt_reason': 'scheduled20_mdd_3.5'})]:
+        put('regime_target6_risk_v1', halt)
+        put(key, value)
+        with pytest.raises(RuntimeError, match='Risk latch'):
+            ops.snapshot(loop, allow_shared_halt='scheduled20_mdd_3.5')
+        with closing(sqlite3.connect(path)) as db:
+            db.execute("DELETE FROM prediction_runtime_config WHERE config_key<>'regime_target6_risk_v1'")
+            db.commit()
+    put('regime_target6_risk_v1', halt)
+    with pytest.raises(RuntimeError, match='Risk latch'):
+        ops.snapshot(loop, allow_shared_halt='cumulative_loss_6')  # not an allowed name
+
+
+def test_shared_mdd_halt_flag_reaches_snapshot_and_rollback(env, capsys):
+    env.install()  # default stays strict
+    assert all(c.kwargs['allow_shared_halt'] is None for c in env.mocks['snapshot'].call_args_list)
+    env.mocks['snapshot'].reset_mock()
+    with pytest.raises(SystemExit):
+        env.install('--allow-shared-mdd-halt', 'cumulative_loss_6')
+    env.install('--allow-shared-mdd-halt', 'scheduled20_mdd_3.5')
+    assert all(c.kwargs['allow_shared_halt'] == 'scheduled20_mdd_3.5' for c in env.mocks['snapshot'].call_args_list)
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])['status'] == 'READ_ONLY_PREFLIGHT_PASSED'
+    env.install('--apply', '--allow-shared-mdd-halt', 'scheduled20_mdd_3.5')
+    assert '--allow-shared-mdd-halt scheduled20_mdd_3.5' in (env.backup() / 'rollback.txt').read_text()
+    env.mocks['snapshot'].reset_mock()
+    roll(env, '--allow-shared-mdd-halt', 'scheduled20_mdd_3.5')
+    assert all(c.kwargs['allow_shared_halt'] == 'scheduled20_mdd_3.5' for c in env.mocks['snapshot'].call_args_list)

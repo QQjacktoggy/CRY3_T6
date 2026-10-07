@@ -42,6 +42,9 @@ LEDGER_TABLES = ('prediction_loops', 'prediction_campaigns', 'prediction_fills',
 PROTECTED_KEYS = ('prediction_hard_stop_latched', 'prediction_risk_state', 'prediction_selected_strategy',
                   'prediction_selected_order_unit', 'prediction_pending_strategy', 'prediction_market_symbol',
                   'prediction_pending_market_symbol')
+SHARED_RISK_KEY = 'regime_target6_risk_v1'
+# Only halts an operator may name with --allow-shared-mdd-halt; the installer never clears them.
+SHARED_HALTS = ('scheduled20_mdd_3.5',)
 
 
 def digest(path):
@@ -78,7 +81,14 @@ def ledger(db):
     return hashes, protected
 
 
-def snapshot(loop_id, *, allow_cancelled=False, allow_historical_closed=False):
+def tolerated(key, risk, allow_shared_halt):
+    """The named shared 20-run MDD halt alone may stay; any other latch still blocks."""
+    return (allow_shared_halt in SHARED_HALTS and key == SHARED_RISK_KEY
+            and risk.get('halt_reason') == allow_shared_halt
+            and not risk.get('latched') and not risk.get('hard_stop_latched'))
+
+
+def snapshot(loop_id, *, allow_cancelled=False, allow_historical_closed=False, allow_shared_halt=None):
     """T6.8a boundary: target loop finished, nothing RUNNING, no open or UNKNOWN exposure."""
     with closing(prediction_db()) as db:
         db.execute('BEGIN')
@@ -108,7 +118,8 @@ def snapshot(loop_id, *, allow_cancelled=False, allow_historical_closed=False):
             risk_row = db.execute('SELECT config_value_json FROM prediction_runtime_config WHERE config_key=?', (key,)).fetchone()
             if risk_row:
                 risk = json.loads(risk_row[0])
-                if risk.get('latched') or risk.get('hard_stop_latched') or risk.get('halt_reason'):
+                if (risk.get('latched') or risk.get('hard_stop_latched') or risk.get('halt_reason')) \
+                        and not tolerated(key, risk, allow_shared_halt):
                     raise RuntimeError('Risk latch remains; deployment must not reset it')
         hashes, protected = ledger(db)
         return dict(loop=dict(row), protected=protected, ledger=hashes)

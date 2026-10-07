@@ -93,6 +93,7 @@ def write_backup(backup, plan, before, services, args):
     here = Path(__file__).resolve().parent
     flags = ' --allow-cancelled-loop' if args.allow_cancelled_loop else ''
     flags += ' --allow-historical-closed-ledger' if args.allow_historical_closed_ledger else ''
+    flags += f' --allow-shared-mdd-halt {args.allow_shared_mdd_halt}' if args.allow_shared_mdd_halt else ''
     command = f'{ops.ROOT / ops.VENV_PYTHON} {here}/t69_rollback.py --backup {backup}{flags}'
     (backup / 'rollback.txt').write_text(
         '# Read-only rollback preflight, then the same command with --apply.\n'
@@ -159,11 +160,14 @@ def main(argv=None):
     parser.add_argument('--apply', action='store_true', help='Install code and cold-reload services; no Live activation')
     parser.add_argument('--allow-cancelled-loop', action='store_true')
     parser.add_argument('--allow-historical-closed-ledger', action='store_true')
+    parser.add_argument('--allow-shared-mdd-halt', choices=ops.SHARED_HALTS,
+                        help='Tolerate (never reset) this halt on ' + ops.SHARED_RISK_KEY + ' only')
     args = parser.parse_args(argv)
     ops.require_runtime()
     services = tuple(dict.fromkeys(ops.SERVICES + tuple(args.extra_service)))
     take = lambda: ops.snapshot(args.loop_id, allow_cancelled=args.allow_cancelled_loop,
-                                allow_historical_closed=args.allow_historical_closed_ledger)
+                                allow_historical_closed=args.allow_historical_closed_ledger,
+                                allow_shared_halt=args.allow_shared_mdd_halt)
     plan = load(args)
     guard = ops.guard_bytes()
     ops.evidence_preflight()
