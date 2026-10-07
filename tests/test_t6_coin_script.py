@@ -76,3 +76,28 @@ def test_unreadable_db_refuses_without_changes(tmp_path):
     result = _run(env, "use", "ETH")
     assert result.returncode == 5 and "讀不到" in result.stderr
     assert _calls(tmp_path) == []
+
+
+BTC = "cry3-regime-feature.service cry3-c180-favorite-signal.service"
+
+
+def test_non_btc_coin_stops_btc_producers(tmp_path):
+    env = _setup(tmp_path, selected="ETHUSDT")
+    result = _run(env, "use", "ETH")
+    assert result.returncode == 0, result.stderr
+    calls = _calls(tmp_path)
+    assert "disable --now cry3-regime-feature.service" in calls
+    assert "disable --now cry3-c180-favorite-signal.service" in calls
+    assert not any(c.startswith(("start", "enable")) and "regime-feature" in c for c in calls)
+    assert calls[-1] == "enable --now cry3-t67c-ethusdt-feature.service cry3-t67c-ethusdt-signal.service"
+
+
+def test_btc_runs_alone(tmp_path):
+    env = _setup(tmp_path, selected="BTCUSDT")
+    result = _run(env, "use", "BTC")
+    assert result.returncode == 0, result.stderr
+    calls = _calls(tmp_path)
+    assert calls[-1] == "enable --now " + BTC
+    assert not any(c.startswith("disable") and "regime-feature" in c for c in calls)
+    for coin in ("ethusdt", "bnbusdt"):
+        assert any(c.startswith("disable") and coin in c for c in calls)
