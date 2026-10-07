@@ -3063,6 +3063,81 @@ class PredictionWorker(LoopMarketWorker):
 
         return await self.reset_hard_stop_once(reason)
 
+    async def reset_regime_risk(self, reason: str = "telegram operator T6 MDD reset") -> dict[str, Any]:
+        """Reset the shared T6 20-run MDD halt after a zero-exposure check.
+
+        History stays untouched: only settlements from the next market slot
+        count again.  Any running loop is stopped; a new loop is required.
+        """
+
+        async with self._lock:
+            reconciliation = await self.reconcile()
+            unresolved = await self.repository.load_unresolved_intents()
+            active_campaigns = [
+                campaign
+                for campaign in self._active_campaigns.values()
+                if campaign.state not in {CampaignState.DONE, CampaignState.CANCELLED}
+            ]
+            if (
+                not bool(reconciliation.get("known"))
+                or int(reconciliation.get("orders") or 0) > 0
+                or unresolved
+                or active_campaigns
+            ):
+                return {
+                    **self._status(),
+                    "action_denied": True,
+                    "reason": "T6 MDD reset requires zero exposure and clean reconciliation",
+                    "reconciliation": reconciliation,
+                }
+            if self.settings.wallet_address:
+                try:
+                    positions_payload = await self._call_api(
+                        "query_positions",
+                        wallet_address=self.settings.wallet_address,
+                    )
+                    open_positions = [
+                        row
+                        for row in self._official_position_rows(positions_payload)
+                        if self._official_position_shares(row) > 0
+                    ]
+                except Exception as exc:  # noqa: BLE001 - reset must fail closed
+                    return {
+                        **self._status(),
+                        "action_denied": True,
+                        "reason": f"official position check failed: {type(exc).__name__}",
+                    }
+                if open_positions:
+                    return {
+                        **self._status(),
+                        "action_denied": True,
+                        "reason": "T6 MDD reset denied while an official position is open",
+                        "open_position_count": len(open_positions),
+                    }
+            from src.gridbot.prediction.regime_live_ledger import RegimeLiveLedger
+
+            # Stop the old loop before the halt clears so it can never enter
+            # in the window between the reset commit and the stop.
+            active_loop = await self.repository.get_active_loop()
+            if active_loop and hasattr(self.repository, "request_operator_stop"):
+                await self.repository.request_operator_stop(str(active_loop.get("loop_id") or ""))
+            result = await RegimeLiveLedger(self.repository).reset_shared_risk(
+                now_ms=self._now_ms(), reason=str(reason))
+            if not result.get("reset"):
+                return {**self._status(), "action_denied": True,
+                        "reason": str(result.get("reason")), "regime_risk_reset": result}
+            try:
+                await self.repository.record_risk_event(
+                    "REGIME_T6_MDD_RESET",
+                    "WARNING",
+                    "operator reset the shared T6 20-run MDD halt after a clean exposure check",
+                    payload=result,
+                )
+            except Exception:  # noqa: BLE001 - reset already committed; audit stays in risk_resets
+                LOGGER.exception("regime_t6_mdd_reset_event_failed")
+                result = {**result, "risk_event_recorded": False}
+            return {**self._status(), "regime_risk_reset": result}
+
     async def cancel_loop(self, reason: str = "telegram operator cancelled loop") -> dict[str, Any]:
         """Cancel the current loop after closing every known execution edge.
 

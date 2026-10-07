@@ -140,12 +140,19 @@ def walk(levels, fee_bps, cap=Decimal("0.90"), amount=Decimal("1")):
 
 
 def risk_result(state, settlements, start, now, *, unresolved=False, unknown=False):
-    """All lane loops, immutable epoch; historical triggers never expire."""
+    """All lane loops; triggers persist until an audited operator reset moves the risk epoch."""
     if state.get("fingerprint") != FINGERPRINT:
         return False, "policy_fingerprint_mismatch"
     anchor = int(state["first_market_start_ms"])
     if start < anchor or (start-anchor) % SLOT_MS:
         return False, "market_time_discontinuous"
+    # An audited operator reset moves only the risk-counting start; the
+    # 20-run block grid stays on the original anchor.
+    epoch = int(state.get("risk_epoch_start_ms") or anchor)
+    if epoch < anchor or (epoch-anchor) % SLOT_MS:
+        return False, "risk_epoch_invalid"
+    if start < epoch:
+        return False, "market_before_risk_epoch"
     if unknown:
         state["halt_reason"] = state.get("halt_reason") or "unknown_order_reconciliation_required"
     equity = normalized_equity = Decimal(0)
@@ -160,6 +167,8 @@ def risk_result(state, settlements, start, now, *, unresolved=False, unknown=Fal
             return False, "mixed_lane_provenance"
         pnl = dec(row.net_pnl_usdt)
         equity += pnl
+        if row.market_start_ms < epoch:
+            continue
         normalized = pnl / unit
         normalized_equity += normalized
         block = delta // SLOT_MS // 20

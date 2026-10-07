@@ -389,6 +389,11 @@ class PredictionController:
 
         return await self._invoke("reset_hard_stop", reason)
 
+    async def reset_regime_risk(self, reason: str = "telegram operator T6 MDD reset") -> Any:
+        """Run the worker's guarded shared T6 MDD reset; never mutate risk here."""
+
+        return await self._invoke("reset_regime_risk", reason)
+
     async def risk(self) -> Any:
         return await self._invoke("risk")
 

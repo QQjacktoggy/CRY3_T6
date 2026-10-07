@@ -30,6 +30,7 @@ RISK_PROFILES = (PROFILE, "regime_target6_1_v1", "regime_target6_2_v1",
 _RISK_MARKS = ",".join("?" for _ in RISK_PROFILES)
 TERMINAL_INTENTS = ("FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED")
 TERMINAL_ORDERS = ("FILLED", "CLOSED", "CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED")
+RESETTABLE_HALTS = ("scheduled20_mdd_3.5",)
 NO_FILL_TERMINAL = frozenset(("CANCELLED", "CANCELED", "EXPIRED", "FAILED", "REJECTED"))
 
 
@@ -265,6 +266,68 @@ class RegimeLiveLedger:
                config_value_json=excluded.config_value_json,updated_at_ms=excluded.updated_at_ms""",
             (self.state_key, json.dumps(state, sort_keys=True), now))
         return allowed, reason
+
+    async def reset_shared_risk(self, *, now_ms: int, reason: str) -> dict[str, Any]:
+        """Audited one-time reset of the shared T6 20-run MDD halt.
+
+        Only a scheduled20 MDD halt can be reset (never cumulative loss), and
+        only with every T6 LIVE settlement known and no unknown order.  The
+        risk count restarts at the next market slot; history is never edited.
+        """
+        async with self.repository._operation_gate.lock:
+            conn = self.repository._require_conn()
+            await self.repository._begin(conn)
+            try:
+                result = await self._reset_shared_risk_conn(conn, int(now_ms), str(reason))
+                await conn.commit()
+                return result
+            except BaseException:
+                await conn.rollback()
+                raise
+
+    async def _reset_shared_risk_conn(self, conn, now, reason):
+        row = await self._row(conn,
+            "SELECT config_value_json FROM prediction_runtime_config WHERE config_key=?",
+            (self.state_key,))
+        if not row:
+            return {"reset": False, "reason": "risk_state_missing"}
+        state = json.loads(row["config_value_json"])
+        halt = state.get("halt_reason")
+        if state.get("fingerprint") != FINGERPRINT:
+            return {"reset": False, "reason": "policy_fingerprint_mismatch"}
+        if halt not in RESETTABLE_HALTS:
+            return {"reset": False, "reason": "not_resettable", "halt_reason": halt}
+        loops = await self._rows(conn,
+            "SELECT * FROM prediction_loops WHERE strategy_profile IN ("+_RISK_MARKS+") AND mode='LIVE'",
+            RISK_PROFILES)
+        unknown = await self._row(conn,
+            """SELECT 1 FROM prediction_campaigns c JOIN prediction_loops l ON l.loop_id=c.loop_id
+               WHERE l.strategy_profile IN ("""+_RISK_MARKS+""") AND l.mode='LIVE' AND
+               (c.pending_unknown=1 OR EXISTS(SELECT 1 FROM prediction_order_intents i
+                 WHERE i.campaign_id=c.campaign_id AND i.unknown=1)) LIMIT 1""", RISK_PROFILES)
+        if unknown:
+            return {"reset": False, "reason": "unknown_order_reconciliation_required"}
+        reads = _LoopSnapshotReads(self, conn, loops)
+        for loop in loops:
+            snapshot = await self._snapshot_conn(reads, loop["loop_id"], now)
+            if not snapshot.complete:
+                return {"reset": False, "reason": "lane_ledger_incomplete"}
+            if snapshot.unresolved_market_starts:
+                return {"reset": False, "reason": "prior_exposure_or_settlement_pending"}
+        anchor = int(state["first_market_start_ms"])
+        epoch = anchor + -(-max(0, now-anchor) // SLOT_MS) * SLOT_MS
+        audit = {"at_ms": now, "reason": reason, "prior_halt_reason": halt,
+                 "prior_risk_equity_1u": state.get("risk_equity_1u"),
+                 "prior_risk_epoch_start_ms": state.get("risk_epoch_start_ms"),
+                 "risk_epoch_start_ms": epoch}
+        state.update(halt_reason=None, risk_epoch_start_ms=epoch,
+                     risk_resets=[*(state.get("risk_resets") or []), audit][-50:])
+        await conn.execute(
+            """INSERT INTO prediction_runtime_config(config_key,config_value_json,updated_at_ms)
+               VALUES(?,?,?) ON CONFLICT(config_key) DO UPDATE SET
+               config_value_json=excluded.config_value_json,updated_at_ms=excluded.updated_at_ms""",
+            (self.state_key, json.dumps(state, sort_keys=True), now))
+        return {"reset": True, **audit}
 
     async def check_risk(self, loop_id, start, now):
         async with self.repository._operation_gate.lock:

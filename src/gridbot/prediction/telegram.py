@@ -100,6 +100,8 @@ ORDER_UNIT_CALLBACK_PREFIX = "predict_amount:"
 HARD_STOP_CALLBACK_PREFIX = "predict_hard_stop:"
 CANCEL_LOOP_CALLBACK_PREFIX = "predict_cancel:"
 MONITOR_CALLBACK_PREFIX = "predict_monitor:"
+T6_RESET_CALLBACK_PREFIX = "predict_t6reset:"
+T6_RESETTABLE_HALT = "scheduled20_mdd_3.5"
 SELECTABLE_LANES = (
     ('regime_target6_9a_v1', 'T6.9b T6.7c七路＋First UP≥5bp Live＋Flat Shadow（BTC／ETH／BNB；1/2/3U）'),
     ('regime_target6_9_v1', 'T6.9 T6.8a Live＋Flat Shadow（BTC／ETH／BNB；1/2/3U）'),
@@ -214,6 +216,7 @@ class PredictionRuntime(Protocol):
     async def pause(self) -> Any: ...
     async def resume(self) -> Any: ...
     async def reset_hard_stop_once(self, reason: str = "telegram operator hard-stop reset") -> Any: ...
+    async def reset_regime_risk(self, reason: str = "telegram operator T6 MDD reset") -> Any: ...
     async def risk(self) -> Any: ...
     async def reconcile(self) -> Any: ...
     async def set_shadow_mode(self, enabled: bool) -> Any: ...
@@ -1114,6 +1117,13 @@ def format_runtime_result(title: str, result: Any) -> str:
     return f"【{title}】\n\n{body}"
 
 
+def _t6_mdd_halted(value: Any) -> bool:
+    """True only for the shared T6 20-run MDD halt the reset can clear."""
+
+    risk = value.get("regime_lane_risk") if isinstance(value, Mapping) else None
+    return isinstance(risk, Mapping) and risk.get("halt_reason") == T6_RESETTABLE_HALT
+
+
 def _mapping_hard_stop(value: Any) -> bool | None:
     """Read only explicit hard-stop signals; never infer from a generic PnL."""
 
@@ -1182,6 +1192,7 @@ class PredictionTelegramService:
         self._confirmation_ttl_ms = max(1, int(confirmation_ttl_seconds)) * 1000
         self._pending_confirmation: _PendingLiveConfirmation | None = None
         self._pending_hard_stop_reset: _PendingHardStopReset | None = None
+        self._pending_t6_reset: _PendingHardStopReset | None = None
         self._pending_loop_cancel: _PendingLoopCancel | None = None
         self._hard_stop_date: str | None = None
         self._monitor_confirmed_state: str | None = None
@@ -1341,6 +1352,17 @@ class PredictionTelegramService:
         )
 
     @staticmethod
+    def _t6_reset_markup() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton(
+                    "🔓 解除 T6 MDD 停單鎖",
+                    callback_data=f"{T6_RESET_CALLBACK_PREFIX}request",
+                )
+            ]]
+        )
+
+    @staticmethod
     def _cancel_loop_markup() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [[
@@ -1360,6 +1382,8 @@ class PredictionTelegramService:
         ]]
         if _mapping_hard_stop(value):
             rows.extend(self._hard_stop_reset_markup().inline_keyboard)
+        if _t6_mdd_halted(value):
+            rows.extend(self._t6_reset_markup().inline_keyboard)
         loop_active = bool(value.get("loop_active"))
         if not loop_active and value.get("loop_id"):
             loop_active = str(value.get("loop_state") or "RUNNING").upper() == "RUNNING"
@@ -1817,11 +1841,86 @@ class PredictionTelegramService:
         # process restart.  No command in this class clears that latch.
         if _mapping_hard_stop(payload):
             self._hard_stop_date = self._today_key()
+        rows = []
+        if _mapping_hard_stop(payload):
+            rows.extend(self._hard_stop_reset_markup().inline_keyboard)
+        if _t6_mdd_halted(payload):
+            rows.extend(self._t6_reset_markup().inline_keyboard)
         await self._reply(
             update,
             format_runtime_result("風控狀態", payload),
-            reply_markup=self._hard_stop_reset_markup() if _mapping_hard_stop(payload) else None,
+            reply_markup=InlineKeyboardMarkup(rows) if rows else None,
         )
+
+    async def cmd_predict_t6_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show a bound, expiring confirmation for the shared T6 MDD reset."""
+
+        if await self._deny_if_unauthorized(update):
+            return
+        payload, error = await self._read_risk()
+        if error:
+            await self._reply(update, f"無法確認 T6 停單鎖，未建立解除。\n原因：{error}")
+            return
+        if not _t6_mdd_halted(payload):
+            await self._reply(update, "目前沒有 T6 20 場 MDD 停單鎖，不需要解除。")
+            return
+        token = str(self._token_factory())
+        pending = _PendingHardStopReset(
+            token,
+            _chat_id(update) or "",
+            self._now_ms() + self._confirmation_ttl_ms,
+        )
+        async with self._lock:
+            self._pending_t6_reset = pending
+        keyboard = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton(
+                    "確認解除（執行）",
+                    callback_data=f"{T6_RESET_CALLBACK_PREFIX}confirm:{token}",
+                ),
+                InlineKeyboardButton("取消", callback_data=f"{T6_RESET_CALLBACK_PREFIX}cancel"),
+            ]]
+        )
+        await self._reply(
+            update,
+            "解除 T6 20 場 MDD 停單鎖：歷史 PnL 不變，從下一場起重新計算 MDD 與累計虧損。\n"
+            "需通過交易同步、零曝險、所有結算已知；目前 Loop 會停止，解除後要開新 Loop 才會下單。\n"
+            "之後再觸發仍會鎖住。請在 60 秒內確認：",
+            reply_markup=keyboard,
+        )
+
+    async def _confirm_t6_reset(self, update: Update, token: str) -> None:
+        if await self._deny_if_unauthorized(update):
+            return
+        async with self._lock:
+            pending = self._pending_t6_reset
+            self._pending_t6_reset = None
+        if pending is None or pending.token != token or pending.chat_id != (_chat_id(update) or ""):
+            await self._reply(update, "解除確認碼無效或已使用，T6 停單鎖未變更。")
+            return
+        if self._now_ms() >= pending.expires_at_ms:
+            await self._reply(update, "解除確認碼已過期，T6 停單鎖未變更。")
+            return
+        payload, error = await self._read_risk()
+        if error or not _t6_mdd_halted(payload):
+            await self._reply(update, "確認時 T6 停單鎖狀態已改變，未執行解除。")
+            return
+        try:
+            result = await self._invoke(("reset_regime_risk",), "telegram operator T6 MDD reset")
+        except Exception as exc:  # noqa: BLE001 - reset must stay fail-closed
+            await self._reply(update, f"T6 停單鎖解除失敗，系統仍保持鎖定。\n錯誤類型：{type(exc).__name__}")
+            return
+        detail = result.get("regime_risk_reset") if isinstance(result, Mapping) else None
+        if isinstance(detail, Mapping) and detail.get("reset"):
+            epoch = datetime.fromtimestamp(int(detail["risk_epoch_start_ms"]) / 1000, TAIPEI)
+            await self._reply(
+                update,
+                "【T6 MDD 停單鎖已解除】\n"
+                f"新風控起點：{epoch:%m-%d %H:%M} 台灣時間起的市場\n"
+                "目前 Loop 已停止。用 Loop 5/10/20/100 開新 Loop 才會下單。",
+            )
+            return
+        await self._reply(update, format_runtime_result("T6 停單鎖未解除", result))
 
     async def cmd_predict_hard_stop_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show a bound, expiring confirmation for a guarded hard-stop reset."""
@@ -2105,6 +2204,18 @@ class PredictionTelegramService:
         cancel_loop_marker = f"{CANCEL_LOOP_CALLBACK_PREFIX}confirm:"
         if data.startswith(cancel_loop_marker):
             await self._confirm_loop_cancel(update, data[len(cancel_loop_marker):])
+            return
+        if data == f"{T6_RESET_CALLBACK_PREFIX}request":
+            await self.cmd_predict_t6_reset(update, context)
+            return
+        if data == f"{T6_RESET_CALLBACK_PREFIX}cancel":
+            async with self._lock:
+                self._pending_t6_reset = None
+            await self._reply(update, "已取消解除，T6 停單鎖維持不變。")
+            return
+        t6_reset_marker = f"{T6_RESET_CALLBACK_PREFIX}confirm:"
+        if data.startswith(t6_reset_marker):
+            await self._confirm_t6_reset(update, data[len(t6_reset_marker):])
             return
         if data == f"{HARD_STOP_CALLBACK_PREFIX}request":
             await self.cmd_predict_hard_stop_reset(update, context)
@@ -2463,12 +2574,13 @@ def build_prediction_handlers(service: PredictionTelegramService) -> tuple[Any, 
         CommandHandler("predict_resume", service.cmd_predict_resume),
         CommandHandler("predict_risk", service.cmd_predict_risk),
         CommandHandler("predict_hard_stop_reset", service.cmd_predict_hard_stop_reset),
+        CommandHandler("predict_t6_reset", service.cmd_predict_t6_reset),
         CommandHandler("predict_reconcile", service.cmd_predict_reconcile),
         CommandHandler("predict_shadow", service.cmd_predict_shadow),
         CommandHandler("predict_live", service.cmd_predict_live),
         CommandHandler("lanes", service.cmd_lanes),
         CommandHandler("predict_lanes", service.cmd_lanes),
-        CallbackQueryHandler(service.handle_callback, pattern=r"^predict_(shadow|lane|market|amount|hard_stop|cancel|monitor):"),
+        CallbackQueryHandler(service.handle_callback, pattern=r"^predict_(shadow|lane|market|amount|hard_stop|t6reset|cancel|monitor):"),
     )
 
 
@@ -2545,6 +2657,10 @@ async def cmd_predict_hard_stop_reset(update: Update, context: ContextTypes.DEFA
     await _service_from_context(context).cmd_predict_hard_stop_reset(update, context)
 
 
+async def cmd_predict_t6_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _service_from_context(context).cmd_predict_t6_reset(update, context)
+
+
 async def cmd_predict_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _service_from_context(context).cmd_predict_reconcile(update, context)
 
@@ -2587,6 +2703,7 @@ __all__ = [
     "cmd_predict_resume",
     "cmd_predict_risk",
     "cmd_predict_hard_stop_reset",
+    "cmd_predict_t6_reset",
     "cmd_predict_reconcile",
     "cmd_predict_shadow",
     "cmd_predict_live",
