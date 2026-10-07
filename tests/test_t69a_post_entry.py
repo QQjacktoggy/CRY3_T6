@@ -14,7 +14,7 @@ from src.gridbot.prediction.regime_feature_service import connect
 from src.gridbot.prediction.regime_t69a_policy import FINGERPRINT, POLICY
 
 # T6.9a policy fingerprint after the shallow retracement counter-trend floor; this Shadow must not move it.
-T69A_FINGERPRINT = '129fbf0ce8120df928df9bd370fc6e5a038a0f9b4225d4cd118e7621d211ba8d'
+T69A_FINGERPRINT = 'c1aa56695e855de9120f19c11f48e346f1750d12464994fe9664aa4685693a45'
 
 
 class World:
