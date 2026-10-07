@@ -1083,7 +1083,7 @@ def format_runtime_result(title: str, result: Any) -> str:
             else:
                 lines += ["已選定；尚未建立新 Loop。"]
                 if value.get("producer_switch") == "done":
-                    lines += ["資料程式已切到此幣（BTC 基準保留，其他幣與觀測器已停）。"]
+                    lines += ["資料程式已切到此幣（只跑此幣，其他幣與觀測器已停）。"]
                 elif value.get("producer_switch") == "unavailable":
                     lines += ["VM 未安裝 scripts/t6_coin.sh，資料程式未切換。"]
                 ready = value.get("producer_warmup_until_ms")
