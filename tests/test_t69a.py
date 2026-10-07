@@ -55,8 +55,12 @@ def test_policy_is_t67c_lanes_plus_first_up_floor_on_t69_packaging():
     # Everything else that decides an early-window entry matches T6.7c.
     for key in ('routing', 'new_priority', 'decision_ms', 'last_selection_ms', 'entry_ms',
                 'quote_ttl_ms', 'core_expiry_ms', 'original_input_ms', 'book_max_age_ms', 'units',
-                'shallow_retracement', 'risk_state_key', 'loop_mdd_1u'):
+                'risk_state_key', 'loop_mdd_1u'):
         assert POLICY[key] == t67c[key], key
+    # Shallow retracement keeps the T6.7c rule plus the counter-trend prior floor.
+    shallow = dict(POLICY['shallow_retracement'])
+    assert shallow.pop('prior_against_min_bp') == '5'
+    assert shallow == t67c['shallow_retracement']
     # C-UP mirror keeps the T6.7c rule but its price cap is .70 instead of .75.
     mirror, base = dict(POLICY['c_mirror_up_prior']), dict(t67c['c_mirror_up_prior'])
     assert mirror.pop('price_band') == ['0.65', '0.70'] and base.pop('price_band') == ['0.65', '0.75']
@@ -77,7 +81,11 @@ SCENARIOS = [
     (2, '.2', 2, '.6', '.4'),      # stall DOWN
     (2, -4, -2, '.3', '.7'),       # C DOWN
     (-1, 3, 2, '.7', '.3'),        # C-UP prior mirror
-    (2, -1, -2, '.6', '.4'),       # shallow retracement
+    (2, -1, -2, '.6', '.4'),       # shallow UP, prior not against by 5bp: T6.9a skips it
+    (2, -1, '-4.999999', '.6', '.4'),
+    (2, -1, -5, '.6', '.4'),       # shallow UP at the counter-trend floor: allowed
+    ('-1.5', '.7', 7, '.4', '.6'),  # shallow DOWN after a rising prior: allowed
+    ('-1.5', '.7', 3, '.4', '.6'),  # shallow DOWN, prior rise under 5bp: skipped
     (2, 1, 2, '.8', '.2'),         # continuation Original
     ('.1', '.1', 0, '.5', '.5'),   # flat: no Live lane
 ]
@@ -97,6 +105,15 @@ def test_decisions_match_t67c_except_weak_first_up(tmp_path, first, last, prior,
         assert new.reason == 't69a_first_up_prior_below_5bp'
         assert d['rejected_branches'][0]['branch'] == 'core_first_up'
         return
+    if old.allowed and old.reason.endswith(':shallow_retracement'):
+        side = old.signal.entry.side
+        against = D(str(prior)) <= -5 if side == 'UP' else D(str(prior)) >= 5
+        if not against:
+            assert not new.allowed and new.reason == 't69a_shallow_prior_not_against_5bp'
+            assert d['selected'] is False
+            assert d['rejected_branches'] == [dict(branch='shallow_retracement', reason='shallow_prior_not_against_5bp',
+                                                   prior_bp=str(d['core_guard']['features']['prior_bp']), side=side)]
+            return
     assert new.allowed == old.allowed, (old.reason, new.reason)
     if old.allowed:
         assert new.signal.entry.side == old.signal.entry.side

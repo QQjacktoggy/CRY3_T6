@@ -1,40 +1,22 @@
-"""T6.9a shallow retracement counter-trend filter: Shadow, report only.
+"""T6.9a shallow retracement counter-trend floor: report lines only.
 
-Splits this loop's selected 淺回撤 decisions by whether the prior 15-minute move
-(the frozen ``prior_bp`` feature) ran against the bet by at least 5bp, then shows
-each group's official result. Nothing is written and Live selection is unchanged:
-this module only reads the decision table and saved official winners.
+Live takes 淺回撤 only when the frozen prior 15-minute move ran against the bet by
+at least 5bp (``POLICY['shallow_retracement']['prior_against_min_bp']``). This
+module reads the decision table and saved official winners to show both sides of
+that floor: the shallow entries Live selected, and the shallow candidates it
+skipped with whether they would have won. Nothing is written.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from contextlib import closing
 from decimal import Decimal
 
-from .regime_lane import dec
-from .regime_t69a_policy import FINGERPRINT
+from .regime_t69a_policy import FINGERPRINT, POLICY
 
-SHALLOW_FILTER = dict(
-    branch='shallow_retracement', feature='core_guard.features.prior_bp',
-    rule='prior_bp_against_side', against_min_bp='5',
-    mode='report_only_no_writes_no_live_effect',
-)
-SHALLOW_FILTER_POLICY = dict(base_fingerprint=FINGERPRINT, version=1, shallow_filter=SHALLOW_FILTER)
-SHALLOW_FILTER_FINGERPRINT = hashlib.sha256(json.dumps(SHALLOW_FILTER_POLICY, sort_keys=True).encode()).hexdigest()
-GROUPS = (('pass', '逆勢≥5bp（通過）'), ('fail', '其他（不通過）'))
-
-
-def passes(side, prior_bp):
-    """True when the prior move ran against ``side`` by at least the threshold."""
-    floor = dec(SHALLOW_FILTER['against_min_bp'])
-    prior = dec(prior_bp)
-    if side == 'UP':
-        return prior <= -floor
-    if side == 'DOWN':
-        return prior >= floor
-    raise ValueError('shallow side invalid')
+BRANCH = 'shallow_retracement'
+SKIP_REASON = 'shallow_prior_not_against_5bp'
 
 
 def _paper_pnl(d, winner):
@@ -49,9 +31,9 @@ def _paper_pnl(d, winner):
 
 def metrics(root, *, now, loop_id, slots, official, filled_starts=frozenset()):
     from .loop_market import report_feature_path
-    result = {g: dict(candidates=0, fills=0, settled=0, wins=0, losses=0, pending=0, pnl=Decimal(0))
-              for g, _ in GROUPS}
-    result['unverified'] = 0
+    result = dict(taken=dict(selected=0, fills=0, settled=0, wins=0, losses=0, pending=0, pnl=Decimal(0)),
+                  skipped=dict(count=0, settled=0, would_win=0, would_lose=0, pending=0),
+                  unverified=0)
     slots = {int(s['market_start_ms']): s for s in slots if s.get('loop_id') == loop_id
              and s.get('verified_at_ms') is not None and int(s['market_start_ms']) <= now}
     path = report_feature_path(root, loop_id)
@@ -67,7 +49,12 @@ def metrics(root, *, now, loop_id, slots, official, filled_starts=frozenset()):
     for start, raw in rows:
         try:
             d = json.loads(raw)
-            if not isinstance(d, dict) or d.get('selected') is not True or d.get('branch') != SHALLOW_FILTER['branch']:
+            if not isinstance(d, dict):
+                raise ValueError('decision payload invalid')
+            taken = d.get('selected') is True and d.get('branch') == BRANCH
+            skips = [r for r in d.get('rejected_branches') or ()
+                     if r.get('branch') == BRANCH and r.get('reason') == SKIP_REASON]
+            if not taken and not (d.get('selected') is not True and skips):
                 continue
             slot = slots[start]
             if (d.get('fingerprint') != FINGERPRINT or d.get('loop_id') != loop_id
@@ -75,39 +62,59 @@ def metrics(root, *, now, loop_id, slots, official, filled_starts=frozenset()):
                     or str(d.get('market_id')) != str(slot.get('market_id'))
                     or str(d.get('market_topic')) != str(slot.get('market_topic_id'))):
                 raise ValueError('shallow decision identity mismatch')
-            group = result['pass' if passes(d['side'], d['core_guard']['features']['prior_bp']) else 'fail']
-            group['candidates'] += 1
-            group['fills'] += start in filled_starts
             winners = official.get((str(slot['market_topic_id']), str(slot['market_id']), start, start+300000), set())
-            if start+300000 > now or len(winners) != 1:
+            known = start+300000 <= now and len(winners) == 1
+            if taken:
+                group = result['taken']
+                group['selected'] += 1
+                group['fills'] += start in filled_starts
+                if not known:
+                    group['pending'] += 1
+                    continue
+                pnl = _paper_pnl(d, next(iter(winners)))
+                group['settled'] += 1
+                group['wins'] += pnl > 0
+                group['losses'] += pnl < 0
+                group['pnl'] += pnl
+                continue
+            side = skips[0]['side']
+            if side not in ('UP', 'DOWN'):
+                raise ValueError('shallow skip side invalid')
+            group = result['skipped']
+            group['count'] += 1
+            if not known:
                 group['pending'] += 1
                 continue
-            pnl = _paper_pnl(d, next(iter(winners)))
+            winner = next(iter(winners))
             group['settled'] += 1
-            group['wins'] += pnl > 0
-            group['losses'] += pnl < 0
-            group['pnl'] += pnl
-        except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError):
+            group['would_win'] += winner == side
+            group['would_lose'] += winner not in (side, 'DRAW')
+        except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError, IndexError):
             result['unverified'] += 1
     return result
 
 
+def _title():
+    floor = POLICY['shallow_retracement']['prior_against_min_bp']
+    return f'〔淺回撤逆勢條件（前15分逆向≥{floor}bp 才進 Live）〕'
+
+
 def report_lines(root, *, now, loop_id, slots, official, filled_starts=frozenset()):
     m = metrics(root, now=now, loop_id=loop_id, slots=slots, official=official, filled_starts=filled_starts)
-    lines = ['〔淺回撤逆勢條件（前15分逆向≥5bp；只記錄不改Live）〕']
-    for key, label in GROUPS:
-        g = m[key]
-        decisive = g['wins']+g['losses']
-        wr = f'{g["wins"]/decisive:.1%}' if decisive else '—'
-        pnl = f'{g["pnl"]:+.4f}' if g['settled'] else '—'
-        lines.append(f'{label}｜選中 {g["candidates"]}｜Live成交 {g["fills"]}｜已知WR {wr}'
-                     f'（{g["wins"]}勝/{g["losses"]}負）｜假設1U PnL {pnl}｜待結算 {g["pending"]}')
+    t, s = m['taken'], m['skipped']
+    decisive = t['wins']+t['losses']
+    wr = f'{t["wins"]/decisive:.1%}' if decisive else '—'
+    pnl = f'{t["pnl"]:+.4f}' if t['settled'] else '—'
+    lines = [_title(),
+             f'通過（Live）｜選中 {t["selected"]}｜成交 {t["fills"]}｜已知WR {wr}'
+             f'（{t["wins"]}勝/{t["losses"]}負）｜假設1U PnL {pnl}｜待結算 {t["pending"]}',
+             f'被擋（不下單）｜{s["count"]} 場｜若做會贏 {s["would_win"]}｜會輸 {s["would_lose"]}｜待結算 {s["pending"]}']
     if m['unverified']:
         lines.append(f'  淺回撤決策待核對 {m["unverified"]}；未核對不列收益。')
     return lines
 
 
 def empty_lines():
-    lines = ['〔淺回撤逆勢條件（前15分逆向≥5bp；只記錄不改Live）〕']
-    lines += [f'{label}｜選中 0｜Live成交 0｜已知WR —（0勝/0負）｜假設1U PnL —｜待結算 0' for _, label in GROUPS]
-    return lines
+    return [_title(),
+            '通過（Live）｜選中 0｜成交 0｜已知WR —（0勝/0負）｜假設1U PnL —｜待結算 0',
+            '被擋（不下單）｜0 場｜若做會贏 0｜會輸 0｜待結算 0']

@@ -1,4 +1,5 @@
-"""T6.9a: T6.7c seven Live lanes with the T6.8a First UP 5bp floor; Flat F1-F4 Shadow."""
+"""T6.9a: T6.7c seven Live lanes with the T6.8a First UP 5bp floor and a shallow
+retracement counter-trend floor (prior 15m against the bet by >=5bp); Flat F1-F4 Shadow."""
 import hashlib
 import json
 
@@ -36,7 +37,7 @@ POLICY = dict(
                            side='UP', price_band=['0.65', '0.70']),
     shallow_retracement=dict(opposite_minute_sign=True, first_abs_min_bp='1',
                              first_abs_to_last_abs_min='2', side='compounded_net',
-                             price_band=['0.10', '0.75']),
+                             price_band=['0.10', '0.75'], prior_against_min_bp='5'),
     flat_source_fingerprint=FLAT_FINGERPRINT,
     markets=MARKETS, market_binding='immutable_loop_symbol; isolated_asset_data',
     shadow='independent_public_quote_only; no_claim_no_live_risk_writes',
@@ -62,6 +63,6 @@ POLICY = dict(
     ),
     risk_state_key='regime_target6_risk_v1', loop_mdd_1u='3.5',
     shadow_retired=('external_lead_lag', 'reference_value'),
-    validation_mode='t67c_seven_live; first_up_prior_5bp; no_reference_180_backfill; flat_f1_f4_shadow_only; no_profit_or_fill_forecast',
+    validation_mode='t67c_seven_live; first_up_prior_5bp; shallow_prior_against_5bp; no_reference_180_backfill; flat_f1_f4_shadow_only; no_profit_or_fill_forecast',
 )
 FINGERPRINT = hashlib.sha256(json.dumps(POLICY, sort_keys=True).encode()).hexdigest()
