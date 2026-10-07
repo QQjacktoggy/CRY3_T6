@@ -58,6 +58,17 @@ def _additions(snapshot, features, unit):
     return choices
 
 
+def shallow_prior_against(side, prior_bp):
+    """True when the prior 15m move ran against ``side`` by at least the T6.9a floor."""
+    floor = dec(POLICY['shallow_retracement']['prior_against_min_bp'])
+    prior = dec(prior_bp)
+    if side == 'UP':
+        return prior <= -floor
+    if side == 'DOWN':
+        return prior >= floor
+    raise ValueError('shallow side invalid')
+
+
 class _FeaturesMissing(ValueError):
     pass
 
@@ -114,7 +125,7 @@ def _check_early(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
             raise ValueError('decision_payload_invalid')
         if not d['selected']:
             if d.get('rejected_branches'):
-                return b.C180Ready(False, 't69a_first_up_prior_below_5bp')
+                return b.C180Ready(False, 't69a_'+d['rejected_branches'][0]['reason'])
             return b.C180Ready(False, 't69a_no_live_candidate:'+guard['reason'])
         if at_ms < d['selected_at_ms']:
             return b.C180Ready(False, 't69a_frozen_selection_future')
@@ -189,10 +200,17 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
             raise ValueError('decision_payload_invalid')
         if not d['selected'] and guard.get('verified') is True and at_ms <= start+134500:
             choices = _additions(snapshot, guard['features'], unit_usdt) if guard['empty'] else guard['candidates']
+            prior = guard['features']['prior_bp']
             blocked = [c for c in choices if c['branch'] == 'core_first_up'
-                       and dec(guard['features']['prior_bp']) < dec(POLICY['first_up_prior_min_bp'])]
+                       and dec(prior) < dec(POLICY['first_up_prior_min_bp'])]
             d['rejected_branches'] = [dict(branch=c['branch'], reason='first_up_prior_below_5bp',
-                                           prior_bp=str(guard['features']['prior_bp'])) for c in blocked]
+                                           prior_bp=str(prior)) for c in blocked]
+            # Shallow retracement only when the prior 15m ran against the bet by >=5bp.
+            weak_shallow = [c for c in choices if c['branch'] == 'shallow_retracement'
+                            and not shallow_prior_against(c['side'], prior)]
+            d['rejected_branches'] += [dict(branch=c['branch'], reason='shallow_prior_not_against_5bp',
+                                            prior_bp=str(prior), side=c['side']) for c in weak_shallow]
+            blocked += weak_shallow
             choices = [c for c in choices if c not in blocked]
             d['eligible_branches'] = [c['branch'] for c in choices]
             for candidate in choices:
