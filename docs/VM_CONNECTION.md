@@ -66,7 +66,7 @@ gcloud compute ssh cry3jack \
 
 若環境支援環境變數型機密，名稱為 `CRY3_SSH_PRIVATE_KEY`，值為完整多行私鑰（不是路徑）。使用者的「管理機密」介面曾顯示「請檢查網域」，此介面的可用網域設定與機密注入尚未驗證，不能假定選「沒有網域」便能儲存。此次已驗證連線使用 workspace 中既有金鑰及 OAuth 憑證。
 
-目前 workspace 的 `/workspace/cry3-vm` 已支援在私鑰檔缺少時將此變數寫成權限 600 的檔案，且不印出值；既有私鑰不會被覆蓋。該腳本尚未隨 repo 發佈，新環境仍需取得腳本與 SDK。機密是否成功注入要在套用設定後確認，不能只依介面儲存判定。Google OAuth 登入仍需另外配置。
+目前 workspace 的 `/workspace/cry3-vm` 已支援在私鑰檔缺少時將此變數寫成權限 600 的檔案，且不印出值；既有私鑰不會被覆蓋。該腳本尚未隨 repo 發佈，新環境仍需取得腳本與 SDK。機密是否成功注入要在套用設定後確認，不能只依介面儲存判定。Google OAuth 登入仍需另外配置。IAP 通道也要 gcloud 驗證，只有私鑰不足以連線，見下方 service account 備案。
 
 - 先執行 `gcloud auth list`；有正確帳號時沿用，不要不必要地重做登入。
 - 沒有帳號時，執行 `gcloud auth login pennyfamily9512f@gmail.com --no-launch-browser`，由使用者完成 OAuth。驗證碼只適用於該次等待中的登入。
@@ -75,6 +75,28 @@ gcloud compute ssh cry3jack \
 - 憑證目錄與私鑰不能加入 Git、貼進對話或寫入說明文件。
 - 共用同一份檔案系統的 session 才能沿用登入。獨立環境要透過受支援的持久化檔案／Secrets 設定或重新登入。
 - 本指南只保存非敏感連線資訊，不會自動配置雲端環境、安裝 SDK 或移轉憑證。
+
+## 備案：Service account 金鑰（IAP）
+
+`cry3jack` 經 IAP 連線，IAP 通道本身也要 gcloud 驗證。VM 未對外開放 22 port 時，只注入 `CRY3_SSH_PRIVATE_KEY` 仍無法連線；新環境較穩的做法是以 service account 金鑰登入 gcloud。
+
+2026-10-08 曾見過的狀況：某雲端 session 的 `gcloud auth login` 顯示成功，但 Compute API 一律回 401「invalid authentication credentials」，proxy 無拒絕紀錄。遇到時不要反覆重做 OAuth，改用既有可連環境或本備案。
+
+Service account 需要的角色（盡量限縮於此 VM／專案，不要給 Owner／Editor）：
+
+- `roles/iap.tunnelResourceAccessor`：建立 IAP 通道。
+- `roles/compute.osAdminLogin`：OS Login 並可 `sudo -n -u jack_shih`；只有 `roles/compute.osLogin` 會在 sudo 失敗。
+- `roles/compute.viewer`：`gcloud compute ssh` 需讀取 VM 資訊。
+- 若 VM 掛有自己的 service account：在該帳號上授予 `roles/iam.serviceAccountUser`。
+- 防火牆需允許 IAP 範圍 `35.235.240.0/20` 至 port 22（現行 IAP 連線可用即表示已存在）。
+
+步驟：
+
+1. 金鑰 JSON 放入環境的機密設定，不入 Git、不貼進對話。
+2. 開新 session，以 `gcloud auth activate-service-account --key-file=<金鑰檔路徑>` 登入。
+3. 先執行同一條 `--command='date -Is; uptime'` 確認可連，再進行唯讀查詢。
+
+OS Login 使用者名稱會是 `sa_` 開頭的數字帳號，與 `pennyfamily9512f_gmail_com` 不同；查詢一律經 `sudo -n -u jack_shih`，不受影響。雲端容器若缺 `ssh`，`gcloud compute ssh` 會回 `Your platform does not support SSH`，需先安裝 `openssh-client`。
 
 ## 網路與已知環境問題
 
