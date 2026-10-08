@@ -1,0 +1,25 @@
+# User service for the separate /dash Telegram bot (read-only dashboard).
+# Install: ~/.config/systemd/user/cry3-dash-bot.service  (see README.md)
+# It is NOT part of the trading services and installing it restarts none of them.
+[Unit]
+Description=CRY3 T6 /dash dashboard bot (read-only, separate token)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/cry3/dash_bot.env
+ExecStart=/usr/bin/python3 -I %h/cry3/operators/dash_bot/dash_bot.py
+Restart=on-failure
+RestartSec=30
+# Hard resource caps so it can never crowd out trading.
+MemoryHigh=48M
+MemoryMax=64M
+MemorySwapMax=0
+CPUWeight=1
+CPUQuota=25%
+Nice=19
+IOSchedulingClass=idle
+TasksMax=8
+
+[Install]
+WantedBy=default.target
