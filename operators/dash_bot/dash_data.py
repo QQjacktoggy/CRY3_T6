@@ -272,10 +272,16 @@ def branch_stats(db: str = DEFAULT_DB, now_ms: int | None = None) -> dict:
             names = [r[0] for r in dcon.execute("SELECT name FROM sqlite_master WHERE type='table' "
                                                 "AND name LIKE '%decisions' AND name != 'decisions'")]
             for t in names:
-                for r in dcon.execute(f"SELECT start, payload FROM {t}"):
+                # Only start/payload decision tables (prediction_moe_shadow_decisions has neither).
+                cols = {c[1] for c in dcon.execute(f"PRAGMA table_info({t})")}
+                if not {"start", "payload"} <= cols:
+                    continue
+                for r in dcon.execute(f"SELECT start, payload FROM {t} WHERE start IS NOT NULL"):
                     try:
                         d = json.loads(r[1])
                     except Exception:
+                        continue
+                    if not isinstance(d, dict):
                         continue
                     lid = d.get("loop_id")
                     if lid not in loops:

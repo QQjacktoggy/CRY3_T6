@@ -197,6 +197,9 @@ def fill_stats(markets):
 def branch_section(bs):
     if not bs:
         return ""
+    if "error" in bs:
+        return (f"<h3>全部 T6 子策略成交統計</h3><p class=\"l\">這次讀取失敗：{H.escape(bs['error'])}。"
+                "其他區塊不受影響，下次按 /dash 會再試。</p>")
     t = bs["total"]
     per = lambda net, n: signed(d(net) / n) if n else "—"  # noqa: E731
     rate = lambda a, b: f"{100 * a / b:.1f}%" if b else "—"  # noqa: E731
@@ -278,8 +281,8 @@ def build_page(db, cache_dir: Path, now_ms=None, coin_fetch=None):
     head, loop = header(snap, flags)
     try:
         bs, _ = cached(cache_dir / "branch_stats.json", BRANCH_CACHE_S, lambda: dash_data.branch_stats(db, now_ms), now_s)
-    except Exception:
-        bs = None
+    except Exception as exc:  # show the failure instead of silently dropping the section
+        bs = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     shade = [(f"{coin_of(r)} {signed(r['filled_pnl'], 2)}", r["created_at_ms"],
               None if r.get("state") == "RUNNING" else r["updated_at_ms"]) for r in reversed(hist)]
     try:
