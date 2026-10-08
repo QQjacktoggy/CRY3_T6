@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -340,3 +340,40 @@ def branch_stats(db: str = DEFAULT_DB, now_ms: int | None = None) -> dict:
             "total": {**total, "net": str(total["net"])},
             "versions": [{"version": k, **v, "net": str(v["net"])} for k, v in sorted(versions.items())],
             "decision_tables": dict(tables)}
+
+
+# --- daily P&L (Taiwan calendar day) ------------------------------------------------------
+
+TW = timezone(timedelta(hours=8))
+
+
+def daily_pnl(db: str = DEFAULT_DB, days: int = 30, now_ms: int | None = None) -> list[dict]:
+    """Net P&L of LIVE loops per Taiwan day, oldest first (index idx_prediction_settlements_time)."""
+    now_ms = now_ms if now_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+    today = datetime.fromtimestamp(now_ms / 1000, TW).replace(hour=0, minute=0, second=0, microsecond=0)
+    first = today - timedelta(days=days - 1)
+    con = ro(db)
+    try:
+        live = {r[0] for r in con.execute("SELECT loop_id FROM prediction_loops WHERE mode='LIVE'")}
+        acc = {}
+        for r in con.execute("SELECT loop_id, net_pnl, settled_at_ms FROM prediction_settlements "
+                             "WHERE settled_at_ms>=? AND status='SETTLED'", (int(first.timestamp() * 1000),)):
+            if r[0] not in live:
+                continue
+            p = Decimal(str(r[1] or 0))
+            if p == 0:
+                continue
+            day = datetime.fromtimestamp(r[2] / 1000, TW).strftime("%Y-%m-%d")
+            a = acc.setdefault(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0)})
+            a["fills"] += 1
+            a["wins"] += p > 0
+            a["losses"] += p < 0
+            a["net"] += p
+    finally:
+        con.close()
+    out = []
+    for i in range(days):
+        day = (first + timedelta(days=i)).strftime("%Y-%m-%d")
+        a = acc.get(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0)})
+        out.append({"day": day, **a, "net": str(a["net"])})
+    return out

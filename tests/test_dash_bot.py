@@ -122,7 +122,7 @@ def test_page_has_every_section(tmp_path):
     db = make_db(tmp_path)
     now = LOOP_START + 1200000 + 30000
     page, cap = dash_page.build_page(str(db), tmp_path, now_ms=now, coin_fetch=fake_fetch)
-    for h in ("最近兩輪", "本輪成交統計", "全部 T6 子策略成交統計", "本輪逐場紀錄（新到舊）", "三幣反轉比較", "<svg"):
+    for h in ("最近兩輪", "每日總損益（台灣時間）", "本輪成交統計", "全部 T6 子策略成交統計", "本輪逐場紀錄（新到舊）", "三幣反轉比較", "<svg"):
         assert h in page, h
     assert "8aeb7317…" in page and "core_c_down</td><td>使用中" in page and "讀取失敗" not in page
     assert "2 勝" not in page and "1 勝 1 負" in page
@@ -161,3 +161,22 @@ def test_branch_section_shows_error_instead_of_vanishing(tmp_path, monkeypatch):
     monkeypatch.setattr(dash_data, "branch_stats", lambda *a: 1 / 0)
     page, _ = dash_page.build_page(str(db), tmp_path, now_ms=LOOP_START + 1230000, coin_fetch=fake_fetch)
     assert "全部 T6 子策略成交統計" in page and "讀取失敗" in page
+
+
+def test_daily_pnl_groups_by_taiwan_day(tmp_path):
+    db = make_db(tmp_path)
+    con = sqlite3.connect(db)
+    # 23:59 TW on the previous day vs 00:01 TW today (UTC 15:59 / 16:01)
+    day0 = LOOP_START - LOOP_START % 86400000 + 16 * 3600000 - 5 * 86400000  # 00:00 TW, away from loop:2 fills
+    con.execute("INSERT INTO prediction_settlements VALUES('sa','ca','loop:1',?,'UP','SETTLED','0.5')", (day0 - 60000,))
+    con.execute("INSERT INTO prediction_settlements VALUES('sb','cb','loop:1',?,'UP','SETTLED','-0.2')", (day0 + 60000,))
+    con.execute("INSERT INTO prediction_settlements VALUES('sc','cc','loop:x',?,'UP','SETTLED','9')", (day0 + 60000,))  # not LIVE
+    con.commit()
+    rows = {r["day"]: r for r in dash_data.daily_pnl(str(db), 30, day0 + 2 * 86400000)}
+    before = datetime.fromtimestamp((day0 - 60000) / 1000, dash_data.TW).strftime("%Y-%m-%d")
+    after = datetime.fromtimestamp((day0 + 60000) / 1000, dash_data.TW).strftime("%Y-%m-%d")
+    assert before != after
+    assert rows[before]["net"] == "0.5" and rows[before]["wins"] == 1
+    assert rows[after]["net"] == "-0.2" and rows[after]["losses"] == 1
+    html = dash_page.daily_section(list(rows.values()))
+    assert "<svg" in html and "累計" in html
