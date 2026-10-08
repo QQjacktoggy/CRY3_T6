@@ -1,5 +1,8 @@
 """T6.9a: T6.7c seven Live lanes with the T6.8a First UP 5bp floor and a shallow
-retracement counter-trend floor (prior 15m against the bet by >=5bp); Flat F1-F4 Shadow."""
+retracement counter-trend floor (prior 15m against the bet by >=5bp).
+
+core_continuation_original is switched off (0W/8L in Live): it still reserves the
+core slot, so no addition takes that market. Flat F1-F4 Shadow is retired."""
 import hashlib
 import json
 
@@ -14,16 +17,18 @@ TIER = 'REGIME_T69A'
 CORE_BRANCHES = ('core_first_down', 'core_first_up', 'core_stall_down',
                  'core_c_down', 'core_continuation_original')
 NEW_BRANCHES = ('c_mirror_up_prior', 'shallow_retracement')
-LIVE_BRANCHES = CORE_BRANCHES + NEW_BRANCHES
+DISABLED_BRANCHES = ('core_continuation_original',)
+LIVE_BRANCHES = tuple(b for b in CORE_BRANCHES + NEW_BRANCHES if b not in DISABLED_BRANCHES)
 MARKETS = ('BTCUSDT', 'ETHUSDT', 'BNBUSDT')
 FLAT_SHADOW_BRANCHES = ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
-SHADOW_BRANCHES = FLAT_SHADOW_BRANCHES
+SHADOW_BRANCHES = ()
 POLICY = dict(
     profile=PROFILE, version=1, parent_fingerprint=PARENT_FINGERPRINT,
     report_revision='pr12_verified_fixed_20run_v1', execution_revision='pr9_atomic_claim_selected_readonly_v1', core_fingerprint=CORE_FINGERPRINT,
     research_fingerprint=RESEARCH_FINGERPRINT, live=LIVE_BRANCHES,
     live_base_fingerprint=LIVE_BASE_FINGERPRINT, live_base='T6.7c_seven_lanes',
     routing='freeze_T65_candidates_at_initial_book; reserve_nonempty_core; new_only_verified_empty',
+    disabled=DISABLED_BRANCHES, disabled_rule='reserve_core_slot_no_entry',
     first_up_prior_min_bp='5',
     first_up_filter='frozen_positive_prior; preserve_original_core_reservation',
     new_priority=NEW_BRANCHES, one_market_one_buy=True,
@@ -62,7 +67,7 @@ POLICY = dict(
                            price_band=['0.70', '0.85'], after='core_entry_window'),
     ),
     risk_state_key='regime_target6_risk_v1', loop_mdd_1u='3.5',
-    shadow_retired=('external_lead_lag', 'reference_value'),
-    validation_mode='t67c_seven_live; first_up_prior_5bp; shallow_prior_against_5bp; no_reference_180_backfill; flat_f1_f4_shadow_only; no_profit_or_fill_forecast',
+    shadow_retired=('external_lead_lag', 'reference_value') + FLAT_SHADOW_BRANCHES,
+    validation_mode='t67c_seven_live; first_up_prior_5bp; shallow_prior_against_5bp; no_reference_180_backfill; continuation_original_off; flat_f1_f4_retired; no_profit_or_fill_forecast',
 )
 FINGERPRINT = hashlib.sha256(json.dumps(POLICY, sort_keys=True).encode()).hexdigest()

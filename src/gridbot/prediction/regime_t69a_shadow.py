@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .regime_lane import dec
 from .regime_t67_evidence import read_inputs
-from .regime_t69a_policy import PROFILE, FINGERPRINT
+from .regime_t69a_policy import PROFILE, FINGERPRINT, POLICY
 
 
 def schema(db):
@@ -36,7 +36,9 @@ def _usable_depth(book):
 
 
 def observe(db, prediction_db, signal_db, at_ms, symbol='BTCUSDT'):
-    """Flat F1-F4 paper quotes, recorded even when Live is filled/held."""
+    """Flat F1-F4 Shadow is retired in T6.9a; nothing is read or written."""
+    if not POLICY['shadow_branches']:
+        return 'flat_shadow_retired'
     start = at_ms//300000*300000
     if not start+60000 <= at_ms < start+270000:
         return 'outside_shadow_window'

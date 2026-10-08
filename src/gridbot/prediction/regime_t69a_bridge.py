@@ -211,6 +211,10 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
             d['rejected_branches'] += [dict(branch=c['branch'], reason='shallow_prior_not_against_5bp',
                                             prior_bp=str(prior), side=c['side']) for c in weak_shallow]
             blocked += weak_shallow
+            # Switched-off lanes keep the core slot but never enter.
+            off = [c for c in choices if c['branch'] in POLICY['disabled']]
+            d['rejected_branches'] += [dict(branch=c['branch'], reason='branch_disabled') for c in off]
+            blocked += off
             choices = [c for c in choices if c not in blocked]
             d['eligible_branches'] = [c['branch'] for c in choices]
             for candidate in choices:

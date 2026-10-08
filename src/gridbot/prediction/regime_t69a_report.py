@@ -12,7 +12,7 @@ LIVE_LABELS = {
     'core_first_up': 'first UP（前15分≥5bp）',
     'core_stall_down': 'stall DOWN',
     'core_c_down': '原 C DOWN',
-    'core_continuation_original': 'continuation Original',
+    'core_continuation_original': 'continuation Original（已停用）',
     'c_mirror_up_prior': 'C-UP 前趨勢鏡像',
     'shallow_retracement': '淺回撤',
 }
@@ -26,10 +26,8 @@ LIVE_GROUPS = (
     ('核心', ('core_first_down', 'core_first_up', 'core_stall_down', 'core_c_down', 'core_continuation_original')),
     ('增量', ('c_mirror_up_prior', 'shallow_retracement')),
 )
-SHADOW_GROUPS = (
-    ('Flat F1–F4', ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')),
-)
-HEADER = '📊 T6.9b Report｜七路 Live（T6.7c＋First UP 5bp）＋四路 Flat Shadow'
+SHADOW_GROUPS = ()  # Flat F1–F4 Shadow retired
+HEADER = '📊 T6.9b Report｜六路 Live（T6.7c＋First UP 5bp；continuation Original 停用）'
 LIVE_SIDES = {
     'core_first_down': {'DOWN'}, 'core_first_up': {'UP'}, 'core_stall_down': {'DOWN'},
     'core_c_down': {'DOWN'}, 'core_continuation_original': {'UP', 'DOWN'},

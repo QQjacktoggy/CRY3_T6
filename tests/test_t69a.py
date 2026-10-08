@@ -48,7 +48,10 @@ def state(bridge, table='t69a_decisions'):
 def test_policy_is_t67c_lanes_plus_first_up_floor_on_t69_packaging():
     from src.gridbot.prediction.regime_t67c_policy import POLICY as t67c, FINGERPRINT as t67c_fp
     from src.gridbot.prediction.regime_t69_policy import POLICY as t69, FINGERPRINT as t69_fp
-    assert LIVE_BRANCHES == tuple(t67c['live']) and 'reference_180_mid' not in LIVE_BRANCHES
+    # T6.7c lanes minus continuation Original, which is switched off but still reserves core.
+    assert POLICY['disabled'] == ('core_continuation_original',)
+    assert LIVE_BRANCHES == tuple(b for b in t67c['live'] if b != 'core_continuation_original')
+    assert 'reference_180_mid' not in LIVE_BRANCHES
     assert POLICY['first_up_prior_min_bp'] == '5' == t69['first_up_prior_min_bp']
     assert POLICY['live_base_fingerprint'] == t67c_fp and POLICY['parent_fingerprint'] == t69_fp
     assert not any(k.startswith(('reference_backfill', 'reference_entry', 'reference_last')) for k in POLICY)
@@ -65,8 +68,9 @@ def test_policy_is_t67c_lanes_plus_first_up_floor_on_t69_packaging():
     mirror, base = dict(POLICY['c_mirror_up_prior']), dict(t67c['c_mirror_up_prior'])
     assert mirror.pop('price_band') == ['0.65', '0.70'] and base.pop('price_band') == ['0.65', '0.75']
     assert mirror == base
-    assert POLICY['shadow_branches'] == t69['shadow_branches'][2:]
-    assert POLICY['shadow_retired'] == ('external_lead_lag', 'reference_value')
+    # Flat F1-F4 Shadow is retired too.
+    assert POLICY['shadow_branches'] == ()
+    assert POLICY['shadow_retired'] == ('external_lead_lag', 'reference_value') + t69['shadow_branches'][2:]
     assert POLICY['markets'] == ('BTCUSDT', 'ETHUSDT', 'BNBUSDT')
     assert FINGERPRINT not in (t67c_fp, t69_fp)
 
@@ -114,6 +118,12 @@ def test_decisions_match_t67c_except_weak_first_up(tmp_path, first, last, prior,
             assert d['rejected_branches'] == [dict(branch='shallow_retracement', reason='shallow_prior_not_against_5bp',
                                                    prior_bp=str(d['core_guard']['features']['prior_bp']), side=side)]
             return
+    if old.allowed and old.reason.endswith(':core_continuation_original'):
+        # Switched off: the market is skipped and no addition takes the core slot.
+        assert not new.allowed and new.reason == 't69a_branch_disabled'
+        assert d['selected'] is False and d['eligible_branches'] == []
+        assert d['rejected_branches'] == [dict(branch='core_continuation_original', reason='branch_disabled')]
+        return
     assert new.allowed == old.allowed, (old.reason, new.reason)
     if old.allowed:
         assert new.signal.entry.side == old.signal.entry.side
@@ -180,20 +190,23 @@ def test_entry_window_and_menu_wiring():
     assert RegimeLiveLedger(None, profile=PROFILE).tier == 'REGIME_T69A'
 
 
-def test_empty_report_lists_seven_live_lanes_and_four_flat_shadow_routes():
+def test_empty_report_lists_live_lanes_and_no_flat_shadow_routes():
     from src.gridbot.prediction.regime_t69a_report import empty_report, LIVE_LABELS, SHADOW_LABELS
     text = empty_report(S)
     assert text.startswith('📊 T6.9b Report')
-    assert tuple(LIVE_LABELS) == LIVE_BRANCHES
-    assert tuple(SHADOW_LABELS) == ('flat_favorite', 'flat_quiet_favorite', 'flat_cheap_prior', 'flat_hold_180')
+    assert tuple(b for b in LIVE_LABELS if b != 'core_continuation_original') == LIVE_BRANCHES
+    assert 'continuation Original（已停用）' in text
+    assert 'F1 Flat' not in text and 'F4 180s' not in text
     assert '外部先行' not in text and 'Reference 校正' not in text
     assert 'Reference 180s' not in text and '檢查點' not in text
     assert sum(label in text for label in LIVE_LABELS.values()) == 7
 
 
-def test_shadow_observer_follows_its_own_profile_and_asset(tmp_path):
+def test_shadow_observer_follows_its_own_profile_and_asset(tmp_path, monkeypatch):
     import sqlite3
     from src.gridbot.prediction.regime_t69a_shadow import observe, schema
+    # The observer is retired; re-enable it here only to keep its gates covered.
+    monkeypatch.setitem(POLICY, 'shadow_branches', ('flat_favorite',))
     pred = tmp_path/'prediction.sqlite3'
     with sqlite3.connect(pred) as db:
         db.executescript("""
@@ -213,6 +226,12 @@ def test_shadow_observer_follows_its_own_profile_and_asset(tmp_path):
         db.execute("INSERT INTO prediction_loop_market_bindings VALUES('loop','ETHUSDT')")
     assert observe(feature_db, pred, tmp_path/'signals.sqlite3', S+70000, 'BTCUSDT') == 'other_asset_loop'
     assert observe(feature_db, pred, tmp_path/'signals.sqlite3', S+70000, 'ETHUSDT') == 'shadow_unit_missing'
+
+
+def test_flat_shadow_is_retired(tmp_path):
+    from src.gridbot.prediction import regime_t69a_shadow
+    # Retired: returns before reading any database (the paths do not exist).
+    assert regime_t69a_shadow.observe(None, tmp_path/'none.sqlite3', tmp_path/'none.sqlite3', S+70000) == 'flat_shadow_retired'
 
 
 BOOK_FAILURES = ['missing', 'receipt_future', 'receipt_stale', 'source_future', 'freshness']
