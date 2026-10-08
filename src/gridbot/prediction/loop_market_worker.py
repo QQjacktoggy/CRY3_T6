@@ -116,7 +116,8 @@ class LoopMarketWorker:
                 return {**self._status(), 'action_denied': True, 'reason': why}
             changed = asset != self.settings.market_symbol
             warmup_until = None
-            if switch == 'done' and changed and asset != 'BTCUSDT':
+            # BTC's producers are stopped while another coin runs, so BTC warms up too.
+            if switch == 'done' and changed:
                 warmup_until = producer_ready_at_ms(int(time.time() * 1000))
                 await self.repository.set_runtime_config(
                     'prediction_producer_switch', {'symbol': asset, 'ready_at_ms': warmup_until})

@@ -22,8 +22,8 @@ sudo -n -u jack_shih sh -c 'cd /tmp && /home/jack_shih/cry3/scripts/t6_coin.sh u
 
 1. 讀正式帳本（唯讀）。若有 RUNNING loop 且綁定的是別的幣，拒絕並不動任何服務。
 2. 停用兩個研究觀測器與觀測 Telegram 發送器（同 `slim`）。
-3. 保持 BTC 基準 producer（`cry3-regime-feature`、`cry3-c180-favorite-signal`）運行。
-4. ETH／BNB 只 enable+start 選定那一幣的 feature／signal producer，另一幣的停用。
+3. 只 enable+start 選定那一幣的 feature／signal producer；其他兩幣（包含 BTC 的 `cry3-regime-feature`、`cry3-c180-favorite-signal`）全部停用。VM 只有 1GB 記憶體，兩套同時跑會拖慢讀取而漏單。
+4. 切回 BTC 時同樣只跑 BTC 那兩個 producer。
 5. 印出服務狀態與記憶體，並提示 Telegram 下一步。
 
 producer 跑滿約 10 分鐘（兩個市場，signal 需在市場開始前 60 秒已啟動）後，在 Telegram：
@@ -51,6 +51,6 @@ producer 跑滿約 10 分鐘（兩個市場，signal 需在市場開始前 60 �
 
 ## 在 Telegram 換幣（下次部署主程式後）
 
-`/predict_market ETH`（或點按鈕）在無 RUNNING loop、帳戶無曝險時，Bot 會以自身的 jack_shih 身分執行 `scripts/t6_coin.sh use ETH`：BTC 基準保留、另一幣與觀測器停掉、ETH producer 啟動。切到 ETH／BNB 後到下一個可交易市場前（1–6 分鐘；signal 需在市場開始前 60 秒已運行）`/predict_loop` 會回「資料程式暖機中」。腳本失敗或逾時（90 秒）時不換幣並回報原因；VM 沒有該腳本時照舊只換 Bot 的市場，並在回覆中註明。執行中選幣仍只排下一輪，不動任何 producer。
+`/predict_market ETH`（或點按鈕）在無 RUNNING loop、帳戶無曝險時，Bot 會以自身的 jack_shih 身分執行 `scripts/t6_coin.sh use ETH`：其他兩幣（含 BTC）與觀測器停掉、只有 ETH producer 啟動。換幣後（切回 BTC 也一樣）到下一個可交易市場前（1–6 分鐘；signal 需在市場開始前 60 秒已運行）`/predict_loop` 會回「資料程式暖機中」。腳本失敗或逾時（90 秒）時不換幣並回報原因；VM 沒有該腳本時照舊只換 Bot 的市場，並在回覆中註明。執行中選幣仍只排下一輪，不動任何 producer。
 
 前提：`scripts/t6_coin.sh` 已在 VM（用上方一行指令安裝）。主程式與 producer 都是 jack_shih 的 user unit，Bot 直接用 `systemctl --user`，不需 sudo 或 polkit。

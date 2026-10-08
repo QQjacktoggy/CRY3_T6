@@ -433,6 +433,17 @@ async def test_btc_switch_has_no_warmup(repo, tmp_path):
     assert await w._loop_market_start_guard(20) is None
 
 
+
+@pytest.mark.asyncio
+async def test_switch_back_to_btc_waits_for_btc_warmup(repo, tmp_path):
+    log = _stub_coin_script(tmp_path)
+    for p in data_paths(repo.db_path,'ETHUSDT'):mark(p,'ETHUSDT')
+    w=Harness(repo)
+    await w.select_market('ETHUSDT')
+    result=await w.select_market('BTCUSDT')
+    assert log.read_text().split()==['use','ETH','use','BTC'] and result['producer_warmup_until_ms']
+    assert '暖機' in await w._loop_market_start_guard(20)
+
 def test_producer_ready_is_first_market_starting_60s_after_start():
     from src.gridbot.prediction.loop_market_worker import producer_ready_at_ms
     assert producer_ready_at_ms(0) == 300_000
