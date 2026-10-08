@@ -76,11 +76,24 @@ gcloud compute ssh cry3jack \
 - 共用同一份檔案系統的 session 才能沿用登入。獨立環境要透過受支援的持久化檔案／Secrets 設定或重新登入。
 - 本指南只保存非敏感連線資訊，不會自動配置雲端環境、安裝 SDK 或移轉憑證。
 
+## 僅限 Claude Code 雲端 session（claude.ai/code）：gcloud 401
+
+此設定只用於 Claude Code 雲端 session；本機、`/workspace` 或其他環境不需要、也不要這樣設定。
+
+2026-10-08 Claude 雲端 session 的 `gcloud auth login` 顯示成功，但 Compute API 一律回 401「invalid authentication credentials」，proxy 無拒絕紀錄。原因是環境預先注入的 gcloud 憑證覆寫環境變數蓋過了 OAuth 登入（徵兆：尚未登入就顯示「Re-using locally stored credentials」）。執行 gcloud 時移除這些變數即可，不需重做 OAuth：
+
+```bash
+env -u CLOUDSDK_AUTH_ACCESS_TOKEN -u CLOUDSDK_AUTH_ACCESS_TOKEN_FILE \
+  -u CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE -u GOOGLE_APPLICATION_CREDENTIALS \
+  -u CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT \
+  gcloud compute ssh cry3jack ...（其餘參數同上）
+```
+
+Claude 雲端容器若缺 `ssh`，`gcloud compute ssh` 會回 `Your platform does not support SSH`，需先 `apt-get update && apt-get install -y openssh-client`。
+
 ## 備案：Service account 金鑰（IAP）
 
 `cry3jack` 經 IAP 連線，IAP 通道本身也要 gcloud 驗證。VM 未對外開放 22 port 時，只注入 `CRY3_SSH_PRIVATE_KEY` 仍無法連線；新環境較穩的做法是以 service account 金鑰登入 gcloud。
-
-2026-10-08 曾見過的狀況：某雲端 session 的 `gcloud auth login` 顯示成功，但 Compute API 一律回 401「invalid authentication credentials」，proxy 無拒絕紀錄。遇到時不要反覆重做 OAuth，改用既有可連環境或本備案。
 
 Service account 需要的角色（盡量限縮於此 VM／專案，不要給 Owner／Editor）：
 
@@ -96,7 +109,7 @@ Service account 需要的角色（盡量限縮於此 VM／專案，不要給 Own
 2. 開新 session，以 `gcloud auth activate-service-account --key-file=<金鑰檔路徑>` 登入。
 3. 先執行同一條 `--command='date -Is; uptime'` 確認可連，再進行唯讀查詢。
 
-OS Login 使用者名稱會是 `sa_` 開頭的數字帳號，與 `pennyfamily9512f_gmail_com` 不同；查詢一律經 `sudo -n -u jack_shih`，不受影響。雲端容器若缺 `ssh`，`gcloud compute ssh` 會回 `Your platform does not support SSH`，需先安裝 `openssh-client`。
+OS Login 使用者名稱會是 `sa_` 開頭的數字帳號，與 `pennyfamily9512f_gmail_com` 不同；查詢一律經 `sudo -n -u jack_shih`，不受影響。
 
 ## 網路與已知環境問題
 
