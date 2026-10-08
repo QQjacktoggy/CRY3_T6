@@ -355,25 +355,30 @@ def daily_pnl(db: str = DEFAULT_DB, days: int = 30, now_ms: int | None = None) -
     con = ro(db)
     try:
         live = {r[0] for r in con.execute("SELECT loop_id FROM prediction_loops WHERE mode='LIVE'")}
+        # One row per campaign (the latest), same rule as the loop totals in 最近兩輪.
+        last = {}
+        for r in con.execute("SELECT campaign_id, loop_id, net_pnl, settled_at_ms FROM prediction_settlements "
+                             "WHERE settled_at_ms>=? AND status='SETTLED' ORDER BY settled_at_ms",
+                             (int(first.timestamp() * 1000),)):
+            if r[1] in live:
+                last[r[0]] = r
         acc = {}
-        for r in con.execute("SELECT loop_id, net_pnl, settled_at_ms FROM prediction_settlements "
-                             "WHERE settled_at_ms>=? AND status='SETTLED'", (int(first.timestamp() * 1000),)):
-            if r[0] not in live:
-                continue
-            p = Decimal(str(r[1] or 0))
+        for _, lid, net, at in last.values():
+            p = Decimal(str(net or 0))
             if p == 0:
                 continue
-            day = datetime.fromtimestamp(r[2] / 1000, TW).strftime("%Y-%m-%d")
-            a = acc.setdefault(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0)})
+            day = datetime.fromtimestamp(at / 1000, TW).strftime("%Y-%m-%d")
+            a = acc.setdefault(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0), "loops": Counter()})
             a["fills"] += 1
             a["wins"] += p > 0
             a["losses"] += p < 0
             a["net"] += p
+            a["loops"][lid] += 1
     finally:
         con.close()
     out = []
     for i in range(days):
         day = (first + timedelta(days=i)).strftime("%Y-%m-%d")
-        a = acc.get(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0)})
-        out.append({"day": day, **a, "net": str(a["net"])})
+        a = acc.get(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0), "loops": Counter()})
+        out.append({"day": day, **a, "net": str(a["net"]), "loops": dict(a["loops"])})
     return out

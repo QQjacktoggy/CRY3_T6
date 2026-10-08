@@ -285,6 +285,10 @@ def daily_section(rows):
         out.append(f"<tr><td>{r['day'][5:]}</td><td>{r['fills']}</td><td>{r['wins']}/{r['losses']}</td>"
                    f"<td>{wr(r['wins'], r['losses'])}</td><td{cls(v)}>{signed(v)}</td><td{cls(c)}>{signed(c)}</td></tr>")
     out.append("</tbody></table>")
+    today = rows[-1]
+    if today.get("loops"):
+        parts = "、".join(f"{H.escape(k)} {v} 筆" for k, v in sorted(today["loops"].items()))
+        out.append(f"<p>{today['day'][5:]} 的成交來自：{parts}（每個 campaign 只算一次，跟「最近兩輪」同一種算法）。</p>")
     return "".join(out)
 
 

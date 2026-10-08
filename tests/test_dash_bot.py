@@ -171,12 +171,15 @@ def test_daily_pnl_groups_by_taiwan_day(tmp_path):
     con.execute("INSERT INTO prediction_settlements VALUES('sa','ca','loop:1',?,'UP','SETTLED','0.5')", (day0 - 60000,))
     con.execute("INSERT INTO prediction_settlements VALUES('sb','cb','loop:1',?,'UP','SETTLED','-0.2')", (day0 + 60000,))
     con.execute("INSERT INTO prediction_settlements VALUES('sc','cc','loop:x',?,'UP','SETTLED','9')", (day0 + 60000,))  # not LIVE
+    # same campaign settled twice: only the latest row counts
+    con.execute("INSERT INTO prediction_settlements VALUES('sd','cb','loop:1',?,'UP','SETTLED','-0.2')", (day0 + 120000,))
     con.commit()
     rows = {r["day"]: r for r in dash_data.daily_pnl(str(db), 30, day0 + 2 * 86400000)}
     before = datetime.fromtimestamp((day0 - 60000) / 1000, dash_data.TW).strftime("%Y-%m-%d")
     after = datetime.fromtimestamp((day0 + 60000) / 1000, dash_data.TW).strftime("%Y-%m-%d")
     assert before != after
     assert rows[before]["net"] == "0.5" and rows[before]["wins"] == 1
-    assert rows[after]["net"] == "-0.2" and rows[after]["losses"] == 1
+    assert rows[after]["net"] == "-0.2" and rows[after]["losses"] == 1 and rows[after]["fills"] == 1
+    assert rows[after]["loops"] == {"loop:1": 1}
     html = dash_page.daily_section(list(rows.values()))
     assert "<svg" in html and "累計" in html
