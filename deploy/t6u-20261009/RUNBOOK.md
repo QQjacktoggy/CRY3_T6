@@ -21,11 +21,11 @@
 
 每一步最後一行不是 `STEPn_OK`、`READ_ONLY_PREFLIGHT_PASSED` 或 `CODE_INSTALLED_LIVE_NOT_ACTIVATED`，就停下。
 
-1. 把 `vm/` 上傳到 VM 的 `~/t6u/vm/`。
+1. 把 `vm/` 上傳到 VM 的 `~/t6u/vm/`，`sha256sum -c SHA256SUMS` 全部 OK。給 Grok 的逐步指南見 `GROK_DEPLOY.md`。
 2. `bash ~/t6u/vm/2_stage.sh`：只寫新的 stage 目錄。印出 `"changed"` 14 個檔與 `STAGE_FP=e8a46046…`，最後 `STEP2_OK`。
 3. `bash ~/t6u/vm/3_services.sh`：啟動 ETH/BNB 4 個 producer（安裝程式要求 7 個服務都 active），最後 `STEP3_OK`。
 4. `bash ~/t6u/vm/4_dryrun.sh`：唯讀試跑，要印 `READ_ONLY_PREFLIGHT_PASSED`。
-5. `bash ~/t6u/vm/5_apply.sh`：備份 → 停服務 → 換檔 → 冷重啟 → 健康檢查；失敗自動還原。成功印 `CODE_INSTALLED_LIVE_NOT_ACTIVATED` 與 rollback 指令。
+5. `bash ~/t6u/vm/5_apply_bg.sh`（在 VM 背景執行 `5_apply.sh`，斷線不會中斷；只能啟動一次），再用 `bash ~/t6u/vm/5_status.sh` 看到 `STEP5_OK`。內容：備份 → 停服務 → 換檔 → 冷重啟 → 健康檢查；失敗自動還原。成功的 log 有 `CODE_INSTALLED_LIVE_NOT_ACTIVATED` 與 rollback 指令。
 6. `bash ~/t6u/vm/6_btc_verify.sh`：切回只跑 BTC，確認 pin、`loop_lane_masked`、migration 029 與遮罩表、T6.9b 報表能產生且有「本輪 Lane」一行（安裝程式自己的健康檢查只測 T6.9），3 個服務 active，最後 `STEP6_OK`。
 7. TG：等約 10 分鐘熱機 → `/predict_market BTC` → `/predict_live on` → 第一輪建議 `/predict_lanemask` 選「全開」→ `/predict_loop 100`。報表標頭會多一行「本輪 Lane：全開」。
 
