@@ -217,20 +217,34 @@ class LoopMarketWorker:
             labels['lane_mask_label'] = '待核對'
         return labels
 
+    async def _queued_lane_mask_choice(self):
+        """(chosen, mask): chosen is True only for an explicit /predict_lanemask choice
+        that no loop has used yet, so an explicit 全開 is not mistaken for 'nothing queued'."""
+        from .regime_t69a_lane_mask import normalize
+        getter = getattr(self.repository, 'get_runtime_config', None)
+        pending = (await getter('prediction_pending_lane_mask', {}) or {}) if callable(getter) else {}
+        if not isinstance(pending, dict):
+            raise ValueError('lane mask invalid')
+        chosen = 'at_ms' in pending and 'consumed_by' not in pending
+        return chosen, normalize(pending.get('mask') or ())
+
     async def _resume_lane_mask_error(self):
-        """A stopped loop resumes with its own bound lanes, never a different queued mask."""
+        """A stopped loop resumes with its own bound lanes, never a different queued choice."""
         active = await self.repository.get_active_loop()
         if not active or str(active.get('strategy_profile') or '').lower() != T69A_PROFILE:
             return None  # only T6.9b loops have lanes a queued mask could have meant
         try:
-            pending = await self._pending_lane_mask()
+            chosen, pending = await self._queued_lane_mask_choice()
             bound = await self._active_lane_mask()
         except ValueError:
             return '排隊中的 Lane 遮罩無效或本輪遮罩待核對；先用 /predict_lanemask 重選'
-        if pending and pending != bound:
-            return ('排隊中的 Lane 遮罩要開新 Loop 才會生效，暫停中的這一輪不能套用。'
-                    '等這一輪出清後再選一次 /predict_lanemask（會結束這一輪），'
-                    '或選回本輪的設定後再續跑')
+        if chosen and pending != bound:
+            if str(active.get('terminal_reason') or '').upper() == 'OPERATOR_STOP':
+                return ('排隊中的 Lane 遮罩和這一輪不同，要開新 Loop 才會生效，停止中的這一輪不能套用。'
+                        '等這一輪出清後再選一次 /predict_lanemask（會結束這一輪），'
+                        '或選回本輪的設定後再續跑')
+            return ('排隊中的 Lane 遮罩和這一輪不同，這一輪不能套用。'
+                    '用 /predict_lanemask 選回本輪的設定後再續跑，新的遮罩等下一個新 Loop 再選')
         return None
 
     async def _close_drained_stopped_loop(self, existing):

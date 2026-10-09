@@ -3532,7 +3532,9 @@ class PredictionWorker(LoopMarketWorker):
                 "reason": "resume requires clean reconciliation",
                 "reconciliation": reconciliation,
             }
-        mask_error = await self._resume_lane_mask_error()
+        # A paused but still-running loop keeps its bound lanes; only a stopped
+        # loop could be resumed under a different queued choice.
+        mask_error = await self._resume_lane_mask_error() if bool(existing.get("new_entries_stopped")) else None
         if mask_error:
             return {**self._status(), "action_denied": True, "reason": mask_error}
         self._loop_id = str(existing.get("loop_id") or "") or None

@@ -550,3 +550,35 @@ async def test_denied_selection_reports_real_labels(repo):
 def test_menu_lists_the_lane_mask_command():
     from predict_main import prediction_bot_commands
     assert any(c.command == 'predict_lanemask' for c in prediction_bot_commands())
+
+
+@pytest.mark.asyncio
+async def test_explicit_all_is_a_choice_not_an_empty_queue(repo):
+    await start(repo, 'A', mask='DOWN_OFF')
+    w = _worker(repo, reconcile={'known': True, 'orders': 1})  # not drained yet
+    await w.stop_loop()
+    queued = await w.select_lane_mask('ALL')
+    assert queued['lane_mask_queued'] and not queued.get('previous_loop_closed')
+    w.reconcile.return_value = {'known': True, 'orders': 0}
+    for attempt in (w.start_loop(100), w.resume()):
+        denied = await attempt
+        assert denied['action_denied'] and '新 Loop' in denied['reason']
+    # Choosing 全開 again after the drain ends A; the next start is a new, unmasked loop.
+    closed = await w.select_lane_mask('ALL')
+    assert closed['previous_loop_closed']
+    assert not (await w.start_loop(100)).get('action_denied')
+    loop = await repo.get_active_loop()
+    assert loop['loop_id'] != 'A' and (await repo.get_loop_market_binding(loop['loop_id']))['lane_mask'] == ''
+
+
+@pytest.mark.asyncio
+async def test_paused_running_loop_resumes_with_a_mask_queued_for_the_next_loop(repo):
+    await start(repo, 'A')
+    w = _worker(repo)
+    queued = await w.select_lane_mask('DOWN_OFF')
+    assert queued['lane_mask_queued']
+    await w.pause()
+    resumed = await w.resume()
+    assert '新 Loop' not in str(resumed.get('reason', ''))
+    assert (await repo.get_active_loop())['loop_id'] == 'A'
+    assert await w._pending_lane_mask() == lm.normalize('DOWN_OFF')

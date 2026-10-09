@@ -23,7 +23,8 @@
 
 - 執行中的 loop 不會被改。執行中選的遮罩排到下一個新 loop。
 - 要中途換遮罩：`/predict_stop` → 等持倉與訂單清空 → 再選一次遮罩。這時如果選的和本輪不同，會結束這一輪（和換策略、換金額相同），回覆會寫「已結束暫停且出清完成的上一輪」→ 開新 loop。注意每個新 loop 的 3.5U MDD 會重新計算，只有共用的 T6 風控狀態會延續。
-- 還沒出清就選了不同的遮罩：只會排隊。這時 `/predict_loop_N`、`/predict_start N`、`/predict_resume` 都會拒絕續跑這一輪，避免它用舊的 lane 繼續下單；等出清後再選一次，或選回本輪的設定再續跑。
+- 還沒出清就選了不同的遮罩（包括選「全開」）：只會排隊。這時 `/predict_loop_N`、`/predict_start N`、`/predict_resume` 都會拒絕續跑這一輪，避免它用舊的 lane 繼續下單；等出清後再選一次，或選回本輪的設定再續跑。
+- 只用 `/predict_pause` 暫停（沒有 `/predict_stop`）的 loop 照常可以 `/predict_resume`，用的仍是這一輪自己的遮罩；排隊中的遮罩留給下一個新 loop。
 - `/predict_status` 顯示「Lane：本輪 …｜下一輪 …」；`/predict_report` 標頭顯示「本輪 Lane：…」，被關的 lane 標「（本輪停用）」。
 
 ## 規則
