@@ -134,8 +134,9 @@ async def test_mask_is_bound_immutably_with_the_loop(repo):
             await start(repo, mask=other)
     # The legacy start path resumes with the bound mask.
     await repo.start_loop('loop', 100, mode='LIVE', strategy_profile=T69A_PROFILE)
-    with pytest.raises(sqlite3.IntegrityError, match='immutable'):
-        await repo._execute("UPDATE prediction_loop_market_bindings SET lane_mask=''")
+    for sql in ("UPDATE prediction_loop_lane_masks SET lane_mask='[]'", 'DELETE FROM prediction_loop_lane_masks'):
+        with pytest.raises(sqlite3.IntegrityError, match='immutable'):
+            await repo._execute(sql)
     assert await repo.get_loop_market_binding('loop') == binding
 
 
@@ -145,6 +146,18 @@ async def test_unmasked_binding_matches_pre_mask_rows(repo):
     binding = await repo.get_loop_market_binding('loop')
     assert binding['lane_mask'] == ''
     assert binding['execution_fingerprint'] == _old_execution_fingerprint('BTCUSDT', T69A_PROFILE)
+    assert await repo._fetchall('SELECT * FROM prediction_loop_lane_masks') == []
+
+
+@pytest.mark.asyncio
+async def test_previous_release_can_still_bind_loops_after_migration(repo):
+    # Rollback safety: the pre-mask release writes bindings with a positional
+    # 7-value INSERT. Migration 029 adds a side table, not a binding column.
+    await repo._execute("INSERT INTO prediction_loops(loop_id,target,completed,state,mode,strategy_profile,created_at_ms,updated_at_ms)"
+                        " VALUES('old',20,0,'DONE','LIVE',?,1,1)", (T69A_PROFILE,))
+    await repo._execute("INSERT INTO prediction_loop_market_bindings VALUES(?,?,?,?,?,?,?)",
+                        ('old', 'BTCUSDT', T69A_PROFILE, _old_execution_fingerprint('BTCUSDT', T69A_PROFILE), '1', 20, 1))
+    assert (await repo.get_loop_market_binding('old'))['lane_mask'] == ''
 
 
 @pytest.mark.asyncio
@@ -276,8 +289,8 @@ async def test_registration_loads_mask_from_binding(repo, registered):
 async def test_registration_refuses_tampered_binding(repo):
     from src.gridbot.prediction.regime_worker_bridge import RegimeWorkerBridge
     await start(repo, mask='UP_OFF')
-    await repo._execute('DROP TRIGGER loop_market_binding_no_update')
-    await repo._execute("UPDATE prediction_loop_market_bindings SET lane_mask=''")
+    await repo._execute('DROP TRIGGER loop_lane_mask_no_delete')
+    await repo._execute('DELETE FROM prediction_loop_lane_masks')
     bridge = RegimeWorkerBridge(repo, 'unused.db', profile=T69A_PROFILE, symbol='BTCUSDT')
     bridge._registered_lane_mask = ()
     with patch.object(bridge.ledger, 'market_is_registered', AsyncMock(return_value=True)):
@@ -351,16 +364,25 @@ async def test_selection_queues_for_next_loop_and_never_touches_running_one(repo
 
 
 @pytest.mark.asyncio
-async def test_new_loop_kwargs_carry_the_queued_mask_once(repo):
+async def test_new_loop_binds_and_clears_the_queued_mask_atomically(repo):
     w = Harness(repo)
     await w.select_lane_mask('DOWN_OFF')
     mask = lm.to_text(await w._pending_lane_mask())
     assert w._loop_market_start_kwargs(mask) == dict(market_symbol='BTCUSDT', market_unit='1', lane_mask=mask)
     assert w._loop_market_start_kwargs('') == dict(market_symbol='BTCUSDT', market_unit='1')
-    await repo.start_loop('loop', 100, mode='LIVE', strategy_profile=T69A_PROFILE, **w._loop_market_start_kwargs(mask))
-    await w._consume_pending_lane_mask()
+    # Compare-and-clear: a queue that no longer matches what is being bound aborts the start.
+    with pytest.raises(ValueError, match='queued lane mask changed'):
+        await repo.start_loop('x', 100, mode='LIVE', strategy_profile=T69A_PROFILE,
+                              consume_pending_lane_mask=True, **w._loop_market_start_kwargs(lm.to_text('UP_OFF')))
+    assert await repo.get_active_loop() is None and await w._pending_lane_mask() == lm.normalize('DOWN_OFF')
+    await repo.start_loop('loop', 100, mode='LIVE', strategy_profile=T69A_PROFILE,
+                          consume_pending_lane_mask=True, **w._loop_market_start_kwargs(mask))
     assert await w._pending_lane_mask() == ()
     assert (await repo.get_loop_market_binding('loop'))['lane_mask'] == mask
+    # A resume never consumes the queue.
+    await w.select_lane_mask('UP_OFF')
+    await repo.start_loop('loop', 100, mode='LIVE', strategy_profile=T69A_PROFILE, **w._loop_market_start_kwargs(mask))
+    assert await w._pending_lane_mask() == lm.normalize('UP_OFF')
 
 
 @pytest.mark.asyncio
@@ -441,3 +463,90 @@ def test_masked_addition_lets_an_unmasked_addition_take_the_market(tmp_path):
             assert result.allowed and d['branch'] == branch
         assert [r['branch'] for r in d['rejected_branches'] if r['reason'] == 'loop_lane_masked'] == \
             [t.split(':')[0] for t in mask]
+
+
+# ---------------------------------------------------------------- stop, choose a mask, start
+
+def _worker(repo, reconcile=None):
+    from unittest.mock import Mock
+    from src.gridbot.prediction.worker import PredictionWorker, WorkerHeartbeat
+    w = object.__new__(PredictionWorker)
+    w.repository = repo
+    w.settings = PredictionSettings(market_symbol='BTCUSDT')
+    w._selected_strategy_profile = T69A_PROFILE
+    w._selected_order_unit_usdt = D(1)
+    w._effective_mode = RuntimeMode.LIVE
+    w._lock = asyncio.Lock()
+    w._task = None
+    w._hard_stop_latched = False
+    w._accept_new_markets = w._allow_new_orders = w._allow_new_buys = w._allow_reductions = True
+    w._active_campaigns = {}
+    w.heartbeat = WorkerHeartbeat(0)
+    w._risk_snapshot = AsyncMock(return_value=SimpleNamespace(hard_stop_latched=False))
+    w.restore_order_unit = AsyncMock()
+    w.restore_selected_strategy = AsyncMock()
+    w._activate_pending_strategy_if_idle = AsyncMock()
+    w._activate_pending_order_unit_if_idle = AsyncMock()
+    w._refresh_live_prerequisites = AsyncMock(return_value=[])
+    w._c180_recovery_exposure_clear = AsyncMock(return_value=True)
+    w._load_pending_strategy = AsyncMock(return_value=None)
+    w._shadow_lane_experiment_enabled = Mock(return_value=False)
+    w.reconcile = AsyncMock(return_value=reconcile or {'known': True, 'orders': 0})
+    w._status = Mock(return_value={})
+    w.status = AsyncMock(return_value={})
+    w._run_loop = AsyncMock()
+    w._now_ms = lambda: int(__import__('time').time() * 1000)
+    return w
+
+
+@pytest.mark.asyncio
+async def test_new_mask_after_drained_stop_ends_the_loop_and_starts_a_masked_one(repo):
+    await start(repo, 'A')
+    w = _worker(repo)
+    await w.stop_loop()
+    chosen = await w.select_lane_mask('DOWN_OFF')
+    assert chosen['previous_loop_closed'] and chosen['previous_loop_id'] == 'A'
+    assert not chosen['lane_mask_queued']
+    assert (await repo._fetchall("SELECT state FROM prediction_loops WHERE loop_id='A'"))[0]['state'] == 'STOPPED'
+    started = await w.start_loop(100)
+    assert not started.get('action_denied'), started
+    loop = await repo.get_active_loop()
+    assert loop['loop_id'] != 'A'
+    assert (await repo.get_loop_market_binding(loop['loop_id']))['lane_mask'] == lm.to_text('DOWN_OFF')
+    assert await w._pending_lane_mask() == ()
+
+
+@pytest.mark.asyncio
+async def test_stopped_loop_never_resumes_under_a_different_queued_mask(repo):
+    await start(repo, 'A')
+    w = _worker(repo, reconcile={'known': True, 'orders': 1})  # not drained yet
+    await w.stop_loop()
+    queued = await w.select_lane_mask('DOWN_OFF')
+    assert queued['lane_mask_queued'] and not queued.get('previous_loop_closed')
+    w.reconcile.return_value = {'known': True, 'orders': 0}  # drained after the choice
+    for attempt in (w.start_loop(100), w.resume()):
+        denied = await attempt
+        assert denied['action_denied'] and '新 Loop' in denied['reason']
+    loop = await repo.get_active_loop()
+    assert loop['loop_id'] == 'A' and loop['new_entries_stopped'] == 1
+    # Choosing the loop's own lanes again lets it resume unchanged.
+    await w.select_lane_mask('ALL')
+    resumed = await w.start_loop(100)
+    assert not resumed.get('action_denied'), resumed
+    assert (await repo.get_active_loop())['new_entries_stopped'] == 0
+    assert (await repo.get_loop_market_binding('A'))['lane_mask'] == ''
+
+
+@pytest.mark.asyncio
+async def test_denied_selection_reports_real_labels(repo):
+    await start(repo, mask='C_DOWN_OFF')
+    w = Harness(repo)
+    await w.select_lane_mask('UP_OFF')
+    denied = await w.select_lane_mask('bogus:UP')
+    assert denied['action_denied']
+    assert denied['lane_mask_label'] == '只關原 C DOWN' and denied['next_lane_mask_label'] == '關全部 UP'
+
+
+def test_menu_lists_the_lane_mask_command():
+    from predict_main import prediction_bot_commands
+    assert any(c.command == 'predict_lanemask' for c in prediction_bot_commands())

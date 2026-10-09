@@ -855,7 +855,13 @@ class RegimeLiveLedger:
                 )
                 from .loop_market import PROFILES as MULTI_PROFILES
                 if self.profile in MULTI_PROFILES:
-                    binding = await self._row(conn, "SELECT * FROM prediction_loop_market_bindings WHERE loop_id=?", (loop,))
+                    if await self._row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prediction_loop_lane_masks'"):
+                        binding = await self._row(conn, """SELECT b.*, COALESCE(m.lane_mask,'') AS lane_mask
+                            FROM prediction_loop_market_bindings b
+                            LEFT JOIN prediction_loop_lane_masks m ON m.loop_id=b.loop_id
+                            WHERE b.loop_id=?""", (loop,))
+                    else:
+                        binding = await self._row(conn, "SELECT * FROM prediction_loop_market_bindings WHERE loop_id=?", (loop,))
                     if binding:
                         from .loop_market import market_matches, execution_fingerprint, binding_lane_mask
                         from .regime_t69a_lane_mask import side_closed

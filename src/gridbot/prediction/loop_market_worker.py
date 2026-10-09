@@ -203,14 +203,69 @@ class LoopMarketWorker:
             return ()
         return binding_lane_mask(await getter(active['loop_id']))
 
-    async def _consume_pending_lane_mask(self):
-        """A mask applies to exactly one new loop; the next loop starts from 全開."""
-        setter = getattr(self.repository, 'set_runtime_config', None)
-        if callable(setter):
-            await setter('prediction_pending_lane_mask', {})
+    async def _lane_mask_labels(self):
+        """Current and queued mask labels for every reply, never a guessed 全開."""
+        from .regime_t69a_lane_mask import describe
+        labels = {}
+        try:
+            labels['next_lane_mask_label'] = describe(await self._pending_lane_mask())
+        except ValueError:
+            labels['next_lane_mask_label'] = '設定無效，請重選'
+        try:
+            labels['lane_mask_label'] = describe(await self._active_lane_mask())
+        except ValueError:
+            labels['lane_mask_label'] = '待核對'
+        return labels
+
+    async def _resume_lane_mask_error(self):
+        """A stopped loop resumes with its own bound lanes, never a different queued mask."""
+        active = await self.repository.get_active_loop()
+        if not active or str(active.get('strategy_profile') or '').lower() != T69A_PROFILE:
+            return None  # only T6.9b loops have lanes a queued mask could have meant
+        try:
+            pending = await self._pending_lane_mask()
+            bound = await self._active_lane_mask()
+        except ValueError:
+            return '排隊中的 Lane 遮罩無效或本輪遮罩待核對；先用 /predict_lanemask 重選'
+        if pending and pending != bound:
+            return ('排隊中的 Lane 遮罩要開新 Loop 才會生效，暫停中的這一輪不能套用。'
+                    '等這一輪出清後再選一次 /predict_lanemask（會結束這一輪），'
+                    '或選回本輪的設定後再續跑')
+        return None
+
+    async def _close_drained_stopped_loop(self, existing):
+        """Like a strategy/unit switch: end an operator-stopped loop that has fully drained."""
+        from .models import CampaignState
+        if (not existing or not bool(existing.get('new_entries_stopped'))
+                or str(existing.get('terminal_reason') or '').upper() != 'OPERATOR_STOP'):
+            return None
+        task = getattr(self, '_task', None)
+        if task is not None and not task.done():
+            return None
+        reconciliation = await self.reconcile()
+        unresolved = await self.repository.load_unresolved_intents()
+        active = [c for c in self._active_campaigns.values()
+                  if c.state not in {CampaignState.DONE, CampaignState.CANCELLED}]
+        if (not bool(reconciliation.get('known')) or int(reconciliation.get('orders') or 0)
+                or unresolved or active):
+            return None
+        loop_id = str(existing.get('loop_id') or '')
+        closer = getattr(self.repository, 'close_operator_stopped_loop_for_strategy_switch', None)
+        closed = (await closer(loop_id) if callable(closer)
+                  else {'closed': True, 'row': await self.repository.stop_loop(loop_id, state='STOPPED')})
+        if not bool(closed.get('closed')):
+            return None
+        self._loop_id = None
+        self._target_markets = 0
+        return loop_id
 
     async def select_lane_mask(self, value):
-        """Queue the lane mask for the next new T6.9b loop. Never changes a running loop."""
+        """Queue the lane mask for the next new T6.9b loop. Never changes a running loop.
+
+        If the current loop was stopped by the operator and has fully drained, a
+        different mask ends it (as a strategy or unit switch does), so the next
+        start opens a new loop with the new mask instead of resuming the old one.
+        """
         from .regime_t69a_lane_mask import normalize, describe, preset_of
         await self.restore_order_unit()
         await self.restore_selected_strategy()
@@ -218,20 +273,26 @@ class LoopMarketWorker:
         try:
             mask = normalize(value)
         except ValueError as exc:
-            return {**self._status(), 'action_denied': True, 'reason': str(exc)}
+            return {**self._status(), **(await self._lane_mask_labels()), 'action_denied': True, 'reason': str(exc)}
         next_profile = str(await self._load_pending_strategy() or self._selected_strategy_profile or '').lower()
         if mask and next_profile != T69A_PROFILE:
-            return {**self._status(), 'action_denied': True,
+            return {**self._status(), **(await self._lane_mask_labels()), 'action_denied': True,
                     'reason': 'lane mask is only for T6.9b; select T6.9b with /predict_lane first'}
         async with self._lock:
+            existing = await self.repository.get_active_loop()
+            closed = None
+            if existing and mask != await self._active_lane_mask():
+                closed = await self._close_drained_stopped_loop(existing)
+                if closed:
+                    existing = None
             await self.repository.set_runtime_config('prediction_pending_lane_mask', {
                 'mask': list(mask), 'preset': preset_of(mask), 'at_ms': int(time.time() * 1000)})
-            existing = await self.repository.get_active_loop()
             task = getattr(self, '_task', None)
             running = bool(existing) or (task is not None and not task.done())
-        result = {**self._status(), 'next_lane_mask': list(mask), 'next_lane_mask_label': describe(mask),
-                  'lane_mask_queued': running}
+        result = {**self._status(), **(await self._lane_mask_labels()), 'next_lane_mask': list(mask),
+                  'next_lane_mask_label': describe(mask), 'lane_mask_queued': running}
+        if closed:
+            result.update(previous_loop_closed=True, previous_loop_id=closed)
         if running:
             result['lane_mask'] = list(await self._active_lane_mask())
-            result['lane_mask_label'] = describe(result['lane_mask'])
         return result

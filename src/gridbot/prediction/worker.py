@@ -2098,19 +2098,11 @@ class PredictionWorker(LoopMarketWorker):
         result = self._status()
         pending_market = await self.repository.get_runtime_config("prediction_pending_market", {})
         result["next_market_symbol"] = pending_market.get("symbol") or self.settings.market_symbol
-        from .regime_t69a_lane_mask import describe as describe_lane_mask
+        result.update(await self._lane_mask_labels())
         try:
-            next_mask = await self._pending_lane_mask()
-            result["next_lane_mask"] = list(next_mask)
-            result["next_lane_mask_label"] = describe_lane_mask(next_mask)
+            result["next_lane_mask"] = list(await self._pending_lane_mask())
         except ValueError:
-            result["next_lane_mask_label"] = "設定無效，請重選"
-        try:
-            active_mask = await self._active_lane_mask()
-            result["lane_mask"] = list(active_mask)
-            result["lane_mask_label"] = describe_lane_mask(active_mask)
-        except ValueError:
-            result["lane_mask_label"] = "待核對"
+            pass
         if self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1', 'regime_target6_9_v1', 'regime_target6_9a_v1'}:
             from src.gridbot.prediction.regime_lane import STATE_KEY
             result["regime_lane_risk"] = await self.repository.get_runtime_config(STATE_KEY, None)
@@ -2616,6 +2608,10 @@ class PredictionWorker(LoopMarketWorker):
             else:
                 records = []
             if existing:
+                if bool(existing.get("new_entries_stopped")):
+                    mask_error = await self._resume_lane_mask_error()
+                    if mask_error:
+                        return {**self._status(), "action_denied": True, "reason": mask_error}
                 self._loop_id = str(existing["loop_id"])
                 self._loop_created_at_ms = self._loop_origin_ms(existing)
                 if bool(existing.get("new_entries_stopped")):
@@ -2670,6 +2666,9 @@ class PredictionWorker(LoopMarketWorker):
                 self._loop_id = f"loop:{self._now_ms()}"
                 from .regime_t69a_lane_mask import to_text as lane_mask_text
                 start_kwargs = self._loop_market_start_kwargs(lane_mask_text(await self._pending_lane_mask()))
+                if start_kwargs:
+                    # The queued mask is bound and cleared in the same transaction.
+                    start_kwargs["consume_pending_lane_mask"] = True
                 created = await self.repository.start_loop(
                     self._loop_id,
                     count,
@@ -2677,7 +2676,6 @@ class PredictionWorker(LoopMarketWorker):
                     strategy_profile=self._selected_strategy_profile,
                     **start_kwargs,
                 )
-                await self._consume_pending_lane_mask()
                 self._loop_created_at_ms = self._loop_origin_ms(created, loop_id=self._loop_id)
                 self._initial_market_wait_until_ms = None
                 # Every finite loop owns a fresh progress cursor.  Do not let
@@ -3534,6 +3532,9 @@ class PredictionWorker(LoopMarketWorker):
                 "reason": "resume requires clean reconciliation",
                 "reconciliation": reconciliation,
             }
+        mask_error = await self._resume_lane_mask_error()
+        if mask_error:
+            return {**self._status(), "action_denied": True, "reason": mask_error}
         self._loop_id = str(existing.get("loop_id") or "") or None
         self._loop_created_at_ms = self._loop_origin_ms(existing, loop_id=self._loop_id)
         self._target_markets = int(existing.get("target") or self._target_markets)

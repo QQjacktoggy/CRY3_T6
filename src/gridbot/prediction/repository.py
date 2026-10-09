@@ -292,11 +292,13 @@ class PredictionRepository:
         market_symbol: str | None = None,
         market_unit: str | None = None,
         lane_mask: str = "",
+        consume_pending_lane_mask: bool = False,
     ) -> dict[str, Any]:
         if market_symbol is not None:
             return await self.start_bound_loop(loop_id, target, mode=mode, strategy_profile=strategy_profile,
                                                market_symbol=market_symbol, market_unit=market_unit,
-                                               lane_mask=lane_mask)
+                                               lane_mask=lane_mask,
+                                               consume_pending_lane_mask=consume_pending_lane_mask)
         if lane_mask:
             raise ValueError("lane mask requires a bound loop market")
         binding = await self.get_loop_market_binding(loop_id)
@@ -332,7 +334,14 @@ class PredictionRepository:
         return await self._fetchone("SELECT * FROM prediction_loops WHERE loop_id=?", (loop_id,)) or {}
 
     async def get_loop_market_binding(self, loop_id):
-        return await self._fetchone("SELECT * FROM prediction_loop_market_bindings WHERE loop_id=?", (loop_id,))
+        # lane_mask lives in its own immutable table (migration 029); '' = no row.
+        if not await self._fetchone("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prediction_loop_lane_masks'"):
+            row = await self._fetchone("SELECT * FROM prediction_loop_market_bindings WHERE loop_id=?", (loop_id,))
+            return {**row, "lane_mask": ""} if row else None
+        return await self._fetchone("""SELECT b.*, COALESCE(m.lane_mask,'') AS lane_mask
+            FROM prediction_loop_market_bindings b
+            LEFT JOIN prediction_loop_lane_masks m ON m.loop_id=b.loop_id
+            WHERE b.loop_id=?""", (loop_id,))
 
     async def loop_market_local_clear(self):
         # Pre-migration DONE snapshots from an older closed loop are historical.
@@ -357,9 +366,9 @@ class PredictionRepository:
         return not (orders or pending or positions)
 
     async def start_bound_loop(self, loop_id, target, *, mode, strategy_profile, market_symbol, market_unit,
-                               lane_mask=""):
+                               lane_mask="", consume_pending_lane_mask=False):
         from .loop_market import PROFILES, symbol, execution_fingerprint, binding_fingerprint
-        from .regime_t69a_lane_mask import to_text
+        from .regime_t69a_lane_mask import to_text, normalize as normalize_lane_mask
         asset = symbol(market_symbol)
         if strategy_profile not in PROFILES or str(market_unit) not in ('1','2','3') or int(target) < 1:
             raise ValueError("invalid bound loop configuration")
@@ -388,14 +397,34 @@ class PredictionRepository:
             return dict(old)
         if not await self.loop_market_local_clear():
             raise ValueError("unresolved local exposure")
+        if consume_pending_lane_mask:
+            # Compare-and-clear in the creating transaction: the queued mask is
+            # bound to exactly this loop, or the start fails and stays queued.
+            row = await self._tx_fetchone(conn, "SELECT config_value_json FROM prediction_runtime_config WHERE config_key='prediction_pending_lane_mask'")
+            queued = _json_load(row["config_value_json"], {}) if row else {}
+            try:
+                if not isinstance(queued, Mapping):
+                    raise ValueError("lane mask invalid")
+                queued_text = to_text(normalize_lane_mask(queued.get("mask") or ()))
+            except ValueError:
+                queued_text = None
+            if queued_text != mask:
+                await conn.rollback()
+                raise ValueError("queued lane mask changed; start the loop again")
         now = _now_ms()
         await conn.execute("""INSERT INTO prediction_loops
             (loop_id,target,completed,state,mode,strategy_profile,created_at_ms,updated_at_ms)
             VALUES(?,?,0,'RUNNING',?,?,?,?)""", (loop_id,int(target),str(mode).upper(),strategy_profile,now,now))
-        await conn.execute("""INSERT INTO prediction_loop_market_bindings
-            (loop_id,symbol,profile,execution_fingerprint,unit,target,selected_at_ms,lane_mask)
-            VALUES(?,?,?,?,?,?,?,?)""",
-            (loop_id,asset,strategy_profile,fingerprint,str(market_unit),int(target),now,mask))
+        await conn.execute("INSERT INTO prediction_loop_market_bindings VALUES(?,?,?,?,?,?,?)",
+            (loop_id,asset,strategy_profile,fingerprint,str(market_unit),int(target),now))
+        if mask:
+            await conn.execute("INSERT INTO prediction_loop_lane_masks(loop_id,lane_mask) VALUES(?,?)", (loop_id,mask))
+        if consume_pending_lane_mask:
+            await conn.execute("""INSERT INTO prediction_runtime_config(config_key, config_value_json, updated_at_ms)
+               VALUES ('prediction_pending_lane_mask', ?, ?)
+               ON CONFLICT(config_key) DO UPDATE SET
+                 config_value_json=excluded.config_value_json, updated_at_ms=excluded.updated_at_ms""",
+                (_json_dumps({"consumed_by": loop_id}), now))
         await conn.commit()
         return await self._fetchone("SELECT * FROM prediction_loops WHERE loop_id=?", (loop_id,))
 

@@ -850,7 +850,8 @@ def _compact_status(value: Mapping[str, Any]) -> list[str]:
         ),
     ]
     lines = [line for line in lines if line]
-    if REGIME_T69A_PROFILE in (current_strategy, next_strategy) and value.get("lane_mask_label"):
+    if value.get("lane_mask_label") and (REGIME_T69A_PROFILE in (current_strategy, next_strategy)
+                                         or value.get("next_lane_mask")):
         lines.append(f"Lane：本輪 {_human_scalar(value.get('lane_mask_label'))}｜"
                      f"下一輪 {_human_scalar(value.get('next_lane_mask_label', '全開'))}")
     if uses_loop_risk_guards(current_strategy):
@@ -1080,14 +1081,17 @@ def format_runtime_result(title: str, result: Any) -> str:
     if isinstance(result, Mapping):
         value = _redact(result)
         if title.endswith("Lane 遮罩"):
-            lines = ["本輪："+str(value.get("lane_mask_label", "全開")),
-                     "下一輪："+str(value.get("next_lane_mask_label", "全開"))]
+            lines = ["本輪："+str(value.get("lane_mask_label", "待核對")),
+                     "下一輪："+str(value.get("next_lane_mask_label", "待核對"))]
             if value.get("action_denied"):
                 lines += ["尚未套用："+str(value.get("reason", "條件未通過"))]
             elif value.get("lane_mask_queued"):
-                lines += ["已排到下一個新 Loop；執行中的 Loop 不變。"]
+                lines += ["已排到下一個新 Loop；執行中的 Loop 不變。",
+                          "暫停中的這一輪不能套用新遮罩：等出清後再選一次會結束這一輪。"]
             else:
-                lines += ["已設定；下一個新 Loop 開始時套用，套用後自動回到全開。"]
+                if value.get("previous_loop_closed"):
+                    lines += ["已結束暫停且出清完成的上一輪 "+str(value.get("previous_loop_id", ""))+"。"]
+                lines += ["已設定；下一個新 Loop（含單筆試跑）開始時套用，套用後自動回到全開。"]
         elif title.endswith("整輪市場"):
             lines = ["目前市場："+str(value.get("market_symbol", "未知")),
                      "下一輪市場："+str(value.get("next_market_symbol", value.get("market_symbol", "未知")))]
@@ -1524,9 +1528,10 @@ class PredictionTelegramService:
                    for name in PRESETS]
         await self._reply(update,
             '【T6.9b 下一輪 Lane】\n'
-            '本輪：'+str(current.get('lane_mask_label', '全開'))+'\n'
-            '下一輪：'+str(current.get('next_lane_mask_label', '全開'))+'\n\n'
-            '只影響下一個新 Loop，執行中的 Loop 不變；套用一次後自動回到全開。\n'
+            '本輪：'+str(current.get('lane_mask_label', '待核對'))+'\n'
+            '下一輪：'+str(current.get('next_lane_mask_label', '待核對'))+'\n\n'
+            '只影響下一個新 Loop（含單筆試跑），執行中的 Loop 不變；套用一次後自動回到全開。\n'
+            '要換遮罩：/predict_stop，等出清後再選一次（會結束這一輪），再開新 Loop。\n'
             '被關的 lane 仍會記錄訊號（不下單），之後可做紙上評分。\n'
             '核心 lane 被關時該場直接跳過，不讓增量 lane 接手。\n'
             '自訂：/predict_lanemask 後接 token，以逗號分隔，例如\n'

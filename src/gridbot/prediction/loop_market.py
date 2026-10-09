@@ -110,10 +110,9 @@ def report_lane_mask(root, loop_id):
     """The loop's bound lane mask for reports; () when unbound or before masks existed."""
     dbpath = Path(root)/"prediction/data/prediction.sqlite3"
     with closing(sqlite3.connect(dbpath.resolve().as_uri()+"?mode=ro", uri=True)) as db:
-        exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='prediction_loop_market_bindings'").fetchone()
-        columns = {r[1] for r in db.execute("PRAGMA table_info(prediction_loop_market_bindings)")} if exists else set()
-        row = (db.execute("SELECT lane_mask FROM prediction_loop_market_bindings WHERE loop_id=?", (loop_id,)).fetchone()
-               if "lane_mask" in columns else None)
+        exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='prediction_loop_lane_masks'").fetchone()
+        row = (db.execute("SELECT lane_mask FROM prediction_loop_lane_masks WHERE loop_id=?", (loop_id,)).fetchone()
+               if exists else None)
     from .regime_t69a_lane_mask import normalize
     return normalize(row[0] if row else "")
 
