@@ -67,8 +67,20 @@ class RegimeWorkerBridge:
                     return C180Ready(False, "loop_market_binding_mismatch")
                 if self.symbol != "BTCUSDT" and not binding:
                     return C180Ready(False, "loop_market_binding_missing")
+            if self.profile == T69A_PROFILE:
+                # The loop's lane mask comes only from its immutable binding.
+                # Cleared first so a failed read can never leave an old loop's mask.
+                from .loop_market import binding_fingerprint, binding_lane_mask
+                self._registered_lane_mask = None
+                binding = await self.repository.get_loop_market_binding(loop_id)
+                if binding and (binding["profile"] != T69A_PROFILE
+                                or binding["execution_fingerprint"] != binding_fingerprint(binding)):
+                    return C180Ready(False, "loop_market_binding_mismatch")
+                lane_mask = binding_lane_mask(binding)
             if await self.ledger.market_is_registered(loop_id=loop_id, market=market):
                 self._registered_loop_id = str(loop_id)
+                if self.profile == T69A_PROFILE:
+                    self._registered_lane_mask = lane_mask
                 return C180Ready(True, "regime_market_registered")
             rows = await self.repository._fetchall(
                 "SELECT MIN(market_start_ms) AS anchor FROM prediction_regime_slots WHERE loop_id=?", (loop_id,))
@@ -82,6 +94,8 @@ class RegimeWorkerBridge:
         except Exception:
             return C180Ready(False, "regime_registration_unavailable")
         self._registered_loop_id = str(loop_id)
+        if self.profile == T69A_PROFILE:
+            self._registered_lane_mask = lane_mask
         return C180Ready(True, "regime_market_registered")
 
     async def prepare_market(self, *, loop_id, market, now_ms, unit_usdt,

@@ -857,19 +857,27 @@ class RegimeLiveLedger:
                 if self.profile in MULTI_PROFILES:
                     binding = await self._row(conn, "SELECT * FROM prediction_loop_market_bindings WHERE loop_id=?", (loop,))
                     if binding:
-                        from .loop_market import market_matches, execution_fingerprint
+                        from .loop_market import market_matches, execution_fingerprint, binding_lane_mask
+                        from .regime_t69a_lane_mask import side_closed
                         from types import SimpleNamespace
                         try:
                             m = json.loads(campaign["payload_json"])["market"]
+                            mask = binding_lane_mask(binding)
                             valid = (market_matches(SimpleNamespace(**m), binding["symbol"])
                                      and binding["profile"] == self.profile
-                                     and binding["execution_fingerprint"] == execution_fingerprint(binding["symbol"], self.profile)
+                                     and binding["execution_fingerprint"] == execution_fingerprint(
+                                         binding["symbol"], self.profile, binding.get("lane_mask") or "")
                                      and binding["unit"] == str(unit))
                         except (ValueError, KeyError, TypeError, AttributeError):
                             valid = False
                         if not valid:
                             await conn.rollback()
                             return C180ClaimResult(False, "loop_market_binding_mismatch")
+                        # Defence in depth: the bridge already skips masked lanes; a
+                        # buy on a side whose every lane is masked is never claimed.
+                        if mask and (values[3] not in ("UP", "DOWN") or side_closed(mask, values[3])):
+                            await conn.rollback()
+                            return C180ClaimResult(False, "loop_lane_masked")
                 if not _campaign_matches_slot(campaign, slot, loop, start):
                     await conn.rollback()
                     return C180ClaimResult(False, "market_identity_not_verified")

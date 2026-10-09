@@ -5,7 +5,8 @@ from decimal import Decimal
 from pathlib import Path
 import time
 
-from .loop_market import PROFILES, symbol, data_paths, execution_fingerprint, verify_data_db
+from .loop_market import (PROFILES, T69A_PROFILE, symbol, data_paths, execution_fingerprint,
+                          binding_fingerprint, verify_data_db)
 
 
 # The signal producer skips any market that starts less than 60s after it
@@ -69,7 +70,7 @@ class LoopMarketWorker:
         binding = await getter(active['loop_id']) if active else None
         if binding:
             if (binding['profile'] != active['strategy_profile']
-                    or binding['execution_fingerprint'] != execution_fingerprint(binding['symbol'], binding['profile'])
+                    or binding['execution_fingerprint'] != binding_fingerprint(binding)
                     or binding['unit'] != str(self._selected_order_unit_usdt)
                     or binding['target'] != active['target']):
                 raise ValueError("persisted loop market identity changed")
@@ -134,6 +135,14 @@ class LoopMarketWorker:
     async def _loop_market_start_guard(self, count):
         await self.restore_loop_market()
         asset = getattr(self.settings, "market_symbol", "BTCUSDT")
+        if not await self.repository.get_active_loop():
+            # A queued mask belongs to the next new loop and only T6.9b applies it.
+            try:
+                mask = await self._pending_lane_mask()
+            except ValueError:
+                return 'queued lane mask is invalid; choose again with /predict_lanemask'
+            if mask and self._selected_strategy_profile != T69A_PROFILE:
+                return 'lane mask is only for T6.9b; choose 全開 with /predict_lanemask first'
         if self._selected_strategy_profile not in PROFILES:
             if asset != 'BTCUSDT' and self._selected_strategy_profile.startswith('regime_target6'):
                 return 'only T6.7c/T6.9 support non-BTC loop markets'
@@ -144,7 +153,8 @@ class LoopMarketWorker:
             if binding:
                 if (binding['symbol'] != asset or binding['unit'] != str(self._selected_order_unit_usdt)
                         or binding['target'] != count or binding['profile'] != self._selected_strategy_profile
-                        or binding['execution_fingerprint'] != execution_fingerprint(asset, self._selected_strategy_profile)):
+                        or binding['execution_fingerprint'] != execution_fingerprint(
+                            asset, self._selected_strategy_profile, binding.get('lane_mask') or '')):
                     return 'running loop market/profile/unit/target is immutable'
             elif asset != 'BTCUSDT':
                 return 'non-BTC loop binding missing'
@@ -164,8 +174,64 @@ class LoopMarketWorker:
                 verify_data_db(path, asset)
         return None
 
-    def _loop_market_start_kwargs(self):
+    def _loop_market_start_kwargs(self, lane_mask=''):
         if self._selected_strategy_profile not in PROFILES:
             return {}
-        return dict(market_symbol=self.settings.market_symbol,
-                    market_unit=str(self._selected_order_unit_usdt))
+        kwargs = dict(market_symbol=self.settings.market_symbol,
+                      market_unit=str(self._selected_order_unit_usdt))
+        if lane_mask:
+            kwargs['lane_mask'] = lane_mask
+        return kwargs
+
+    async def _pending_lane_mask(self):
+        """Queued mask for the next new loop; () when none. Raises ValueError if corrupt."""
+        from .regime_t69a_lane_mask import normalize
+        getter = getattr(self.repository, 'get_runtime_config', None)
+        if not callable(getter):
+            return ()
+        pending = await getter('prediction_pending_lane_mask', {}) or {}
+        if not isinstance(pending, dict):
+            raise ValueError('lane mask invalid')
+        return normalize(pending.get('mask') or ())
+
+    async def _active_lane_mask(self):
+        """Mask of the running loop's binding; () when unbound or no loop."""
+        from .loop_market import binding_lane_mask
+        getter = getattr(self.repository, 'get_loop_market_binding', None)
+        active = await self.repository.get_active_loop()
+        if not active or not callable(getter):
+            return ()
+        return binding_lane_mask(await getter(active['loop_id']))
+
+    async def _consume_pending_lane_mask(self):
+        """A mask applies to exactly one new loop; the next loop starts from 全開."""
+        setter = getattr(self.repository, 'set_runtime_config', None)
+        if callable(setter):
+            await setter('prediction_pending_lane_mask', {})
+
+    async def select_lane_mask(self, value):
+        """Queue the lane mask for the next new T6.9b loop. Never changes a running loop."""
+        from .regime_t69a_lane_mask import normalize, describe, preset_of
+        await self.restore_order_unit()
+        await self.restore_selected_strategy()
+        await self.restore_loop_market()
+        try:
+            mask = normalize(value)
+        except ValueError as exc:
+            return {**self._status(), 'action_denied': True, 'reason': str(exc)}
+        next_profile = str(await self._load_pending_strategy() or self._selected_strategy_profile or '').lower()
+        if mask and next_profile != T69A_PROFILE:
+            return {**self._status(), 'action_denied': True,
+                    'reason': 'lane mask is only for T6.9b; select T6.9b with /predict_lane first'}
+        async with self._lock:
+            await self.repository.set_runtime_config('prediction_pending_lane_mask', {
+                'mask': list(mask), 'preset': preset_of(mask), 'at_ms': int(time.time() * 1000)})
+            existing = await self.repository.get_active_loop()
+            task = getattr(self, '_task', None)
+            running = bool(existing) or (task is not None and not task.done())
+        result = {**self._status(), 'next_lane_mask': list(mask), 'next_lane_mask_label': describe(mask),
+                  'lane_mask_queued': running}
+        if running:
+            result['lane_mask'] = list(await self._active_lane_mask())
+            result['lane_mask_label'] = describe(result['lane_mask'])
+        return result

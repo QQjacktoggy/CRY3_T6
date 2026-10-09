@@ -299,6 +299,11 @@ class PredictionController:
     async def select_market(self, symbol: str) -> Any:
         return await self._invoke("select_market", symbol)
 
+    async def select_lane_mask(self, value: str) -> Any:
+        """Queue the T6.9b lane mask for the next new loop only."""
+
+        return await self._invoke("select_lane_mask", value)
+
     async def select_strategy(self, profile: str) -> Any:
         """Select a strategy only while no market loop is active."""
 
