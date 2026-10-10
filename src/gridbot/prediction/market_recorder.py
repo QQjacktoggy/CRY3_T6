@@ -10,15 +10,17 @@ winner. Any failure here only loses research rows; callers must swallow it.
 
 from __future__ import annotations
 
+import errno
 import json
+import shutil
 import sqlite3
 import time
 import zlib
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
-from .evidence_retention import EvidenceBudget, require_free_space
+from .evidence_retention import MAX_DATABASE_BYTES, MIN_FREE_BYTES, EvidenceBudget
 
 
 VERSION = 1
@@ -28,13 +30,23 @@ SLOT_MS = 300_000
 OFFSETS_MS = (tuple(range(0, 110_000, 10_000)) + tuple(range(110_000, 140_000, 1_000))
               + tuple(range(140_000, SLOT_MS, 5_000)))
 LEVELS = 3
-RETENTION_MS = 120 * 86_400_000
+RETENTION_MS = 90 * 86_400_000
+# 90 days of markets; also bounds the file when rows compress worse than expected.
+MAX_ROWS = 90 * 288
 PRUNE_EVERY = 48
+# Stop far above the 128 MB floor the signal and evidence stores fail closed
+# on, so research rows can never take the space trading needs.
+RECORDER_MIN_FREE_BYTES = MIN_FREE_BYTES + 4 * MAX_DATABASE_BYTES
 SPOT_SOURCES = {'binance_spot_aggTrade': 'spot', 'binance_futures_aggTrade': 'futures'}
 
 
 def recorder_path(signal_db: str | Path) -> Path:
     return Path(signal_db).with_name('market-recorder.sqlite3')
+
+
+def _require_recorder_space(path: Path) -> None:
+    if shutil.disk_usage(path.parent).free < RECORDER_MIN_FREE_BYTES:
+        raise OSError(errno.ENOSPC, 'market recorder disk reserve reached')
 
 
 def _levels(levels: Any) -> list[list[str]]:
@@ -77,7 +89,7 @@ class MarketRecorder:
     def _open(self) -> sqlite3.Connection:
         if self._db is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            require_free_space(self.path)
+            _require_recorder_space(self.path)
             db = sqlite3.connect(self.path, timeout=1)
             try:
                 self._budget = EvidenceBudget(db, self.path)
@@ -163,8 +175,17 @@ class MarketRecorder:
             sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8'), 9)
         try:
             db = self._open()
+            _require_recorder_space(self.path)
             self._budget.prepare()
             now = self._clock()
+            if self._writes % PRUNE_EVERY == 0:
+                # Own transaction, before the insert: a full file can still free pages.
+                with db:
+                    db.execute('DELETE FROM market_samples WHERE market_start_ms<?', (now - RETENTION_MS,))
+                    db.execute('DELETE FROM market_samples WHERE market_start_ms IN (SELECT market_start_ms '
+                               'FROM market_samples ORDER BY market_start_ms DESC LIMIT -1 OFFSET ?)',
+                               (MAX_ROWS - 1,))
+            self._writes += 1
             with db:
                 db.execute(
                     'INSERT INTO market_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?) '
@@ -174,9 +195,6 @@ class MarketRecorder:
                     (market['start'], self.symbol, market['topic'], market['market_id'], market['reference'],
                      market['fee_bps'], market['yes'], market['identified_at'], VERSION, len(samples), now,
                      sqlite3.Binary(payload)))
-                self._writes += 1
-                if self._writes % PRUNE_EVERY == 1:
-                    db.execute('DELETE FROM market_samples WHERE market_start_ms<?', (now - RETENTION_MS,))
         except BaseException:
             self.dropped += 1
             raise
@@ -191,11 +209,15 @@ class MarketRecorder:
                 self._db = None
 
 
-def load_markets(path: str | Path, since_ms: int = 0) -> list[dict[str, Any]]:
-    """Read-only: decoded rows ordered by market start."""
+def iter_markets(path: str | Path, since_ms: int = 0) -> Iterator[dict[str, Any]]:
+    """Read-only: decoded rows by market start, one at a time (months do not fit in memory)."""
 
     uri = Path(path).resolve().as_uri() + '?mode=ro'
     with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
-        rows = db.execute('SELECT payload FROM market_samples WHERE market_start_ms>=? '
-                          'ORDER BY market_start_ms', (int(since_ms),)).fetchall()
-    return [json.loads(zlib.decompress(row[0])) for row in rows]
+        for (raw,) in db.execute('SELECT payload FROM market_samples WHERE market_start_ms>=? '
+                                 'ORDER BY market_start_ms', (int(since_ms),)):
+            yield json.loads(zlib.decompress(raw))
+
+
+def load_markets(path: str | Path, since_ms: int = 0) -> list[dict[str, Any]]:
+    return list(iter_markets(path, since_ms))

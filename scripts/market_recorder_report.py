@@ -16,8 +16,9 @@ The rules are pre-registered; do not re-tune them on the data they score.
   T6.9b entry, and markets where T6.9b bought the same or the opposite side.
 * CHASE: a live T6.9b fill whose average price is at least 0.02 above its
   side's best ask in the last recorded sample at or before the decision.
-* MASKED: masked T6.9b lane quotes (``loop_lane_masked``) at would_cash and
-  would_net_shares.
+* MASKED: the first executable quote of each masked T6.9b lane
+  (``masked_first_quotes``, written from 2026-10-10) at would_cash and
+  would_net_shares. Older last-tick quotes are not scored.
 
 Winner: the official one (settlements, observer, shadow outcomes) when known,
 else the reference chain: the next market's Chainlink start price against this
@@ -35,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from src.gridbot.prediction.market_recorder import load_markets
+from src.gridbot.prediction.market_recorder import iter_markets
 from src.gridbot.prediction.regime_lane import walk
 
 
@@ -120,7 +121,8 @@ def sample_at(market, offset_ms):
 
 
 def favourite_entry(market, offset_ms):
-    """Rule FAVOURITE at one offset: (side, cash, net_shares) or None."""
+    """Rule FAVOURITE at one offset: None (no signal), (side, None, None) when the
+    band matched but the recorded top levels cannot fill 1 U, else (side, cash, net_shares)."""
     s = sample_at(market, offset_ms)
     if s is None:
         return None
@@ -130,15 +132,18 @@ def favourite_entry(market, offset_ms):
     side = 'UP' if Decimal(asks['UP']) >= Decimal(asks['DOWN']) else 'DOWN'
     if not FAVOURITE_BAND[0] <= Decimal(asks[side]) < FAVOURITE_BAND[1]:
         return None
-    levels = [[min(Decimal(p) + TICK, Decimal('0.99')), Decimal(q)] for p, q in s['q'][side]['asks']]
+    merged = {}
+    for p, q in s['q'][side]['asks']:
+        price = min(Decimal(p) + TICK, Decimal('0.99'))
+        merged[price] = merged.get(price, Decimal(0)) + Decimal(q)
     try:
-        ex = walk(levels, market['market'].get('fee_bps') or '200', cap=Decimal('0.99'))
+        ex = walk(sorted(merged.items()), market['market'].get('fee_bps') or '200', cap=Decimal('0.99'))
     except ValueError:
-        return None
+        return side, None, None
     return side, ex['cash'], ex['net_shares']
 
 
-def live_entries(prediction_db, feature_db, prefix):
+def live_entries(prediction_db, feature_db, prefix, since_ms=0):
     """T6.9b selections with their fill average price and settled PnL."""
     out = {}
     if not feature_db:
@@ -146,17 +151,13 @@ def live_entries(prediction_db, feature_db, prefix):
     with _ro(feature_db) as db:
         if 't69a_decisions' not in _tables(db):
             return out
-        for start, raw in db.execute('SELECT start,payload FROM t69a_decisions'):
+        for start, raw in db.execute('SELECT start,payload FROM t69a_decisions WHERE start>=?', (int(since_ms),)):
             d = json.loads(raw)
+            entry = dict(masked=d.get('masked_first_quotes') or {})
             if d.get('selected') and d.get('side') in ('UP', 'DOWN'):
-                out[int(start)] = dict(side=d['side'], branch=d.get('branch'), selected_at_ms=d.get('selected_at_ms'),
-                                       masked=[r for r in d.get('rejected_branches') or ()
-                                               if isinstance(r, dict) and r.get('reason') == 'loop_lane_masked'])
-            else:
-                masked = [r for r in d.get('rejected_branches') or ()
-                          if isinstance(r, dict) and r.get('reason') == 'loop_lane_masked']
-                if masked:
-                    out[int(start)] = dict(side=None, masked=masked)
+                entry.update(side=d['side'], branch=d.get('branch'), selected_at_ms=d.get('selected_at_ms'))
+            if 'side' in entry or entry['masked']:
+                out[int(start)] = entry
     if prediction_db:
         with _ro(prediction_db) as db:
             for start, entry in out.items():
@@ -194,58 +195,69 @@ def summarize(rows, seed=20261010, draws=2000):
 
 def build_report(recorder_db, prediction_db=None, feature_db=None, *, symbol='BTCUSDT', since_ms=0):
     prefix = symbol[:-4].lower()
-    markets = load_markets(recorder_db, since_ms)
     official = official_winners(prediction_db, feature_db, prefix)
     refs = campaign_references(prediction_db, prefix)
-    for m in markets:
-        refs.setdefault(int(m['market']['start']), Decimal(m['market']['reference']))
-    live = live_entries(prediction_db, feature_db, prefix)
-    report = dict(symbol=symbol, markets=len(markets), winners={}, favourite={}, chase={}, masked={})
-    basis = {}
-    for m in markets:
+    live = live_entries(prediction_db, feature_db, prefix, since_ms)
+    # One pass, keeping only what the rules need: months of rows do not fit in memory.
+    starts, favourites, asks = [], {128_000: {}, 124_000: {}}, {}
+    for m in iter_markets(recorder_db, since_ms):
+        if m.get('symbol') != symbol:
+            raise SystemExit(f"recorder symbol {m.get('symbol')} != --symbol {symbol}")
         start = int(m['market']['start'])
-        basis[start] = winner_of(start, official, refs)
-    report['winners'] = {k: sum(1 for w, b in basis.values() if b == k) for k in ('official', 'reference_chain', 'pending')}
-    for offset in (128_000, 124_000):
-        groups = {'all': [], 'no_live_entry': [], 'live_same_side': [], 'live_opposite_side': []}
-        signals = 0
-        for m in markets:
-            start = int(m['market']['start'])
+        starts.append(start)
+        refs.setdefault(start, Decimal(m['market']['reference']))
+        for offset, out in favourites.items():
             entry = favourite_entry(m, offset)
-            if entry is None:
+            if entry is not None:
+                out[start] = entry
+        if (live.get(start) or {}).get('side'):
+            asks[start] = [(s['at'], s['q']) for s in m['samples'] if s.get('q') and not s.get('stale')]
+    basis = {start: winner_of(start, official, refs) for start in starts}
+    report = dict(symbol=symbol, markets=len(starts), favourite={}, chase={}, masked={},
+                  winners={k: sum(1 for _, b in basis.values() if b == k)
+                           for k in ('official', 'reference_chain', 'pending')})
+    for offset, entries in favourites.items():
+        groups = {'all': [], 'no_live_fill': [], 'live_fill_same_side': [], 'live_fill_opposite_side': []}
+        unexecutable = pending = 0
+        for start, (side, cash, net) in entries.items():
+            if cash is None:
+                unexecutable += 1
                 continue
-            signals += 1
             winner = basis[start][0]
             if winner is None:
+                pending += 1
                 continue
-            side, cash, net = entry
             row = (start, pnl(winner, side, cash, net))
             groups['all'].append(row)
-            live_side = (live.get(start) or {}).get('side')
-            key = 'no_live_entry' if live_side is None else 'live_same_side' if live_side == side else 'live_opposite_side'
+            le = live.get(start) or {}
+            filled = le.get('side') if 'fill_price' in le else None
+            key = ('no_live_fill' if filled is None else 'live_fill_same_side' if filled == side
+                   else 'live_fill_opposite_side')
             groups[key].append(row)
-        report['favourite'][f'{offset // 1000}s'] = dict(signals=signals, **{k: summarize(v) for k, v in groups.items()})
-    by_start = {int(m['market']['start']): m for m in markets}
+        report['favourite'][f'{offset // 1000}s'] = dict(
+            signals=len(entries), unexecutable=unexecutable, pending=pending,
+            **{k: summarize(v) for k, v in groups.items()})
     flagged, normal, unknown = [], [], 0
     for start, entry in live.items():
-        if entry.get('side') is None or 'net_pnl' not in entry or entry.get('selected_at_ms') is None:
+        if not entry.get('side') or 'net_pnl' not in entry or entry.get('selected_at_ms') is None:
             continue
-        m = by_start.get(start)
-        prior = [s for s in (m['samples'] if m else ()) if s.get('q') and not s.get('stale')
-                 and s['at'] <= int(entry['selected_at_ms'])]
-        ask = prior[-1]['q'][entry['side']]['ask'] if prior else None
+        prior = [q for at, q in asks.get(start, ()) if at <= int(entry['selected_at_ms'])]
+        ask = prior[-1][entry['side']]['ask'] if prior else None
         if ask is None:
             unknown += 1
             continue
         (flagged if entry['fill_price'] >= Decimal(ask) + CHASE else normal).append((start, entry['net_pnl']))
     report['chase'] = dict(flagged=summarize(flagged), others=summarize(normal), no_recorded_ask=unknown)
-    masked = []
+    masked, masked_pending = [], 0
     for start, entry in live.items():
-        winner = basis.get(start, winner_of(start, official, refs))[0]
-        for r in entry.get('masked') or ():
-            if 'would_cash' in r and winner is not None:
-                masked.append((start, pnl(winner, r['side'], Decimal(r['would_cash']), Decimal(r['would_net_shares']))))
-    report['masked'] = summarize(masked)
+        winner = winner_of(start, official, refs)[0]
+        for token, q in entry['masked'].items():
+            if winner is None:
+                masked_pending += 1
+                continue
+            side = token.rsplit(':', 1)[1]
+            masked.append((start, pnl(winner, side, Decimal(q['would_cash']), Decimal(q['would_net_shares']))))
+    report['masked'] = dict(pending=masked_pending, **summarize(masked))
     return report
 
 

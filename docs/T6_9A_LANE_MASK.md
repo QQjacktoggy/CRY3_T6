@@ -31,7 +31,7 @@
 
 - 和 `DISABLED_BRANCHES` 相同：被關的核心 lane 仍佔住核心位置，該市場直接跳過，增量 lane 不會接手。被關的增量 lane 讓出位置，另一條沒被關的增量 lane 可以進場（實際特徵中 C-UP 鏡像與淺回撤不會同時成立）。
 - 遮罩最後才套用：只有其他規則（First UP 5bp、淺回撤逆勢 5bp、continuation 停用）都放行的 lane 才會記成被遮。決策的 `rejected_branches` 會記 `reason='loop_lane_masked'`、方向，以及若進場的金額與股數（`would_cash`、`would_net_shares`），之後可以拿官方勝方做紙上評分。worker 看到的原因是 `t69a_loop_lane_masked`。
-- 紙上報價是窗口內「第一次可成交」的那一筆，也就是沒遮時會買進的時點，`quoted_at_ms` 記錄它的時間；之後的檢查不會覆蓋。一直沒有可成交報價時記 `would_execution='unavailable'`。2026-10-10 以前的紀錄沒有 `quoted_at_ms`，存的是窗口內最後一次檢查的報價。
+- 紙上報價是窗口內「第一次可成交」的那一筆，也就是沒遮時會買進的時點，存在決策的 `masked_first_quotes`（以 `lane:方向` 為鍵，含 `quoted_at_ms`），之後的檢查不會覆蓋，lane 之後不在候選裡也保留。`rejected_branches` 的被遮紀錄會帶同一筆報價；一直沒有可成交報價時記 `would_execution='unavailable'`。2026-10-10 以前的紀錄沒有這個欄位，存的是窗口內最後一次檢查的報價。
 - 遮罩存在獨立的表 `prediction_loop_lane_masks`（migration 029），和 loop binding 在同一個交易寫入；全開的 loop 沒有這一列。這張表有 UPDATE/DELETE trigger，寫入後不能改。排隊中的遮罩也在同一個交易取用並清除：如果排隊的內容在開 loop 當下變了，開 loop 失敗、排隊保留。
 
 ## 檢查點

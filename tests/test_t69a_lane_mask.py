@@ -606,3 +606,15 @@ def test_masked_quote_keeps_the_first_executable_tick(tmp_path, first_down):
     for later_down, t in (('.72', 128000), ('.8', 130000)):
         assert not check(book('.3', later_down, t), at=S+t).allowed
         assert masked() == first
+
+
+def test_first_quote_survives_an_addition_lane_dropping_out_of_the_choices(tmp_path):
+    # C-UP prior mirror (an addition lane) masked; a later book above its cap removes it from the choices.
+    bridge, check = setup(tmp_path, feature(-1, 3, 2), book('.7', '.3', 124000), orig=original())
+    bridge._registered_lane_mask = lm.normalize('c_mirror_up_prior:UP')
+    check()
+    d = state(bridge)
+    first = d.get('masked_first_quotes', {}).get('c_mirror_up_prior:UP')
+    assert first is not None and first['quoted_at_ms'] == S+124000
+    check(book('.8', '.21', 124500), at=S+124500)
+    assert state(bridge)['masked_first_quotes'] == {'c_mirror_up_prior:UP': first}

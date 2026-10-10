@@ -213,9 +213,6 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
         if not isinstance(guard, dict):
             raise ValueError('decision_payload_invalid')
         if not d['selected'] and guard.get('verified') is True and at_ms <= start+134500:
-            # Masked quotes from earlier ticks, read before this tick rewrites the list.
-            quoted = {(r.get('branch'), r.get('side')): r for r in d.get('rejected_branches') or ()
-                      if isinstance(r, dict) and r.get('reason') == 'loop_lane_masked' and 'would_cash' in r}
             choices = _additions(snapshot, guard['features'], unit_usdt) if guard['empty'] else guard['candidates']
             prior = guard['features']['prior_bp']
             blocked = [c for c in choices if c['branch'] == 'core_first_up'
@@ -238,20 +235,22 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
             # the first executable one, which is when an unmasked loop would buy.
             masked = [c for c in choices if c not in blocked
                       and f"{c['branch']}:{c['side']}" in lane_mask]
+            # rejected_branches is rebuilt every tick and a lane can drop out of
+            # the choices, so first quotes live in their own field.
             for c in masked:
                 record = dict(branch=c['branch'], reason='loop_lane_masked', side=c['side'])
-                first = quoted.get((c['branch'], c['side']))
-                if first is not None:
-                    record.update({k: first[k] for k in ('would_cash', 'would_net_shares', 'quoted_at_ms')
-                                   if k in first})
-                else:
+                token = f"{c['branch']}:{c['side']}"
+                first = (d.get('masked_first_quotes') or {}).get(token)
+                if first is None:
                     try:
                         ex = (new_execution(snapshot, c['side'], unit_usdt, lower=c['lower'], cap=c['cap'])
                               if guard['empty'] else eligible_execution(c, snapshot, unit_usdt))
-                        record.update(would_cash=str(ex['cash']), would_net_shares=str(ex['net_shares']),
-                                      quoted_at_ms=at_ms)
+                        first = dict(would_cash=str(ex['cash']), would_net_shares=str(ex['net_shares']),
+                                     quoted_at_ms=at_ms)
+                        d.setdefault('masked_first_quotes', {})[token] = first
                     except (ValueError, KeyError, TypeError, ArithmeticError):
-                        record['would_execution'] = 'unavailable'
+                        pass
+                record.update(first or dict(would_execution='unavailable'))
                 d['rejected_branches'].append(record)
             blocked += masked
             choices = [c for c in choices if c not in blocked]

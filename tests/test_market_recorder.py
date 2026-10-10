@@ -224,18 +224,62 @@ def test_report_scores_favourite_band_chase_and_masked_quotes(tmp_path):
         db.execute('CREATE TABLE t69a_decisions(start INTEGER PRIMARY KEY,payload TEXT)')
         db.execute('INSERT INTO t69a_decisions VALUES(?,?)', (S+300000, json.dumps(
             dict(selected=True, side='DOWN', branch='core_c_down', selected_at_ms=S+300000+125500))))
-        db.execute('INSERT INTO t69a_decisions VALUES(?,?)', (S, json.dumps(dict(selected=False, rejected_branches=[
-            dict(branch='core_c_down', reason='loop_lane_masked', side='DOWN', would_cash='0.994',
-                 would_net_shares='1.41')]))))
+        db.execute('INSERT INTO t69a_decisions VALUES(?,?)', (S, json.dumps(dict(selected=False, masked_first_quotes={
+            'core_c_down:DOWN': dict(would_cash='0.994', would_net_shares='1.41', quoted_at_ms=S+124000)}))))
+        # Selected but never filled: not a live entry for the grouping.
+        db.execute('INSERT INTO t69a_decisions VALUES(?,?)', (S+900000, json.dumps(
+            dict(selected=True, side='UP', branch='core_first_up', selected_at_ms=S+900000+125000))))
+        # A pre-fix last-tick masked quote is never scored.
+        db.execute('INSERT INTO t69a_decisions VALUES(?,?)', (S+600000, json.dumps(dict(selected=False,
+            rejected_branches=[dict(branch='core_c_down', reason='loop_lane_masked', side='DOWN',
+                                    would_cash='0.7', would_net_shares='1')]))))
     report = build_report(rec_path, pred, feat)
     assert report['markets'] == 4
     assert report['winners'] == {'official': 1, 'reference_chain': 2, 'pending': 1}
     fav = report['favourite']['128s']
     # Market 0: UP .6 in band, UP wins. Market 1: DOWN .65 in band (live same side), DOWN wins.
     # Market 2: UP .8 is out of band. Market 3: in band, winner pending.
-    assert fav['signals'] == 3 and fav['all']['n'] == 2
-    assert fav['no_live_entry']['n'] == 1 and fav['live_same_side']['n'] == 1
+    assert fav['signals'] == 3 and fav['all']['n'] == 2 and fav['pending'] == 1 and fav['unexecutable'] == 0
+    assert fav['no_live_fill']['n'] == 1 and fav['live_fill_same_side']['n'] == 1
     assert D(fav['all']['pnl']) > 0
     assert report['chase']['flagged']['n'] == 1 and D(report['chase']['flagged']['pnl']) == D('0.45')
     # Masked C DOWN at market 0 lost: UP won.
     assert report['masked']['n'] == 1 and D(report['masked']['pnl']) == D('-0.994')
+
+    # --since also bounds the live, chase and masked parts.
+    later = build_report(rec_path, pred, feat, since_ms=S+300000)
+    assert later['markets'] == 3 and later['masked']['n'] == 0 and later['chase']['flagged']['n'] == 1
+    with pytest.raises(SystemExit):
+        build_report(rec_path, pred, feat, symbol='ETHUSDT')
+
+
+def test_favourite_merges_levels_that_collapse_after_the_tick_and_counts_thin_books():
+    def market(asks):
+        q = {'UP': {'ask': asks[0][0], 'bid': None, 'asks': asks, 'bids': []},
+             'DOWN': {'ask': '0.39', 'bid': None, 'asks': [['0.39', '100']], 'bids': []}}
+        return {'market': {'fee_bps': '200'}, 'samples': [{'o': 128000, 'at': S+128000, 'q': q}]}
+    from scripts.market_recorder_report import favourite_entry
+    side, cash, net = favourite_entry(market([['0.62', '0.5'], ['0.98', '10'], ['0.99', '5']]), 128000)
+    assert side == 'UP' and cash is not None
+    assert favourite_entry(market([['0.62', '0.1']]), 128000) == ('UP', None, None)
+
+
+def test_recorder_keeps_its_own_disk_reserve_above_the_trading_floor(tmp_path, monkeypatch):
+    assert mr.RECORDER_MIN_FREE_BYTES > mr.MIN_FREE_BYTES + mr.MAX_DATABASE_BYTES
+    monkeypatch.setattr(mr.shutil, 'disk_usage', lambda p: SimpleNamespace(free=mr.RECORDER_MIN_FREE_BYTES - 1))
+    rec = mr.MarketRecorder(tmp_path/'r.sqlite3', symbol='BTCUSDT')
+    rec.tick(meta(), S, lambda: quote())
+    with pytest.raises(OSError):
+        rec.flush()
+    assert rec.dropped == 1 and not (tmp_path/'r.sqlite3').exists()
+
+
+def test_a_full_file_is_pruned_before_the_insert(tmp_path, monkeypatch):
+    monkeypatch.setattr(mr, 'MAX_ROWS', 3)
+    path = tmp_path/'r.sqlite3'
+    for i in range(6):
+        rec = mr.MarketRecorder(path, symbol='BTCUSDT', clock_ms=lambda: S)
+        rec.tick(meta(S+i*300000), S+i*300000, lambda: quote())
+        rec.close()
+    # Each new process prunes on its first write, before inserting.
+    assert [r[0] for r in rows(path)] == [S+i*300000 for i in (3, 4, 5)]
