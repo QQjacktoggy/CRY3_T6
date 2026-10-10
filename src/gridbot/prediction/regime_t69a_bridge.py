@@ -231,17 +231,26 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
             blocked += off
             # The loop's lane mask, last: a masked entry is one every other rule
             # would have let through. Same rule as disabled: the core slot stays
-            # reserved. The quote it would have used is kept for paper scoring.
+            # reserved. The quote it would have used is kept for paper scoring:
+            # the first executable one, which is when an unmasked loop would buy.
             masked = [c for c in choices if c not in blocked
                       and f"{c['branch']}:{c['side']}" in lane_mask]
+            # rejected_branches is rebuilt every tick and a lane can drop out of
+            # the choices, so first quotes live in their own field.
             for c in masked:
                 record = dict(branch=c['branch'], reason='loop_lane_masked', side=c['side'])
-                try:
-                    ex = (new_execution(snapshot, c['side'], unit_usdt, lower=c['lower'], cap=c['cap'])
-                          if guard['empty'] else eligible_execution(c, snapshot, unit_usdt))
-                    record.update(would_cash=str(ex['cash']), would_net_shares=str(ex['net_shares']))
-                except (ValueError, KeyError, TypeError, ArithmeticError):
-                    record['would_execution'] = 'unavailable'
+                token = f"{c['branch']}:{c['side']}"
+                first = (d.get('masked_first_quotes') or {}).get(token)
+                if first is None:
+                    try:
+                        ex = (new_execution(snapshot, c['side'], unit_usdt, lower=c['lower'], cap=c['cap'])
+                              if guard['empty'] else eligible_execution(c, snapshot, unit_usdt))
+                        first = dict(would_cash=str(ex['cash']), would_net_shares=str(ex['net_shares']),
+                                     quoted_at_ms=at_ms)
+                        d.setdefault('masked_first_quotes', {})[token] = first
+                    except (ValueError, KeyError, TypeError, ArithmeticError):
+                        pass
+                record.update(first or dict(would_execution='unavailable'))
                 d['rejected_branches'].append(record)
             blocked += masked
             choices = [c for c in choices if c not in blocked]
