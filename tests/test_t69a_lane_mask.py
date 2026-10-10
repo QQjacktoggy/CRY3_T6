@@ -582,3 +582,27 @@ async def test_paused_running_loop_resumes_with_a_mask_queued_for_the_next_loop(
     assert '新 Loop' not in str(resumed.get('reason', ''))
     assert (await repo.get_active_loop())['loop_id'] == 'A'
     assert await w._pending_lane_mask() == lm.normalize('DOWN_OFF')
+
+
+@pytest.mark.parametrize('first_down', ['.7', '.8'])
+def test_masked_quote_keeps_the_first_executable_tick(tmp_path, first_down):
+    # C DOWN masked: the paper quote is the first in-band one, as an unmasked loop would buy.
+    bridge, check = setup(tmp_path, feature(2, -4, -2), book('.3', first_down, 124000), orig=original())
+    bridge._registered_lane_mask = lm.normalize('C_DOWN_OFF')
+    assert not check().allowed
+
+    def masked():
+        return next(r for r in state(bridge)['rejected_branches'] if r['reason'] == 'loop_lane_masked')
+
+    if first_down == '.8':  # out of the .65-.75 band: nothing executable yet
+        assert masked() == dict(branch='core_c_down', reason='loop_lane_masked', side='DOWN',
+                                would_execution='unavailable')
+        assert not check(book('.3', '.7', 126000), at=S+126000).allowed
+        first, at = masked(), S+126000
+    else:
+        first, at = masked(), S+124000
+    assert first['quoted_at_ms'] == at and D(first['would_cash']) == D('.7')*D('1.42')
+    # Later ticks at another price, or out of band again, keep that first quote.
+    for later_down, t in (('.72', 128000), ('.8', 130000)):
+        assert not check(book('.3', later_down, t), at=S+t).allowed
+        assert masked() == first

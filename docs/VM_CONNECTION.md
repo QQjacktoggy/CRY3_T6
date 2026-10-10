@@ -23,6 +23,8 @@ T6.9 的 T6.8a 八路加 Flat 補位與 BTC／ETH／BNB 整輪選幣見 [T6.9](T
 
 T6.9b 每輪 Lane 遮罩見 [T6.9b Lane 遮罩](T6_9A_LANE_MASK.md)；查詢時以 `prediction_loop_lane_masks` 確認本輪實際遮罩，沒有該 loop 的列代表全開。
 
+每個市場的盤口記錄與唯讀紙上報表見 [市場盤口記錄器](MARKET_RECORDER.md)；記錄檔是 `prediction/data/c180-favorite-live/market-recorder.sqlite3`，安裝後仍須確認有新列寫入。
+
 ## 目標
 
 - VM：`cry3jack`

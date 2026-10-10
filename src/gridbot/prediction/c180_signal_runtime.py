@@ -459,6 +459,8 @@ class C180SignalRuntime:
         self._t67_profile_checked_ms = 0
         self._t67_book_persist_ms = 0
         self._t67_last_error_ms = 0
+        self._recorder = None
+        self._recorder_error_ms = 0
 
     def _t67_active(self, now):
         if os.environ.get('PREDICTION_T67C_OBSERVER_ORIGINAL_ENABLED') == '1':
@@ -552,9 +554,43 @@ class C180SignalRuntime:
             full_depth=True, retained_cash_depth='3.000001', quote=selected))
         self._t67_book_persist_ms = at
 
+    def _recorder_quote(self, market: Mapping[str, Any], at: int) -> Mapping[str, Any] | None:
+        raw = self.evidence.tape.books.get(str(market["market_id"]))
+        if not isinstance(raw, Mapping):
+            return None
+        quote = self.logic.normalize_book(raw, market, at)
+        if quote is None:
+            # Research only: keep a quiet book too, flagged, so gaps stay visible.
+            stamps = [raw.get(key) for key in ("received_at", "book_at_ms", "received_at_ms")]
+            if all(isinstance(stamp, (int, float)) for stamp in stamps):
+                quote = self.logic.normalize_book(raw, market, int(max(stamps)))
+                if quote is not None:
+                    quote = dict(quote, stale=True)
+        return quote
+
+    def _record_market(self, event: Mapping[str, Any]) -> None:
+        """Record-only research samples; failures never reach the evidence path."""
+
+        try:
+            if os.environ.get("PREDICTION_MARKET_RECORDER") == "0":
+                return
+            recorder = getattr(self, "_recorder", None)
+            if recorder is None:
+                from .market_recorder import MarketRecorder, recorder_path
+                recorder = self._recorder = MarketRecorder(recorder_path(self.store.path), symbol=self.symbol)
+            recorder.spot(event)
+            market, at = self._current_market, int(event["received_at"])
+            recorder.tick(market, at, lambda: self._recorder_quote(market, at))
+        except Exception as exc:
+            now = _now_ms()
+            if now - getattr(self, "_recorder_error_ms", 0) >= 60_000:
+                LOGGER.warning("Market recorder unavailable: %s", type(exc).__name__)
+                self._recorder_error_ms = now
+
     def _on_raw_event(self, event: Mapping[str, Any]) -> None:
         """Persist a fresh full-depth book only during the live entry window."""
 
+        self._record_market(event)
         try:
             self._t67_raw_event(event)
         except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, ArithmeticError) as exc:
@@ -607,6 +643,11 @@ class C180SignalRuntime:
         self.store.close()
         if self._t67_store is not None:
             self._t67_store.close()
+        if self._recorder is not None:
+            try:
+                self._recorder.close()
+            except Exception as exc:
+                LOGGER.warning("Market recorder close failed: %s", type(exc).__name__)
 
     def stop(self) -> None:
         self._stop.set()
