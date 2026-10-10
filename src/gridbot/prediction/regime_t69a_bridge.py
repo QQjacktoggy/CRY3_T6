@@ -10,6 +10,7 @@ from .regime_lane import dec
 from .regime_t63_lane import eligible_execution
 from .regime_t67_lane import execution as new_execution
 from .regime_t69a_policy import FINGERPRINT, POLICY
+from .regime_t69a_lane_mask import normalize as normalize_lane_mask
 
 from .regime_t67a_bridge import freeze_core, additions
 
@@ -157,19 +158,29 @@ def _check_early(bridge, *, market, unit_usdt, at_ms, last_seen_book_at_ms):
         return b.C180Ready(False, reason or 't69a_inputs_unavailable:'+phase+':'+_reason_code(exc))
 
 
+def _loop_lane_mask(bridge):
+    """The registered loop's mask; fail closed when registration did not load it."""
+    mask = getattr(bridge, '_registered_lane_mask', None)
+    if mask is None:
+        raise ValueError('loop_lane_mask_unavailable')
+    return normalize_lane_mask(mask)
+
+
 def _identity(d, bridge, market, unit, snapshot):
     start = int(market.start_time_ms)
     if (d['fingerprint'] != FINGERPRINT or d['market_topic'] != str(market.market_topic_id)
             or d['market_id'] != str(market.up_market_id) or d['unit_usdt'] != str(unit)
             or d['market_start_ms'] != start or d['market_end_ms'] != start+300000
             or dec(d['fee_bps']) != dec(snapshot['fee_bps'])
-            or d.get('loop_id') != getattr(bridge, '_registered_loop_id', None)):
+            or d.get('loop_id') != getattr(bridge, '_registered_loop_id', None)
+            or normalize_lane_mask(d.get('lane_mask') or ()) != _loop_lane_mask(bridge)):
         raise ValueError('frozen_identity_unit_fee_mismatch')
 
 
 def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
     from . import regime_worker_bridge as b
     start = int(market.start_time_ms)
+    lane_mask = _loop_lane_mask(bridge)
     with closing(b.connect(bridge.feature_db)) as db:
         db.execute('CREATE TABLE IF NOT EXISTS t69a_decisions(start INTEGER PRIMARY KEY,payload TEXT NOT NULL)')
         db.commit()
@@ -180,6 +191,9 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
             market_start_ms=start, market_end_ms=start+300000, unit_usdt=str(unit_usdt),
             selected=False, fee_bps=str(snapshot['fee_bps']),
             loop_id=getattr(bridge, '_registered_loop_id', None))
+        if not row and lane_mask:
+            # Written only when non-empty, so unmasked decisions stay byte-identical.
+            d['lane_mask'] = list(lane_mask)
         _identity(d, bridge, market, unit_usdt, snapshot)
         if 'core_guard' not in d:
             if at_ms > start+126000:
@@ -215,6 +229,21 @@ def _persist_selection(bridge, market, unit_usdt, at_ms, snapshot):
             off = [c for c in choices if c['branch'] in POLICY['disabled']]
             d['rejected_branches'] += [dict(branch=c['branch'], reason='branch_disabled') for c in off]
             blocked += off
+            # The loop's lane mask, last: a masked entry is one every other rule
+            # would have let through. Same rule as disabled: the core slot stays
+            # reserved. The quote it would have used is kept for paper scoring.
+            masked = [c for c in choices if c not in blocked
+                      and f"{c['branch']}:{c['side']}" in lane_mask]
+            for c in masked:
+                record = dict(branch=c['branch'], reason='loop_lane_masked', side=c['side'])
+                try:
+                    ex = (new_execution(snapshot, c['side'], unit_usdt, lower=c['lower'], cap=c['cap'])
+                          if guard['empty'] else eligible_execution(c, snapshot, unit_usdt))
+                    record.update(would_cash=str(ex['cash']), would_net_shares=str(ex['net_shares']))
+                except (ValueError, KeyError, TypeError, ArithmeticError):
+                    record['would_execution'] = 'unavailable'
+                d['rejected_branches'].append(record)
+            blocked += masked
             choices = [c for c in choices if c not in blocked]
             d['eligible_branches'] = [c['branch'] for c in choices]
             for candidate in choices:
@@ -273,6 +302,7 @@ def _reason_code(exc):
         'original_identity': 'original_identity',
         'original_missing_or_invalid_for_empty_core': 'original_missing_or_invalid',
         'decision_payload_invalid': 'decision_payload_invalid',
+        'loop_lane_mask_unavailable': 'loop_lane_mask_unavailable',
     }
     return known.get(str(exc), 'input_value_invalid')
 

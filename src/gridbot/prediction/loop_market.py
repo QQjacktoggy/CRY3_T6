@@ -19,7 +19,14 @@ def symbol(value):
     return value
 
 
-def execution_fingerprint(asset, profile=PROFILE):
+def execution_fingerprint(asset, profile=PROFILE, lane_mask=''):
+    """Loop identity. A non-empty T6.9a lane mask is hashed in; an empty mask is
+    byte-identical to bindings made before masks existed."""
+    if lane_mask:
+        if profile != T69A_PROFILE:
+            raise ValueError("lane mask is only supported by T6.9a")
+        from .regime_t69a_lane_mask import normalize, to_text
+        lane_mask = to_text(normalize(lane_mask))
     if profile == T69_PROFILE:
         from .regime_t69_policy import FINGERPRINT
         routing = "t69_nine_branches"
@@ -31,9 +38,23 @@ def execution_fingerprint(asset, profile=PROFILE):
         routing = "t67c_seven_branches"
     else:
         raise ValueError("profile has no loop market binding")
-    return hashlib.sha256(json.dumps(dict(version=1, symbol=symbol(asset),
-        parent=FINGERPRINT, routing=routing, isolation="asset_database_v1"),
-        sort_keys=True).encode()).hexdigest()
+    identity = dict(version=1, symbol=symbol(asset), parent=FINGERPRINT, routing=routing,
+                    isolation="asset_database_v1")
+    if lane_mask:
+        identity["lane_mask"] = lane_mask
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def binding_lane_mask(binding):
+    """Normalized mask tuple of a binding row; () for rows made before masks."""
+    from .regime_t69a_lane_mask import normalize
+    text = binding.get("lane_mask") if binding else None
+    return normalize(text or "")
+
+
+def binding_fingerprint(binding):
+    """Recompute a binding row's execution_fingerprint from its own columns."""
+    return execution_fingerprint(binding["symbol"], binding["profile"], binding.get("lane_mask") or "")
 
 
 def data_paths(prediction_db, asset):
@@ -83,6 +104,17 @@ def report_asset(root, loop_id):
         exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='prediction_loop_market_bindings'").fetchone()
         row = db.execute("SELECT symbol FROM prediction_loop_market_bindings WHERE loop_id=?", (loop_id,)).fetchone() if exists else None
     return symbol(row[0]) if row else None
+
+
+def report_lane_mask(root, loop_id):
+    """The loop's bound lane mask for reports; () when unbound or before masks existed."""
+    dbpath = Path(root)/"prediction/data/prediction.sqlite3"
+    with closing(sqlite3.connect(dbpath.resolve().as_uri()+"?mode=ro", uri=True)) as db:
+        exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='prediction_loop_lane_masks'").fetchone()
+        row = (db.execute("SELECT lane_mask FROM prediction_loop_lane_masks WHERE loop_id=?", (loop_id,)).fetchone()
+               if exists else None)
+    from .regime_t69a_lane_mask import normalize
+    return normalize(row[0] if row else "")
 
 
 def report_feature_path(root, loop_id):

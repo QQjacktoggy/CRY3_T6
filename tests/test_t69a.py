@@ -30,6 +30,7 @@ def setup(tmp_path, f, initial, profile=PROFILE, orig=None):
         db.execute('INSERT INTO features VALUES(?,?)', (S, json.dumps(f)))
     bridge = b.RegimeWorkerBridge(None, tmp_path/profile/'signals', feature_db=path, profile=profile)
     bridge._registered_loop_id = 'testloop'
+    bridge._registered_lane_mask = ()
     market = SimpleNamespace(start_time_ms=S, market_topic_id='topic', up_market_id='up')
     def check(current=initial, at=None, unit=D(1), seen=0):
         with patch.object(bridge, '_first_book', return_value=initial), \

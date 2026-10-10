@@ -2098,6 +2098,11 @@ class PredictionWorker(LoopMarketWorker):
         result = self._status()
         pending_market = await self.repository.get_runtime_config("prediction_pending_market", {})
         result["next_market_symbol"] = pending_market.get("symbol") or self.settings.market_symbol
+        result.update(await self._lane_mask_labels())
+        try:
+            result["next_lane_mask"] = list(await self._pending_lane_mask())
+        except ValueError:
+            pass
         if self._selected_strategy_profile in {"regime_target6_v1", "regime_target6_1_v1", "regime_target6_2_v1", 'regime_target6_3_v1', 'regime_target6_3a_v1', 'regime_target6_3b_v1', 'regime_target6_5_v1', 'regime_target6_7_v1', 'regime_target6_7a_v1', 'regime_target6_7b_v1', 'regime_target6_7c_v1', 'regime_target6_7d_v1', 'regime_target6_8_v1', 'regime_target6_8a_v1', 'regime_target6_9_v1', 'regime_target6_9a_v1'}:
             from src.gridbot.prediction.regime_lane import STATE_KEY
             result["regime_lane_risk"] = await self.repository.get_runtime_config(STATE_KEY, None)
@@ -2603,6 +2608,10 @@ class PredictionWorker(LoopMarketWorker):
             else:
                 records = []
             if existing:
+                if bool(existing.get("new_entries_stopped")):
+                    mask_error = await self._resume_lane_mask_error()
+                    if mask_error:
+                        return {**self._status(), "action_denied": True, "reason": mask_error}
                 self._loop_id = str(existing["loop_id"])
                 self._loop_created_at_ms = self._loop_origin_ms(existing)
                 if bool(existing.get("new_entries_stopped")):
@@ -2636,12 +2645,14 @@ class PredictionWorker(LoopMarketWorker):
                 # A restart may intentionally extend the active finite loop
                 # (for example 50 -> 200).  Persist the larger target so the
                 # durable loop cursor and the in-memory worker agree.
+                # A resumed loop keeps its own bound lane mask, never the queued one.
+                from .regime_t69a_lane_mask import to_text as lane_mask_text
                 await self.repository.start_loop(
                     self._loop_id,
                     count,
                     mode=self.mode,
                     strategy_profile=self._selected_strategy_profile,
-                    **self._loop_market_start_kwargs(),
+                    **self._loop_market_start_kwargs(lane_mask_text(await self._active_lane_mask())),
                 )
                 self.heartbeat.markets_completed = int(existing.get("completed", 0))
             else:
@@ -2653,12 +2664,17 @@ class PredictionWorker(LoopMarketWorker):
                         "orphan_campaigns": [str(row.get("campaign_id") or "") for row in records],
                     }
                 self._loop_id = f"loop:{self._now_ms()}"
+                from .regime_t69a_lane_mask import to_text as lane_mask_text
+                start_kwargs = self._loop_market_start_kwargs(lane_mask_text(await self._pending_lane_mask()))
+                if start_kwargs:
+                    # The queued mask is bound and cleared in the same transaction.
+                    start_kwargs["consume_pending_lane_mask"] = True
                 created = await self.repository.start_loop(
                     self._loop_id,
                     count,
                     mode=self.mode,
                     strategy_profile=self._selected_strategy_profile,
-                    **self._loop_market_start_kwargs(),
+                    **start_kwargs,
                 )
                 self._loop_created_at_ms = self._loop_origin_ms(created, loop_id=self._loop_id)
                 self._initial_market_wait_until_ms = None
@@ -3516,6 +3532,11 @@ class PredictionWorker(LoopMarketWorker):
                 "reason": "resume requires clean reconciliation",
                 "reconciliation": reconciliation,
             }
+        # A paused but still-running loop keeps its bound lanes; only a stopped
+        # loop could be resumed under a different queued choice.
+        mask_error = await self._resume_lane_mask_error() if bool(existing.get("new_entries_stopped")) else None
+        if mask_error:
+            return {**self._status(), "action_denied": True, "reason": mask_error}
         self._loop_id = str(existing.get("loop_id") or "") or None
         self._loop_created_at_ms = self._loop_origin_ms(existing, loop_id=self._loop_id)
         self._target_markets = int(existing.get("target") or self._target_markets)

@@ -21,6 +21,8 @@ T6.7d 的原七路保留、Flat 補位與安全部署規則見 [T6.7d](T6_7D.md)
 
 T6.9 的 T6.8a 八路加 Flat 補位與 BTC／ETH／BNB 整輪選幣見 [T6.9](T6_9.md)。安裝不等於啟動 Live。
 
+T6.9b 每輪 Lane 遮罩見 [T6.9b Lane 遮罩](T6_9A_LANE_MASK.md)；查詢時以 `prediction_loop_lane_masks` 確認本輪實際遮罩，沒有該 loop 的列代表全開。
+
 ## 目標
 
 - VM：`cry3jack`

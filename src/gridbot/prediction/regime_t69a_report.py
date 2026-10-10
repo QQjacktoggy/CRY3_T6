@@ -436,9 +436,15 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
     fill_text = f'{closed_fills/len(ended):.1%}（{closed_fills}/{len(ended)} 已結束登錄市場）' if ended else '—（尚無已結束登錄市場）'
     pnl = _value(metric, events, pending) if events or pending else '—'
     mdd = _value(metric, events, pending, 'mdd') if events or pending else '—'
-    from .loop_market import report_asset
+    from .loop_market import report_asset, report_lane_mask
+    from .regime_t69a_lane_mask import describe as describe_lane_mask
     asset = report_asset(root, loop['loop_id'])
-    lines = [HEADER, '市場：'+(asset or '歷史未綁定'), f'截至 {clock}（台灣時間）｜Loop {loop["loop_id"]}',
+    try:
+        lane_mask = report_lane_mask(root, loop['loop_id'])
+        mask_line = '本輪 Lane：'+describe_lane_mask(lane_mask)
+    except (OSError, sqlite3.Error, ValueError):
+        lane_mask, mask_line = (), '本輪 Lane：待核對'
+    lines = [HEADER, '市場：'+(asset or '歷史未綁定'), mask_line, f'截至 {clock}（台灣時間）｜Loop {loop["loop_id"]}',
              f'狀態 {loop["state"]}｜完成 {loop["completed"]}/{loop["target"]} 場｜本輪每筆 {units} USDT',
              f'Live fill rate {fill_text}',
              f'本輪 WR {metric["wr"]}（{metric["wins"]}勝/{metric["losses"]}負/{metric["flats"]}平；已結算成交 {len(events)}）',
@@ -452,7 +458,11 @@ def format_summary(root, *, now, loop, slots, campaigns, current_ids, fill_ids,
         def live_line(branch):
             m = branches[branch]
             branch_pnl = f'{m["pnl"]:+.4f}' if m['wins']+m['losses']+m['flats'] else '—'
-            return f'{LIVE_LABELS[branch]}｜成交 {m["fills"]}｜已知WR {m["wr"]}｜已知PnL {branch_pnl} USDT｜待結算 {m["pending"]}'
+            off = sorted(side for side in LIVE_SIDES[branch] if f'{branch}:{side}' in lane_mask)
+            label = LIVE_LABELS[branch]
+            if off:
+                label += '（本輪停用）' if len(off) == len(LIVE_SIDES[branch]) else '（本輪停用 '+'/'.join(off)+'）'
+            return f'{label}｜成交 {m["fills"]}｜已知WR {m["wr"]}｜已知PnL {branch_pnl} USDT｜待結算 {m["pending"]}'
         lines += _grouped(LIVE_GROUPS, live_line)
         if branches['unattributed']:
             lines.append(f'子策略歸因待核對 {branches["unattributed"]} 筆；保留官方Live總PnL。')

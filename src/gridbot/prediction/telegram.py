@@ -101,6 +101,7 @@ HARD_STOP_CALLBACK_PREFIX = "predict_hard_stop:"
 CANCEL_LOOP_CALLBACK_PREFIX = "predict_cancel:"
 MONITOR_CALLBACK_PREFIX = "predict_monitor:"
 T6_RESET_CALLBACK_PREFIX = "predict_t6reset:"
+LANE_MASK_CALLBACK_PREFIX = "predict_lmask:"
 T6_RESETTABLE_HALT = "scheduled20_mdd_3.5"
 SELECTABLE_LANES = (
     ('regime_target6_9a_v1', 'T6.9b T6.7c七路＋First UP≥5bp Live＋Flat Shadow（BTC／ETH／BNB；1/2/3U）'),
@@ -849,6 +850,10 @@ def _compact_status(value: Mapping[str, Any]) -> list[str]:
         ),
     ]
     lines = [line for line in lines if line]
+    if value.get("lane_mask_label") and (REGIME_T69A_PROFILE in (current_strategy, next_strategy)
+                                         or value.get("next_lane_mask")):
+        lines.append(f"Lane：本輪 {_human_scalar(value.get('lane_mask_label'))}｜"
+                     f"下一輪 {_human_scalar(value.get('next_lane_mask_label', '全開'))}")
     if uses_loop_risk_guards(current_strategy):
         lines.append(risk_status_line())
     play = value.get("s3s5_playbook")
@@ -992,6 +997,8 @@ def _compact_loop_result(value: Mapping[str, Any]) -> list[str]:
         lines.append(f"Loop ID：{_human_scalar(value.get('loop_id'))}")
     if value.get("one_run"):
         lines.append("執行方式：單筆試跑")
+    if str(value.get("strategy_profile") or "").strip().lower() == REGIME_T69A_PROFILE and value.get("lane_mask_label"):
+        lines.append(f"本輪 Lane：{_human_scalar(value.get('lane_mask_label'))}")
     if str(value.get("strategy_profile") or "").strip().lower() in REGIME_PROFILES:
         lines.append(f"保護：{_regime_risk_text(str(value.get('strategy_profile') or ''), value.get('order_unit_usdt', '1'))}")
     elif str(value.get("strategy_profile") or "").strip().lower() == C180_PROFILE:
@@ -1073,7 +1080,19 @@ def format_runtime_result(title: str, result: Any) -> str:
 
     if isinstance(result, Mapping):
         value = _redact(result)
-        if title.endswith("整輪市場"):
+        if title.endswith("Lane 遮罩"):
+            lines = ["本輪："+str(value.get("lane_mask_label", "待核對")),
+                     "下一輪："+str(value.get("next_lane_mask_label", "待核對"))]
+            if value.get("action_denied"):
+                lines += ["尚未套用："+str(value.get("reason", "條件未通過"))]
+            elif value.get("lane_mask_queued"):
+                lines += ["已排到下一個新 Loop；執行中的 Loop 不變。",
+                          "暫停中的這一輪不能套用新遮罩：等出清後再選一次會結束這一輪。"]
+            else:
+                if value.get("previous_loop_closed"):
+                    lines += ["已結束暫停且出清完成的上一輪 "+str(value.get("previous_loop_id", ""))+"。"]
+                lines += ["已設定；下一個新 Loop（含單筆試跑）開始時套用，套用後自動回到全開。"]
+        elif title.endswith("整輪市場"):
             lines = ["目前市場："+str(value.get("market_symbol", "未知")),
                      "下一輪市場："+str(value.get("next_market_symbol", value.get("market_symbol", "未知")))]
             if value.get("action_denied"):
@@ -1490,6 +1509,35 @@ class PredictionTelegramService:
             '\n下一輪：'+str(current.get('next_market_symbol', current.get('market_symbol', '未知')))+
             '\n每輪鎖定一幣；執行中只排下一輪，結束後再點選套用。換幣後重新確認 Live，再用 /predict_loop 20 啟動。',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(a, callback_data='predict_market:'+a+'USDT') for a in ('BTC','ETH','BNB')]]))
+
+    async def cmd_predict_lanemask(self, update, context):
+        """T6.9b: switch lanes off for the next new loop only."""
+        if await self._deny_if_unauthorized(update):
+            return
+        from .regime_t69a_lane_mask import PRESETS, PRESET_LABELS, LANE_TOKENS, TOKEN_LABELS
+        args = getattr(context, 'args', None) or []
+        if args:
+            await self._call_and_reply(update, 'T6.9b Lane 遮罩', ('select_lane_mask',), ','.join(str(a) for a in args))
+            return
+        try:
+            current = await self._invoke(('status', 'predict_status'))
+        except Exception:
+            current = {}
+        current = current if isinstance(current, Mapping) else {}
+        buttons = [[InlineKeyboardButton(PRESET_LABELS[name], callback_data=LANE_MASK_CALLBACK_PREFIX+name)]
+                   for name in PRESETS]
+        await self._reply(update,
+            '【T6.9b 下一輪 Lane】\n'
+            '本輪：'+str(current.get('lane_mask_label', '待核對'))+'\n'
+            '下一輪：'+str(current.get('next_lane_mask_label', '待核對'))+'\n\n'
+            '只影響下一個新 Loop（含單筆試跑），執行中的 Loop 不變；套用一次後自動回到全開。\n'
+            '要換遮罩：/predict_stop，等出清後再選一次（會結束這一輪），再開新 Loop。\n'
+            '被關的 lane 仍會記錄訊號（不下單），之後可做紙上評分。\n'
+            '核心 lane 被關時該場直接跳過，不讓增量 lane 接手。\n'
+            '自訂：/predict_lanemask 後接 token，以逗號分隔，例如\n'
+            '/predict_lanemask core_c_down:DOWN,shallow_retracement:DOWN\n'
+            '可用：'+'、'.join(f'{t}（{TOKEN_LABELS[t]}）' for t in LANE_TOKENS),
+            reply_markup=InlineKeyboardMarkup(buttons))
 
     async def cmd_predict_lane(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show the operator-approved strategies as one compact picker."""
@@ -2182,6 +2230,10 @@ class PredictionTelegramService:
                     await result
             except Exception as exc:  # noqa: BLE001 - continue to handle the callback
                 LOGGER.warning("prediction_telegram_callback_answer_failed error_type=%s", type(exc).__name__)
+        if data.startswith(LANE_MASK_CALLBACK_PREFIX):
+            await self._call_and_reply(update, "T6.9b Lane 遮罩", ("select_lane_mask",),
+                                       data[len(LANE_MASK_CALLBACK_PREFIX):])
+            return
         if data.startswith("predict_market:"):
             await self._call_and_reply(update, "T6.7c／T6.9／T6.9b 整輪市場", ("select_market",), data.split(":", 1)[1])
             return
@@ -2567,6 +2619,7 @@ def build_prediction_handlers(service: PredictionTelegramService) -> tuple[Any, 
         CommandHandler("predict_loop_pnl", service.cmd_predict_loop_pnl),
         CommandHandler("predict_market", service.cmd_predict_market),
         CommandHandler("predict_lane", service.cmd_predict_lane),
+        CommandHandler("predict_lanemask", service.cmd_predict_lanemask),
         CommandHandler("predict_amount", service.cmd_predict_amount),
         CommandHandler("predict_stop", service.cmd_predict_stop),
         CommandHandler("predict_cancel", service.cmd_predict_cancel_loop),
@@ -2580,7 +2633,7 @@ def build_prediction_handlers(service: PredictionTelegramService) -> tuple[Any, 
         CommandHandler("predict_live", service.cmd_predict_live),
         CommandHandler("lanes", service.cmd_lanes),
         CommandHandler("predict_lanes", service.cmd_lanes),
-        CallbackQueryHandler(service.handle_callback, pattern=r"^predict_(shadow|lane|market|amount|hard_stop|t6reset|cancel|monitor):"),
+        CallbackQueryHandler(service.handle_callback, pattern=r"^predict_(shadow|lane|lmask|market|amount|hard_stop|t6reset|cancel|monitor):"),
     )
 
 
@@ -2680,6 +2733,7 @@ __all__ = [
     "LIVE_CALLBACK_PREFIX",
     "MONITOR_CALLBACK_PREFIX",
     "ORDER_UNIT_CALLBACK_PREFIX",
+    "LANE_MASK_CALLBACK_PREFIX",
     "MAX_LOOP_MARKETS",
     "PredictionRuntime",
     "PredictionTelegramService",
