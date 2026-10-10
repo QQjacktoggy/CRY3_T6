@@ -129,8 +129,8 @@ class Dash:
                     text = (msg.get("text") or "").strip().split("@")[0]
                     if chat not in self.chat_ids or msg.get("date", 0) < started - 60:
                         continue  # strangers and backlog from before a restart are ignored
-                    if text in ("/dash", "/start"):
-                        self.handle(chat)
+                    # single-purpose bot: any message from an allowed chat gets the dashboard
+                    self.handle(chat)
             except Exception as exc:
                 print(f"dash_bot: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                 time.sleep(10)

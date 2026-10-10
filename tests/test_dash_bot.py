@@ -36,6 +36,9 @@ def make_db(tmp_path):
     CREATE TABLE prediction_settlements(settlement_id TEXT PRIMARY KEY, campaign_id TEXT, loop_id TEXT,
       settled_at_ms INT, winner TEXT, status TEXT, net_pnl TEXT);
     CREATE TABLE prediction_runtime_config(config_key TEXT PRIMARY KEY, config_value_json TEXT, updated_at_ms INT);
+    -- real VM table that ends in 'decisions' but has no start/payload columns
+    CREATE TABLE prediction_moe_shadow_decisions(decision_id TEXT PRIMARY KEY, market_id TEXT, observed_at_ms INT);
+    INSERT INTO prediction_moe_shadow_decisions VALUES('m1', 'x', 1);
     """)
     old = "loop:1"
     cur = "loop:2"
@@ -119,9 +122,9 @@ def test_page_has_every_section(tmp_path):
     db = make_db(tmp_path)
     now = LOOP_START + 1200000 + 30000
     page, cap = dash_page.build_page(str(db), tmp_path, now_ms=now, coin_fetch=fake_fetch)
-    for h in ("最近兩輪", "本輪成交統計", "全部 T6 子策略成交統計", "本輪逐場紀錄（新到舊）", "三幣反轉比較", "<svg"):
+    for h in ("最近兩輪", "每日總損益（台灣時間）", "本輪成交統計", "全部 T6 子策略成交統計", "本輪逐場紀錄（新到舊）", "三幣反轉比較", "<svg"):
         assert h in page, h
-    assert "8aeb7317…" in page
+    assert "8aeb7317…" in page and "core_c_down</td><td>使用中" in page and "讀取失敗" not in page
     assert "2 勝" not in page and "1 勝 1 負" in page
     assert "core_c_down" in page and "5bp 條件擋下" in page
     assert ".700" in page and "-0.970" in page
@@ -151,3 +154,80 @@ def test_handle_resends_last_page_when_blocked(tmp_path, monkeypatch):
     d.meta.write_text(json.dumps({"at_ms": ms("2026-10-08 10:00:30"), "caption": "cap"}))
     d.handle(1, now_ms=ms("2026-10-08 10:02:05"))
     assert sent[-1].startswith("現在是下單時間") and "10:00" not in sent[-1] and "18:00" in sent[-1]
+
+
+def test_branch_section_shows_error_instead_of_vanishing(tmp_path, monkeypatch):
+    db = make_db(tmp_path)
+    monkeypatch.setattr(dash_data, "branch_stats", lambda *a: 1 / 0)
+    page, _ = dash_page.build_page(str(db), tmp_path, now_ms=LOOP_START + 1230000, coin_fetch=fake_fetch)
+    assert "全部 T6 子策略成交統計" in page and "讀取失敗" in page
+
+
+def test_daily_pnl_groups_by_taiwan_day(tmp_path):
+    db = make_db(tmp_path)
+    con = sqlite3.connect(db)
+    # 23:59 TW on the previous day vs 00:01 TW today (UTC 15:59 / 16:01)
+    day0 = LOOP_START - LOOP_START % 86400000 + 16 * 3600000 - 5 * 86400000  # 00:00 TW, away from loop:2 fills
+    con.execute("INSERT INTO prediction_settlements VALUES('sa','ca','loop:1',?,'UP','SETTLED','0.5')", (day0 - 60000,))
+    con.execute("INSERT INTO prediction_settlements VALUES('sb','cb','loop:1',?,'UP','SETTLED','-0.2')", (day0 + 60000,))
+    con.execute("INSERT INTO prediction_settlements VALUES('sc','cc','loop:x',?,'UP','SETTLED','9')", (day0 + 60000,))  # not LIVE
+    # same campaign settled twice: only the latest row counts
+    con.execute("INSERT INTO prediction_settlements VALUES('sd','cb','loop:1',?,'UP','SETTLED','-0.2')", (day0 + 120000,))
+    con.commit()
+    rows = {r["day"]: r for r in dash_data.daily_pnl(str(db), 30, day0 + 2 * 86400000)}
+    before = datetime.fromtimestamp((day0 - 60000) / 1000, dash_data.TW).strftime("%Y-%m-%d")
+    after = datetime.fromtimestamp((day0 + 60000) / 1000, dash_data.TW).strftime("%Y-%m-%d")
+    assert before != after
+    assert rows[before]["net"] == "0.5" and rows[before]["wins"] == 1
+    assert rows[after]["net"] == "-0.2" and rows[after]["losses"] == 1 and rows[after]["fills"] == 1
+    assert rows[after]["loops"] == {"loop:1": 1}
+    html = dash_page.daily_section(list(rows.values()))
+    assert "<svg" in html and "累計" in html
+
+
+def test_bnb_loop_reads_its_own_feature_db(tmp_path):
+    db = make_db(tmp_path)
+    con = sqlite3.connect(db)
+    start = LOOP_START + 3600000
+    con.execute("INSERT INTO prediction_loops VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("loop:3", 100, 1, "RUNNING", start, start + 300000, "0", 0, "LIVE", None, 0, "regime_target6_9a_v1"))
+    con.execute("INSERT INTO prediction_loop_market_bindings VALUES(?,?,?,?,?,?,?)",
+                ("loop:3", "BNBUSDT", "regime_target6_9a_v1", "bnb1234567890", "1", 100, start))
+    con.execute("INSERT INTO prediction_campaigns VALUES('b0','loop:3',?,'DONE',NULL,NULL)", (start,))
+    con.execute("INSERT INTO prediction_fills VALUES('fb0','b0','UP','BUY','1','0.60','0.60','0')")
+    con.execute("INSERT INTO prediction_settlements VALUES('sb0','b0','loop:3',?,'UP','SETTLED','0.38')", (start + 300000,))
+    con.commit()
+    fdir = Path(db).parent / "t67c-multimarket" / "BNBUSDT"
+    fdir.mkdir(parents=True)
+    feat = sqlite3.connect(fdir / "features.sqlite3")
+    feat.execute("CREATE TABLE t69a_decisions(start INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+    feat.execute("INSERT INTO t69a_decisions VALUES(?,?)", (start, json.dumps(
+        {"loop_id": "loop:3", "selected": True, "branch": "core_first_up", "side": "UP", "lower": "0.1", "cap": "0.75"})))
+    feat.execute("INSERT INTO t69a_decisions VALUES(?,?)", (start + 300000, json.dumps(
+        {"loop_id": "loop:3", "selected": False, "branch": None})))
+    feat.commit()
+    snap = dash_data.snapshot(str(db), start + 600000 + 30000)
+    assert snap["loop"]["symbol"] == "BNBUSDT" and "decisions_error" not in snap
+    assert [m["branch"] for m in snap["markets"]] == ["core_first_up", None]
+    page, cap = dash_page.build_page(str(db), tmp_path, now_ms=start + 630000, coin_fetch=fake_fetch)
+    assert "BNB" in cap and "讀不到" not in page and "core_first_up" in page
+    bs = dash_data.branch_stats(str(db), start + 630000)
+    assert bs["total"]["selected"] == 4  # 3 BTC + 1 BNB
+    assert bs["by_coin"]["BNB"]["total"]["selected"] == 1 and bs["by_coin"]["BTC"]["total"]["selected"] == 3
+    # per-coin sections plus a combined one
+    for h in ("各幣總覽（全歷史 LIVE）", "BTC 子策略成交統計", "BNB 子策略成交統計", "<b>綜合（BTC/BNB）</b>",
+              "<th>BTC</th><th>BNB</th>", "+0.380（1）"):
+        assert h in page, h
+    totals = {t["coin"]: t for t in dash_data.coin_totals(str(db))}
+    assert totals["BNB"]["fills"] == 1 and totals["BNB"]["net"] == "0.38" and totals["BTC"]["loops"] == 2
+    day = [r for r in dash_data.daily_pnl(str(db), 30, start + 630000) if r["coins"]]
+    assert {c for r in day for c in r["coins"]} == {"BTC", "BNB"}
+
+
+def test_missing_coin_decisions_is_visible(tmp_path):
+    db = make_db(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE prediction_loop_market_bindings SET symbol='ETHUSDT'")
+    con.commit()
+    page, _ = dash_page.build_page(str(db), tmp_path, now_ms=LOOP_START + 1230000, coin_fetch=fake_fetch)
+    assert "ETH 決策紀錄這次讀不到" in page
