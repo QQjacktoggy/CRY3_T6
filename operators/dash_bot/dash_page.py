@@ -200,27 +200,68 @@ def branch_section(bs):
     if "error" in bs:
         return (f"<h3>全部 T6 子策略成交統計</h3><p class=\"l\">這次讀取失敗：{H.escape(bs['error'])}。"
                 "其他區塊不受影響，下次按 /dash 會再試。</p>")
-    t = bs["total"]
     per = lambda net, n: signed(d(net) / n) if n else "—"  # noqa: E731
     rate = lambda a, b: f"{100 * a / b:.1f}%" if b else "—"  # noqa: E731
+
+    def summary(t, rows):
+        return (f"總計（{len({r['branch'] for r in rows})} 個子策略）選中 {t['selected']} / 成交 {t['filled']} / "
+                f"成交率 {rate(t['filled'], t['selected'])} / 勝 {t['wins']} 負 {t['losses']}"
+                f" / 勝率 {rate(t['wins'], t['wins'] + t['losses'])} / 淨損益 {signed(t['net'], 2)}U / 平均每1U {per(t['net'], t['filled'])}")
+
+    def table(rows):
+        out = ["<table><thead><tr><th>子策略</th><th>狀態</th><th>選中</th><th>成交</th><th>成交率</th><th>勝/負</th><th>勝率</th>"
+               "<th>損益 (U)</th><th>平均每1U</th></tr></thead><tbody>"]
+        for r in rows:
+            out.append(f"<tr><td>{H.escape(r['label'])}</td><td>{r['status']}</td><td>{r['selected']}</td><td>{r['filled']}</td>"
+                       f"<td>{rate(r['filled'], r['selected'])}</td><td>{r['wins']} / {r['losses']}</td>"
+                       f"<td>{rate(r['wins'], r['wins'] + r['losses'])}</td><td>{signed(r['net'], 2)}</td>"
+                       f"<td>{per(r['net'], r['filled'])}</td></tr>")
+        out.append("</tbody></table>")
+        return "".join(out)
+
+    coins = bs.get("by_coin") or {}
     out = ['<section class="t6-branch-fill-stats"><h3>全部 T6 子策略成交統計</h3>',
-           f"<p>全歷史 LIVE loop（{bs['live_loops']} 個）· BTC/ETH/BNB 決策 · 總計（{len({r['branch'] for r in bs['rows']})} 個子策略）"
-           f"選中 {t['selected']} / 成交 {t['filled']} / 成交率 {rate(t['filled'], t['selected'])} / 勝 {t['wins']} 負 {t['losses']}"
-           f" / 勝率 {rate(t['wins'], t['wins'] + t['losses'])} / 淨損益 {signed(t['net'], 2)}U / 平均每1U {per(t['net'], t['filled'])}"
-           f" · 資料 {md_hm(bs['read_at_ms'])} TW（最多每 30 分鐘重讀一次）</p>",
-           "<table><thead><tr><th>子策略</th><th>狀態</th><th>選中</th><th>成交</th><th>成交率</th><th>勝/負</th><th>勝率</th>"
-           "<th>損益 (U)</th><th>平均每1U</th></tr></thead><tbody>"]
-    for r in bs["rows"]:
-        out.append(f"<tr><td>{H.escape(r['label'])}</td><td>{r['status']}</td><td>{r['selected']}</td><td>{r['filled']}</td>"
-                   f"<td>{rate(r['filled'], r['selected'])}</td><td>{r['wins']} / {r['losses']}</td>"
-                   f"<td>{rate(r['wins'], r['wins'] + r['losses'])}</td><td>{signed(r['net'], 2)}</td>"
-                   f"<td>{per(r['net'], r['filled'])}</td></tr>")
-    out.append("</tbody></table>")
+           f"<p><b>綜合（{'/'.join(coins) or 'BTC'}）</b>全歷史 LIVE loop（{bs['live_loops']} 個）· {summary(bs['total'], bs['rows'])}"
+           f" · 資料 {md_hm(bs['read_at_ms'])} TW（最多每 30 分鐘重讀一次）</p>", table(bs["rows"])]
     vs = [f"{v['version']} {v['selected']} / {v['filled']} / {rate(v['filled'], v['selected'])} / {v['wins']}-{v['losses']}"
           f" / {rate(v['wins'], v['wins'] + v['losses'])} / {signed(v['net'], 2)} / {per(v['net'], v['filled'])}"
           for v in sorted(bs["versions"], key=lambda v: -v["selected"])]
     out.append("<p>分版本（選中 / 成交 / 成交率 / 勝負 / 勝率 / 損益 U / 平均每1U）：" + " · ".join(vs) + "</p>")
+    if len(coins) > 1:
+        for coin, c in coins.items():
+            out.append(f"<h3>{H.escape(coin)} 子策略成交統計</h3><p>{H.escape(coin)} LIVE loop {c['live_loops']} 個 · "
+                       f"{summary(c['total'], c['rows'])}</p>{table(c['rows'])}")
     out.append("</section>")
+    return "".join(out)
+
+
+COIN_COLORS = {"BTC": "#e8871e", "ETH": "#6d72f0", "BNB": "#1aa39a"}  # same colors as the 三幣 block
+CUM_COLOR = "#555"
+
+
+def coin_overview(totals, today):
+    """各幣總覽: one row per coin that ever ran LIVE, plus 綜合."""
+    if not totals:
+        return ""
+    td = (today or {}).get("coins") or {}
+    out = ["<h3>各幣總覽（全歷史 LIVE）</h3><table><tbody><tr><th>幣</th><th>loop 數</th><th>成交</th><th>勝/負</th>"
+           "<th>勝率</th><th>損益</th><th>平均每1U</th><th>今日</th></tr>"]
+    allr = {"coin": "綜合", "loops": 0, "fills": 0, "wins": 0, "losses": 0, "net": Decimal(0)}
+    for t in totals:
+        for k in ("loops", "fills", "wins", "losses"):
+            allr[k] += t[k]
+        allr["net"] += d(t["net"])
+    rows = totals + ([allr] if len(totals) > 1 else [])
+    for t in rows:
+        net = d(t["net"])
+        tday = (d(td[t["coin"]]["net"]) if t["coin"] in td else None) if t["coin"] != "綜合" else \
+            (d((today or {}).get("net") or 0) if today else None)
+        bold = ' style="font-weight:bold"' if t["coin"] == "綜合" else ""
+        out.append(f"<tr{bold}><td>{t['coin']}</td><td>{t['loops']}</td><td>{t['fills']}</td><td>{t['wins']}/{t['losses']}</td>"
+                   f"<td>{wr(t['wins'], t['losses'])}</td><td{cls(net)}>{signed(net)}</td>"
+                   f"<td>{signed(net / t['fills']) if t['fills'] else '—'}</td>"
+                   f"<td{cls(tday) if tday is not None else ''}>{signed(tday) if tday is not None else '—'}</td></tr>")
+    out.append("</tbody></table>")
     return "".join(out)
 
 
@@ -235,6 +276,13 @@ def daily_section(rows):
     for v in nets:
         run += v
         cum.append(run)
+    coins = [c for c in COIN_COLORS if any(c in (r.get("coins") or {}) for r in rows)]
+    coin_cum = {}
+    for c in coins:
+        run, coin_cum[c] = Decimal(0), []
+        for r in rows:
+            run += d(((r.get("coins") or {}).get(c) or {}).get("net") or 0)
+            coin_cum[c].append(run)
     x0, x1, y0, y1 = 34, 440, 12, 132
 
     def scale(vals):
@@ -243,7 +291,7 @@ def daily_section(rows):
         return lambda v: y1 - (y1 - y0) * float((v - lo) / (hi - lo)), lo, hi
 
     Y, lo, hi = scale(nets)      # bars: daily, left axis
-    C, clo, chi = scale(cum)     # line: running total, right axis
+    C, clo, chi = scale(cum + [v for c in coins if len(coins) > 1 for v in coin_cum[c]])  # lines, right axis
     n = len(rows)
     step = (x1 - x0) / n
     bw = max(2.0, step * 0.6)
@@ -262,7 +310,7 @@ def daily_section(rows):
         if any(abs(y - u) < 10 for u in used):
             continue
         used.append(y)
-        svg.append(f'<text x="{x1 + 4}" y="{y + 4:.0f}" font-size="10" fill="#6d72f0">{v:+.1f}</text>')
+        svg.append(f'<text x="{x1 + 4}" y="{y + 4:.0f}" font-size="10" fill="{CUM_COLOR}">{v:+.1f}</text>')
     last_label = -99
     for i, (r, v) in enumerate(zip(rows, nets)):
         cx = x0 + step * (i + 0.5)
@@ -274,17 +322,32 @@ def daily_section(rows):
             last_label = cx
             svg.append(f'<text x="{cx:.0f}" y="{y1 + 14}" font-size="8" text-anchor="middle">{r["day"][5:]}</text>')
     pts = " ".join(f"{x0 + step * (i + 0.5):.0f},{C(c):.0f}" for i, c in enumerate(cum))
-    svg.append(f'<polyline points="{pts}" fill="none" stroke="#6d72f0" stroke-width="2"/>')
+    svg.append(f'<polyline points="{pts}" fill="none" stroke="{CUM_COLOR}" stroke-width="2"/>')
+    if len(coins) > 1:
+        for c in coins:
+            cp = " ".join(f"{x0 + step * (i + 0.5):.0f},{C(v):.0f}" for i, v in enumerate(coin_cum[c]))
+            svg.append(f'<polyline points="{cp}" fill="none" stroke="{COIN_COLORS[c]}" stroke-width="1.5" stroke-dasharray="4 2"/>')
     svg.append(f'<text x="{(x0 + x1) / 2:.0f}" y="{y1 + 27}" font-size="9" text-anchor="middle">台灣時間（UTC+8），左軸每日 U，右軸累計 U</text></svg>')
+    split = len(coins) > 1
+    legend = "".join(f'、<span style="color:{COIN_COLORS[c]}">■ 虛線</span>是 {c} 累計' for c in coins) if split else ""
+    by = "、".join(f"{c} {signed(coin_cum[c][-1])}U" for c in coins)
     out = ["<h3>每日總損益（台灣時間）</h3>",
-           f"<p>最近 {n} 天合計 {signed(cum[-1])}U。柱狀是每日損益（綠賺紅賠，左軸），"
-           '<span style="color:#6d72f0">■ 線</span>是累計（右軸）。只算 LIVE loop 的已結算成交，含所有幣。</p>',
+           f"<p>最近 {n} 天合計 {signed(cum[-1])}U{'（' + by + '）' if split else ''}。柱狀是每日損益（綠賺紅賠，左軸），"
+           f'<span style="color:{CUM_COLOR}">■ 實線</span>是綜合累計{legend}（右軸）。只算 LIVE loop 的已結算成交，含所有幣。</p>',
            "".join(svg),
-           "<table><tbody><tr><th>日期</th><th>成交</th><th>勝/負</th><th>勝率</th><th>損益</th><th>累計</th></tr>"]
+           "<table><tbody><tr><th>日期</th><th>成交</th><th>勝/負</th><th>勝率</th><th>損益</th><th>累計</th>"
+           + "".join(f"<th>{c}</th>" for c in coins if split) + "</tr>"]
     for r, v, c in reversed(list(zip(rows, nets, cum))):
+        cells = ""
+        if split:
+            for k in coins:
+                x = (r.get("coins") or {}).get(k)
+                cells += (f"<td{cls(x['net'])}>{signed(x['net'])}（{x['fills']}）</td>" if x else "<td>—</td>")
         out.append(f"<tr><td>{r['day'][5:]}</td><td>{r['fills']}</td><td>{r['wins']}/{r['losses']}</td>"
-                   f"<td>{wr(r['wins'], r['losses'])}</td><td{cls(v)}>{signed(v)}</td><td{cls(c)}>{signed(c)}</td></tr>")
+                   f"<td>{wr(r['wins'], r['losses'])}</td><td{cls(v)}>{signed(v)}</td><td{cls(c)}>{signed(c)}</td>{cells}</tr>")
     out.append("</tbody></table>")
+    if split:
+        out.append("<p>各幣欄位是當天該幣的損益（括號是成交筆數）。</p>")
     today = rows[-1]
     if today.get("loops"):
         parts = "、".join(f"{H.escape(k)} {v} 筆" for k, v in sorted(today["loops"].items()))
@@ -366,7 +429,11 @@ def build_page(db, cache_dir: Path, now_ms=None, coin_fetch=None):
         daily_html = daily_section(daily)
     except Exception as exc:  # never drop a section silently
         daily, daily_html = [], f'<h3>每日總損益（台灣時間）</h3><p class="l">這次讀取失敗：{H.escape(type(exc).__name__)}。</p>'
-    parts = [STYLE, head, rev, history_table(hist), daily_html]
+    try:
+        overview = coin_overview(dash_data.coin_totals(db), daily[-1] if daily else None)
+    except Exception as exc:  # never drop a section silently
+        overview = f'<h3>各幣總覽（全歷史 LIVE）</h3><p class="l">這次讀取失敗：{H.escape(type(exc).__name__)}。</p>'
+    parts = [STYLE, head, rev, overview, history_table(hist), daily_html]
     if loop:
         parts.append(fill_stats(markets))
     parts.append(branch_section(bs))

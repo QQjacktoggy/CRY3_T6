@@ -213,6 +213,15 @@ def test_bnb_loop_reads_its_own_feature_db(tmp_path):
     assert "BNB" in cap and "讀不到" not in page and "core_first_up" in page
     bs = dash_data.branch_stats(str(db), start + 630000)
     assert bs["total"]["selected"] == 4  # 3 BTC + 1 BNB
+    assert bs["by_coin"]["BNB"]["total"]["selected"] == 1 and bs["by_coin"]["BTC"]["total"]["selected"] == 3
+    # per-coin sections plus a combined one
+    for h in ("各幣總覽（全歷史 LIVE）", "BTC 子策略成交統計", "BNB 子策略成交統計", "<b>綜合（BTC/BNB）</b>",
+              "<th>BTC</th><th>BNB</th>", "+0.380（1）"):
+        assert h in page, h
+    totals = {t["coin"]: t for t in dash_data.coin_totals(str(db))}
+    assert totals["BNB"]["fills"] == 1 and totals["BNB"]["net"] == "0.38" and totals["BTC"]["loops"] == 2
+    day = [r for r in dash_data.daily_pnl(str(db), 30, start + 630000) if r["coins"]]
+    assert {c for r in day for c in r["coins"]} == {"BTC", "BNB"}
 
 
 def test_missing_coin_decisions_is_visible(tmp_path):

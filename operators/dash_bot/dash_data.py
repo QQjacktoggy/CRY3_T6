@@ -40,6 +40,20 @@ def feature_db(db: str, symbol: str | None = None) -> str:
     return str(parent / "t67c-multimarket" / sym / "features.sqlite3")
 
 
+def coin_name(sym) -> str:
+    return str(sym or "BTCUSDT").upper().replace("USDT", "")
+
+
+def _live_coins(con) -> dict:
+    """LIVE loop id -> coin (BTC/ETH/BNB). Loops from before market bindings were BTC."""
+    live = {r[0]: "BTC" for r in con.execute("SELECT loop_id FROM prediction_loops WHERE mode='LIVE'")}
+    if _has_table(con, "prediction_loop_market_bindings"):
+        for lid, sym in con.execute("SELECT loop_id, symbol FROM prediction_loop_market_bindings"):
+            if lid in live:
+                live[lid] = coin_name(sym)
+    return live
+
+
 def decision_table(profile) -> str:
     profile = str(profile or "")
     return DECISION_TABLES.get(profile, "t69a_decisions" if profile.endswith("9a_v1") else "t69_decisions")
@@ -265,7 +279,7 @@ def branch_stats(db: str = DEFAULT_DB, now_ms: int | None = None) -> dict:
     now_ms = now_ms if now_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
     con = ro(db)
     try:
-        loops = {r[0] for r in con.execute("SELECT loop_id FROM prediction_loops WHERE mode='LIVE'")}
+        loops = _live_coins(con)
         camps = defaultdict(list)
         for c in con.execute("SELECT campaign_id, loop_id, start_time_ms FROM prediction_campaigns"):
             if c[1] in loops:
@@ -318,6 +332,7 @@ def branch_stats(db: str = DEFAULT_DB, now_ms: int | None = None) -> dict:
         return {"selected": 0, "filled": 0, "in_progress": 0, "wins": 0, "losses": 0, "net": Decimal(0)}
 
     acc = defaultdict(zero)
+    by_coin = defaultdict(lambda: defaultdict(zero))
     versions = defaultdict(zero)
     for (lid, start), (tbl, selected, branch) in groups.items():
         if not selected or branch in HIDDEN:
@@ -331,7 +346,7 @@ def branch_stats(db: str = DEFAULT_DB, now_ms: int | None = None) -> dict:
         for i in ids:
             if i in settle:
                 net = (net or Decimal(0)) + settle[i]
-        for a in (acc[(branch, label)], versions[tbl.replace("_decisions", "")]):
+        for a in (acc[(branch, label)], by_coin[loops[lid]][(branch, label)], versions[tbl.replace("_decisions", "")]):
             a["selected"] += 1
             if is_filled:
                 a["filled"] += 1
@@ -346,17 +361,24 @@ def branch_stats(db: str = DEFAULT_DB, now_ms: int | None = None) -> dict:
         b, label = key
         return (BRANCH_ORDER.index(b) if b in BRANCH_ORDER else 99, label)
 
-    rows = []
-    for key in sorted(acc, key=order):
-        a = acc[key]
-        rows.append({"branch": key[0], "label": key[1],
-                     "status": "使用中" if key[0] in ACTIVE else "未確認", **a, "net": str(a["net"])})
-    total = zero()
-    for a in acc.values():
-        for k in total:
-            total[k] += a[k]
-    return {"read_at_ms": now_ms, "live_loops": len(loops), "rows": rows,
-            "total": {**total, "net": str(total["net"])},
+    def table(acc):
+        rows = []
+        for key in sorted(acc, key=order):
+            a = acc[key]
+            rows.append({"branch": key[0], "label": key[1],
+                         "status": "使用中" if key[0] in ACTIVE else "未確認", **a, "net": str(a["net"])})
+        total = zero()
+        for a in acc.values():
+            for k in total:
+                total[k] += a[k]
+        return rows, {**total, "net": str(total["net"])}
+
+    rows, total = table(acc)
+    coins = {}
+    for coin in sorted(by_coin, key=_coin_order):
+        crows, ctotal = table(by_coin[coin])
+        coins[coin] = {"rows": crows, "total": ctotal, "live_loops": sum(1 for c in loops.values() if c == coin)}
+    return {"read_at_ms": now_ms, "live_loops": len(loops), "rows": rows, "total": total, "by_coin": coins,
             "versions": [{"version": k, **v, "net": str(v["net"])} for k, v in sorted(versions.items())],
             "decision_tables": dict(tables)}
 
@@ -373,7 +395,7 @@ def daily_pnl(db: str = DEFAULT_DB, days: int = 30, now_ms: int | None = None) -
     first = today - timedelta(days=days - 1)
     con = ro(db)
     try:
-        live = {r[0] for r in con.execute("SELECT loop_id FROM prediction_loops WHERE mode='LIVE'")}
+        live = _live_coins(con)
         # One row per campaign (the latest), same rule as the loop totals in 最近兩輪.
         last = {}
         for r in con.execute("SELECT campaign_id, loop_id, net_pnl, settled_at_ms FROM prediction_settlements "
@@ -387,17 +409,53 @@ def daily_pnl(db: str = DEFAULT_DB, days: int = 30, now_ms: int | None = None) -
             if p == 0:
                 continue
             day = datetime.fromtimestamp(at / 1000, TW).strftime("%Y-%m-%d")
-            a = acc.setdefault(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0), "loops": Counter()})
-            a["fills"] += 1
-            a["wins"] += p > 0
-            a["losses"] += p < 0
-            a["net"] += p
+            a = acc.setdefault(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0), "loops": Counter(),
+                                     "coins": {}})
+            c = a["coins"].setdefault(live[lid], {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0)})
+            for x in (a, c):
+                x["fills"] += 1
+                x["wins"] += p > 0
+                x["losses"] += p < 0
+                x["net"] += p
             a["loops"][lid] += 1
     finally:
         con.close()
     out = []
     for i in range(days):
         day = (first + timedelta(days=i)).strftime("%Y-%m-%d")
-        a = acc.get(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0), "loops": Counter()})
-        out.append({"day": day, **a, "net": str(a["net"]), "loops": dict(a["loops"])})
+        a = acc.get(day, {"fills": 0, "wins": 0, "losses": 0, "net": Decimal(0), "loops": Counter(), "coins": {}})
+        coins = {k: {**v, "net": str(v["net"])} for k, v in sorted(a["coins"].items(), key=lambda kv: _coin_order(kv[0]))}
+        out.append({"day": day, **a, "net": str(a["net"]), "loops": dict(a["loops"]), "coins": coins})
     return out
+
+
+def _coin_order(coin):
+    return ("BTC", "ETH", "BNB").index(coin) if coin in ("BTC", "ETH", "BNB") else 9
+
+
+def coin_totals(db: str = DEFAULT_DB) -> list[dict]:
+    """All-time LIVE results per coin, each campaign counted once (its latest settlement)."""
+    con = ro(db)
+    try:
+        live = _live_coins(con)
+        last = {}
+        for r in con.execute("SELECT campaign_id, loop_id, net_pnl FROM prediction_settlements "
+                             "WHERE status='SETTLED' ORDER BY settled_at_ms"):
+            if r[1] in live:
+                last[r[0]] = r
+    finally:
+        con.close()
+    acc = {}
+    for coin in live.values():
+        acc.setdefault(coin, {"coin": coin, "loops": 0, "fills": 0, "wins": 0, "losses": 0, "net": Decimal(0)})
+        acc[coin]["loops"] += 1
+    for _, lid, net in last.values():
+        p = Decimal(str(net or 0))
+        if p == 0:
+            continue
+        a = acc[live[lid]]
+        a["fills"] += 1
+        a["wins"] += p > 0
+        a["losses"] += p < 0
+        a["net"] += p
+    return [{**a, "net": str(a["net"])} for a in sorted(acc.values(), key=lambda a: _coin_order(a["coin"]))]
