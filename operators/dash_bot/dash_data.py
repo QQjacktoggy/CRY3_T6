@@ -25,8 +25,24 @@ KEYS = ("prediction_heartbeat", "regime_target6_risk_v1", "prediction_risk_state
         "prediction_hard_stop_latched")
 
 
-def feature_db(db: str) -> str:
-    return str(Path(db).resolve().parent / "regime-target6/features.sqlite3")
+SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
+# Decision table per strategy profile (same tables the bridges write).
+DECISION_TABLES = {"regime_target6_9a_v1": "t69a_decisions", "regime_target6_9_v1": "t69_decisions",
+                   "regime_target6_7c_v1": "t67c_decisions"}
+
+
+def feature_db(db: str, symbol: str | None = None) -> str:
+    """Same layout as gridbot.prediction.loop_market.data_paths: BTC keeps the legacy path."""
+    sym = str(symbol or "BTCUSDT").upper()
+    parent = Path(db).resolve().parent
+    if sym == "BTCUSDT":
+        return str(parent / "regime-target6/features.sqlite3")
+    return str(parent / "t67c-multimarket" / sym / "features.sqlite3")
+
+
+def decision_table(profile) -> str:
+    profile = str(profile or "")
+    return DECISION_TABLES.get(profile, "t69a_decisions" if profile.endswith("9a_v1") else "t69_decisions")
 
 
 def ro(path: str) -> sqlite3.Connection:
@@ -122,6 +138,7 @@ def snapshot(db: str = DEFAULT_DB, now_ms: int | None = None) -> dict:
                 "new_entries_stopped", "hard_stop_latched", "created_at_ms", "updated_at_ms")}
             out["loop"].update(pnl)
             out["loop"].update(_binding(con, lid))
+            loop["symbol"] = out["loop"].get("symbol")
             out["markets"] = _markets(con, db, loop, settles, out)
         cfg = {}
         for k in KEYS:
@@ -158,10 +175,12 @@ def _markets(con, db, loop, settles, out):
 
     decisions = {}
     try:
-        fcon = ro(feature_db(db))
+        fpath = feature_db(db, loop.get("symbol"))
+        out["decisions_db"] = fpath
+        fcon = ro(fpath)
         try:
             lo = int(loop["created_at_ms"]) - MARKET_MS
-            table = "t69a_decisions" if str(loop.get("strategy_profile")).endswith("9a_v1") else "t69_decisions"
+            table = decision_table(loop.get("strategy_profile"))
             out["decisions_table"] = table
             if not _has_table(fcon, table):
                 raise LookupError(table)
@@ -263,7 +282,7 @@ def branch_stats(db: str = DEFAULT_DB, now_ms: int | None = None) -> dict:
     # (loop, start) -> (table, selected, branch); a selected row wins over unselected ones.
     groups = {}
     tables = Counter()
-    for path in (db, feature_db(db)):
+    for path in (db, *(feature_db(db, sym) for sym in SYMBOLS)):
         try:
             dcon = ro(path)
         except Exception:

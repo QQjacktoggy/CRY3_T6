@@ -183,3 +183,42 @@ def test_daily_pnl_groups_by_taiwan_day(tmp_path):
     assert rows[after]["loops"] == {"loop:1": 1}
     html = dash_page.daily_section(list(rows.values()))
     assert "<svg" in html and "累計" in html
+
+
+def test_bnb_loop_reads_its_own_feature_db(tmp_path):
+    db = make_db(tmp_path)
+    con = sqlite3.connect(db)
+    start = LOOP_START + 3600000
+    con.execute("INSERT INTO prediction_loops VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("loop:3", 100, 1, "RUNNING", start, start + 300000, "0", 0, "LIVE", None, 0, "regime_target6_9a_v1"))
+    con.execute("INSERT INTO prediction_loop_market_bindings VALUES(?,?,?,?,?,?,?)",
+                ("loop:3", "BNBUSDT", "regime_target6_9a_v1", "bnb1234567890", "1", 100, start))
+    con.execute("INSERT INTO prediction_campaigns VALUES('b0','loop:3',?,'DONE',NULL,NULL)", (start,))
+    con.execute("INSERT INTO prediction_fills VALUES('fb0','b0','UP','BUY','1','0.60','0.60','0')")
+    con.execute("INSERT INTO prediction_settlements VALUES('sb0','b0','loop:3',?,'UP','SETTLED','0.38')", (start + 300000,))
+    con.commit()
+    fdir = Path(db).parent / "t67c-multimarket" / "BNBUSDT"
+    fdir.mkdir(parents=True)
+    feat = sqlite3.connect(fdir / "features.sqlite3")
+    feat.execute("CREATE TABLE t69a_decisions(start INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+    feat.execute("INSERT INTO t69a_decisions VALUES(?,?)", (start, json.dumps(
+        {"loop_id": "loop:3", "selected": True, "branch": "core_first_up", "side": "UP", "lower": "0.1", "cap": "0.75"})))
+    feat.execute("INSERT INTO t69a_decisions VALUES(?,?)", (start + 300000, json.dumps(
+        {"loop_id": "loop:3", "selected": False, "branch": None})))
+    feat.commit()
+    snap = dash_data.snapshot(str(db), start + 600000 + 30000)
+    assert snap["loop"]["symbol"] == "BNBUSDT" and "decisions_error" not in snap
+    assert [m["branch"] for m in snap["markets"]] == ["core_first_up", None]
+    page, cap = dash_page.build_page(str(db), tmp_path, now_ms=start + 630000, coin_fetch=fake_fetch)
+    assert "BNB" in cap and "讀不到" not in page and "core_first_up" in page
+    bs = dash_data.branch_stats(str(db), start + 630000)
+    assert bs["total"]["selected"] == 4  # 3 BTC + 1 BNB
+
+
+def test_missing_coin_decisions_is_visible(tmp_path):
+    db = make_db(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE prediction_loop_market_bindings SET symbol='ETHUSDT'")
+    con.commit()
+    page, _ = dash_page.build_page(str(db), tmp_path, now_ms=LOOP_START + 1230000, coin_fetch=fake_fetch)
+    assert "ETH 決策紀錄這次讀不到" in page

@@ -204,7 +204,7 @@ def branch_section(bs):
     per = lambda net, n: signed(d(net) / n) if n else "—"  # noqa: E731
     rate = lambda a, b: f"{100 * a / b:.1f}%" if b else "—"  # noqa: E731
     out = ['<section class="t6-branch-fill-stats"><h3>全部 T6 子策略成交統計</h3>',
-           f"<p>全歷史 LIVE loop（{bs['live_loops']} 個）· BTC 決策 · 總計（{len({r['branch'] for r in bs['rows']})} 個子策略）"
+           f"<p>全歷史 LIVE loop（{bs['live_loops']} 個）· BTC/ETH/BNB 決策 · 總計（{len({r['branch'] for r in bs['rows']})} 個子策略）"
            f"選中 {t['selected']} / 成交 {t['filled']} / 成交率 {rate(t['filled'], t['selected'])} / 勝 {t['wins']} 負 {t['losses']}"
            f" / 勝率 {rate(t['wins'], t['wins'] + t['losses'])} / 淨損益 {signed(t['net'], 2)}U / 平均每1U {per(t['net'], t['filled'])}"
            f" · 資料 {md_hm(bs['read_at_ms'])} TW（最多每 30 分鐘重讀一次）</p>",
@@ -220,7 +220,7 @@ def branch_section(bs):
           f" / {rate(v['wins'], v['wins'] + v['losses'])} / {signed(v['net'], 2)} / {per(v['net'], v['filled'])}"
           for v in sorted(bs["versions"], key=lambda v: -v["selected"])]
     out.append("<p>分版本（選中 / 成交 / 成交率 / 勝負 / 勝率 / 損益 U / 平均每1U）：" + " · ".join(vs) + "</p>")
-    out.append("<p>限制：只含 BTC 決策；ETH/BNB 活動無法對應子策略，不列入。</p></section>")
+    out.append("</section>")
     return "".join(out)
 
 
@@ -358,7 +358,7 @@ def build_page(db, cache_dir: Path, now_ms=None, coin_fetch=None):
                                            lambda: dash_coins.build(shade, now_ms, coin_fetch), now_s)
     except Exception:
         coin_html, rev8h, stale = "<h3>三幣反轉比較</h3><p>幣安資料暫時取不到。</p>", {}, False
-    rev = (f"<p>BTC 反轉：最近 8 小時 BTC {rev8h.get('BTC', '—')}%、ETH {rev8h.get('ETH', '—')}%、"
+    rev = (f"<p>反轉比例：最近 8 小時 BTC {rev8h.get('BTC', '—')}%、ETH {rev8h.get('ETH', '—')}%、"
            f"BNB {rev8h.get('BNB', '—')}%（幣安）。{'（幣安這次沒讀到，顯示上次資料）' if stale else ''}</p>")
     markets = snap.get("markets") or []
     try:
@@ -374,6 +374,9 @@ def build_page(db, cache_dir: Path, now_ms=None, coin_fetch=None):
     if loop:
         mi = len(parts)
         parts.append(market_table(markets))
+        if snap.get("decisions_error"):  # say so instead of quietly showing only filled markets
+            parts.append(f'<p class="l">{H.escape(coin_of(loop))} 決策紀錄這次讀不到（{H.escape(snap["decisions_error"])}），'
+                         "上表只列有下單的場次。</p>")
     parts.append(coin_html)
     body = "".join(parts)
     if mi is not None and len(body.encode()) > 60000:
